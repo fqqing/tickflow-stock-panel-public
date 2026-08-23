@@ -269,14 +269,12 @@ docker run -d --name tickflow \
 # 打开 http://localhost:3018
 ```
 
-需要配置 TickFlow Key / AI 接口时追加 `--env-file`（也可在面板**设置**页填）：
+上面的命令不带任何配置即可启动（等同 **None 模式**，历史日 K 免费可用）。需要填 TickFlow Key / AI 接口时，两种方式任选：
 
-```bash
-curl -O https://raw.githubusercontent.com/hzy1522/tickflow-stock-panel/main/.env.example
-mv .env.example .env    # 按需填写后加上 --env-file .env 重新 run
-```
+- **推荐**：直接在面板的 **设置** 页填写并保存，无需重启容器
+- 或准备一个 `.env` 后重新 `run`，在原命令上追加 `--env-file .env`（配置项说明见 [docs/configuration.md](./docs/configuration.md)）
 
-> ⚠️ **`-e DATA_DIR=/app/data` 必须显式指定。** `.env.example` 里的 `DATA_DIR=./data` 是开发模式用的相对路径，原样传入容器会让数据写到未挂载的目录，重建容器时**丢数据**。
+> ⚠️ **关于 `-e DATA_DIR=/app/data`**：镜像本身已内置该默认值，裸跑时可省略。但一旦你追加 `--env-file .env`，`.env` 里开发模式用的 `DATA_DIR=./data` 会覆盖镜像默认值，导致数据写进容器内未挂载的目录、**重建容器即丢失**。`-e` 的优先级高于 `--env-file`，因此保留这一行可以一劳永逸地防住这个坑（`docker-compose.yml` 里做的是同一件事）。
 >
 > 想锁定版本可用 commit sha 标签替代 `latest`，例如 `ghcr.io/hzy1522/tickflow-stock-panel:212afd8`。
 >
