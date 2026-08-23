@@ -21,8 +21,22 @@ def test_panel_cache_key_isolates_asset_type():
     k_stock = PanelCache._make_key(*args, "stock")
     k_etf = PanelCache._make_key(*args, "etf")
     assert k_stock != k_etf
-    assert k_etf.startswith("etf:")
-    assert k_stock.startswith("stock:")
+    # key 形如 "{market}:{asset_type}:..." —— market 默认 cn。
+    assert k_etf.startswith("cn:etf:")
+    assert k_stock.startswith("cn:stock:")
+
+
+def test_panel_cache_key_isolates_market():
+    """同 asset_type 不同 market 必须是不同 key, 否则港美股会串到 A 股面板。"""
+    args = (["00700.HK"], date(2026, 1, 1), date(2026, 1, 2), None)
+    k_cn = PanelCache._make_key(*args, "stock", "cn")
+    k_hk = PanelCache._make_key(*args, "stock", "hk")
+    k_us = PanelCache._make_key(*args, "stock", "us")
+    assert len({k_cn, k_hk, k_us}) == 3, "三个市场的缓存 key 必须互不相同"
+    assert k_hk.startswith("hk:stock:")
+    assert k_us.startswith("us:stock:")
+    # market 省略时回落到 cn, 保证 A 股既有行为不变。
+    assert PanelCache._make_key(*args, "stock") == k_cn
 
 
 def test_engine_loads_from_etf_dir(monkeypatch, tmp_path):
@@ -87,7 +101,7 @@ def test_panel_cache_single_flight_computes_once():
     barrier = threading.Barrier(8)
     df = pl.DataFrame({"symbol": ["510300"]})
 
-    def slow_compute(symbols, start, end, columns, asset_type):
+    def slow_compute(symbols, start, end, columns, asset_type, market):
         calls.append(1)
         time.sleep(0.05)  # 拉长窗口, 逼出并发 miss
         return df
@@ -120,7 +134,7 @@ def test_panel_cache_single_flight_error_propagates_and_retries():
     barrier = threading.Barrier(4)
     boom = RuntimeError("scan failed")
 
-    def failing_compute(symbols, start, end, columns, asset_type):
+    def failing_compute(symbols, start, end, columns, asset_type, market):
         time.sleep(0.03)
         raise boom
 

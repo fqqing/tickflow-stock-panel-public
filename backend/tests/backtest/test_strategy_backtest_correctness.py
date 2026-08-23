@@ -63,7 +63,8 @@ class _EngineStub:
         self.load_asset_type = asset_type
         return self.panel
 
-    def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock") -> pl.DataFrame:
+    def load_panel_for_backtest(self, symbols, start, end, feature_plan, asset_type="stock", market="cn") -> pl.DataFrame:
+        self.load_market = market
         return self.load_panel(symbols, start, end, columns=sorted(feature_plan.base_columns), asset_type=asset_type)
 
     def load_market_data_matrix_for_backtest(
@@ -232,7 +233,7 @@ def test_full_mode_executes_every_candidate_with_strategy_rules():
     ]).sort(["symbol", "date"])
 
     engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
-    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock": panel  # type: ignore[method-assign]
+    engine.load_panel_for_backtest = lambda symbols, s, e, plan, asset_type="stock", market="cn": panel  # type: ignore[method-assign]
     strategy = _strategy(
         filter_fn=lambda df, params: pl.col("date") == start,
         max_hold_days=1,

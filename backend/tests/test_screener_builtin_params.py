@@ -11,9 +11,10 @@ from app.services.screener import ScreenerResult
 class _CapturingScreenerService:
     calls: ClassVar[list[dict]] = []
 
-    def __init__(self, repo, asset_type="stock"):
+    def __init__(self, repo, asset_type="stock", market="cn"):
         self.repo = repo
         self.asset_type = asset_type
+        self.market = market
 
     def latest_date(self):
         return date(2026, 7, 15)
