@@ -322,14 +322,16 @@ function KeyStep({ onNext, onSkip, onBack }: { onNext: () => void; onSkip: () =>
       </div>
       <p className="mt-2.5 text-sm text-secondary leading-relaxed">
         本项目基于 TickFlow 这款稳定的数据源为基座进行开发,正在适配其他第三方数据源。
-        如果有任何建议或意见,欢迎发送邮件至{' '}
+        如果有任何建议或意见,欢迎前往{' '}
         <a
-          href="mailto:415333856@qq.com"
+          href="https://github.com/shy3130/tickflow-stock-panel/issues"
+          target="_blank"
+          rel="noreferrer"
           className="text-accent hover:underline font-medium"
         >
-          415333856@qq.com
+          上游项目仓库
         </a>
-        。
+        {' '}反馈。
       </p>
 
       {/* 档位对比说明 —— None 档 vs Free 档 */}
