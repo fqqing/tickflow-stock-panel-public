@@ -17,7 +17,7 @@ export const QK = {
   dataSources:    ['data-sources'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
-  overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
+  overviewMarket: (asOf?: string, market?: string) => ['overview-market', asOf ?? 'latest', market ?? 'cn'] as const,
   indexQuotes:    ['index-quotes'] as const,
   indexList:      ['index-list'] as const,
 

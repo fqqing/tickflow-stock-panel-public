@@ -34,11 +34,18 @@ class ScreenerResult:
 
 
 class ScreenerService:
-    def __init__(self, repo: KlineRepository, asset_type: str = "stock") -> None:
+    def __init__(self, repo: KlineRepository, asset_type: str = "stock", market: str = "cn") -> None:
         self.repo = repo
         self.asset_type = asset_type
+        self.market = market
         from app.tickflow.repository import enriched_dirname
-        self._enriched_dirname = enriched_dirname(asset_type)
+        self._enriched_dirname = enriched_dirname(asset_type, market)
+
+    def latest_date(self) -> date | None:
+        """最新 enriched 日期。港美股读市场独立目录。"""
+        if self.market in ("hk", "us"):
+            return self.repo.latest_enriched_date_market(self.market)
+        return self.repo.enriched_latest_date()
 
     @staticmethod
     def clear_history_cache() -> None:
@@ -53,7 +60,10 @@ class ScreenerService:
 
         enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
         对于最新日, 优先使用内存缓存 (已包含完整指标)。
+        港美股（self.market 非 cn）走独立目录 + 独立缓存。
         """
+        if self.market in ("hk", "us"):
+            return self._load_enriched_for_date_market(target_date)
         # 优先使用 repo 最新日缓存
         cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
         if cache is not None and not cache.is_empty() and cache_date == target_date:
@@ -101,6 +111,26 @@ class ScreenerService:
         # 即时计算指标: 需要加载历史窗口作 warmup
         df_full = self._compute_enriched_full(df, target_date)
         return df_full
+
+    def _load_enriched_for_date_market(self, target_date: date) -> pl.DataFrame:
+        """港美股版本的 _load_enriched_for_date：走市场独立目录。"""
+        # 最新日：repo.get_enriched_latest_market 已含历史窗口即时计算
+        cache, cache_date = self.repo.get_enriched_latest_market(self.market)
+        if cache is not None and not cache.is_empty() and cache_date == target_date:
+            return cache
+        # 历史日期：读分区 + 即时计算（含 warmup）
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        target_parquet = enriched_dir / f"date={target_date.isoformat()}" / "part.parquet"
+        if not target_parquet.exists():
+            return pl.DataFrame()
+        try:
+            df = pl.read_parquet(target_parquet)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("load_enriched_for_date(%s) failed: %s", self.market, e)
+            return pl.DataFrame()
+        if df.is_empty():
+            return df
+        return self._compute_enriched_full(df, target_date)
 
     def load_prior_consecutive(self, as_of: date, consec_col: str) -> pl.DataFrame:
         """窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (谓词下推到单日 parquet)。
@@ -179,9 +209,13 @@ class ScreenerService:
         df_full = compute_indicators(df_hist)
         df_full = compute_signals(df_full)
 
-        # 计算涨跌停信号 (需要 instruments; 涨停为股票专有, ETF 跳过)
-        instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+        # 计算涨跌停信号 (需要 instruments; 涨停为 A 股股票专有, ETF/港美股跳过)
+        instruments = self.repo.get_instruments_asset(self.asset_type, self.market)
+        if (
+            self.asset_type == "stock"
+            and self.market in ("cn",)
+            and instruments is not None and not instruments.is_empty()
+        ):
             df_full = compute_limit_signals(
                 df_full,
                 instruments,
@@ -205,9 +239,9 @@ class ScreenerService:
         优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
         缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
         """
-        # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
+        # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 A 股 stock)
         t0 = time.perf_counter()
-        if self.asset_type == "stock":
+        if self.asset_type == "stock" and self.market in ("cn",):
             cached = self.repo.get_enriched_history(target_date, lookback_days)
             if cached is not None and not cached.is_empty():
                 # JOIN instruments (repo 缓存不含 name 等列)
@@ -405,6 +439,9 @@ class ScreenerService:
         )
 
     def latest_date(self) -> date | None:
+        """最新 enriched 日期。港美股读市场独立目录。"""
+        if self.market in ("hk", "us"):
+            return self.repo.latest_enriched_date_market(self.market)
         if self.asset_type != "stock":
             _, d = self.repo.get_enriched_latest_asset(self.asset_type)
             return d

@@ -928,14 +928,22 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    market: str = "cn",
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
     输入: symbol, date, open, high, low, close, volume, amount, raw_close
+
+    market: cn 走完整链路（含涨跌停/连板信号）；hk/us 无涨跌停概念，
+    连板列置 0 保持列契约一致（多市场扩展）。
     """
     df = compute_indicators(df)
     df = compute_signals(df)
-    if instruments is not None and not instruments.is_empty():
+    if market in ("hk", "us"):
+        for col in ("consecutive_limit_ups", "consecutive_limit_downs"):
+            if col not in df.columns:
+                df = df.with_columns(pl.lit(0).cast(pl.UInt32).alias(col))
+    elif instruments is not None and not instruments.is_empty():
         df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
 
     # 清理 NaN / Inf
@@ -1317,6 +1325,59 @@ def run_pipeline(data_dir: Path | None = None,
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",
                 mode, t_done - t0, written, adj_label)
+    return written
+
+
+def run_pipeline_market(market: str, data_dir: Path | None = None,
+                        symbols: list[str] | None = None) -> int:
+    """港美股盘后管道：读 kline_daily_{market} → 计算 enriched → 写 kline_daily_enriched_{market}。
+
+    港美股差异:
+      - 日K直接以 forward（前复权）价入库，无独立除权因子表，compute_enriched 不传 factors。
+      - 无涨跌停/连板概念，compute_enriched 不传 instruments（连板列缺省，由读取侧补 0）。
+      - 换手率无 float_shares 口径时置空（依赖维表股本，暂不计算）。
+    返回写入的行数。
+    """
+    import time as _t
+    from datetime import date as _date
+
+    if market in ("cn",):
+        raise ValueError("run_pipeline_market 仅用于港美股 (hk/us)；A 股走 run_pipeline")
+
+    t0 = _t.perf_counter()
+    d = Path(data_dir or settings.data_dir)
+    daily_dir = d / f"kline_daily_{market}"
+    enriched_base = d / f"kline_daily_enriched_{market}"
+
+    if not daily_dir.exists() or not any(daily_dir.rglob("*.parquet")):
+        logger.info("无 %s 日K数据, 跳过管道", market)
+        return 0
+
+    _cast = pl.ScanCastOptions(integer_cast="allow-float")
+    lf = pl.scan_parquet((daily_dir / "**" / "*.parquet").as_posix(), hive_partitioning=True, cast_options=_cast)
+    if symbols:
+        lf = lf.filter(pl.col("symbol").is_in(symbols))
+    raw = lf.sort(["symbol", "date"]).collect(streaming=True)
+    if raw.is_empty():
+        return 0
+
+    # 港美股: 前复权价即入库价 → raw 价 = 复权价（无独立除权因子）
+    enriched = compute_enriched(raw)
+    # 补连板列（0）：保持存储列契约与 matrix 回测依赖一致（港美股无连板概念）
+    for _col in ("consecutive_limit_ups", "consecutive_limit_downs"):
+        if _col not in enriched.columns:
+            enriched = enriched.with_columns(pl.lit(0).cast(pl.UInt32).alias(_col))
+    written = 0
+    for date_df in enriched.partition_by("date"):
+        dt = date_df["date"][0]
+        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+        out = enriched_base / f"date={ds}" / "part.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        date_df = _select_storage_cols(date_df).sort(["symbol"])
+        date_df.write_parquet(out)
+        written += date_df.height
+
+    logger.info("%s enriched 完成: %.2fs, %d 行 → %s", market, _t.perf_counter() - t0, written, enriched_base)
     return written
 
 

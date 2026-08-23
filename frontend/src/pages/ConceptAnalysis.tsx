@@ -20,6 +20,7 @@ import { RpsRotationDialog } from '@/components/RpsRotationDialog'
 import { api, type MarketSnapshotRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { useMarket } from '@/lib/market'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { resolveDimension, type DimensionGroup, type StockRow } from '@/lib/analysis-adapter'
@@ -234,6 +235,11 @@ function statSort(mode: SortMode) {
 }
 
 export function ConceptAnalysis() {
+  // 多市场扩展：概念分析基于同花顺概念表（A 股专属），港美股暂不支持
+  const { market } = useMarket()
+  if (market !== 'cn') {
+    return <MarketBoardNotSupported market={market} pageName="概念分析" />
+  }
   const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(loadConfig)
   const [showConfig, setShowConfig] = useState(false)
   const [search, setSearch] = useState('')
@@ -807,4 +813,31 @@ function ScoreExplain({ stock }: { stock?: EnrichedStock }) {
 
 function Part({ label, value, cls }: { label: string; value: number; cls: string }) {
   return <div className="rounded-lg bg-base/35 px-2 py-1.5"><div className="mb-1 flex justify-between text-[10px] text-muted"><span>{label}</span><span>{Math.round(value * 100)}</span></div><div className="h-1 rounded-full bg-elevated"><div className={cn('h-full rounded-full', cls)} style={{ width: `${Math.max(3, value * 100)}%` }} /></div></div>
+}
+
+
+/** 港美股不支持提示条（多市场扩展） */
+
+
+/** 港美股暂不支持提示（多市场扩展） */
+function MarketBoardNotSupported({ market, pageName }: { market: string; pageName: string }) {
+  const { setMarket } = useMarket()
+  return (
+    <div className="p-6">
+      <div className="rounded-btn border border-border bg-surface p-6 text-center">
+        <div className="text-base font-medium mb-2">{pageName}</div>
+        <p className="text-sm text-muted mb-4">
+          {pageName}基于同花顺概念/行业表（A 股专属数据源），当前市场
+          <span className="mx-1 text-accent">{market === 'hk' ? '港股' : '美股'}</span>
+          暂不支持。
+        </p>
+        <button
+          onClick={() => setMarket('cn')}
+          className="h-8 px-4 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 cursor-pointer"
+        >
+          切换到 A 股
+        </button>
+      </div>
+    </div>
+  )
 }

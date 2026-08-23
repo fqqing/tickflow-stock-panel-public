@@ -37,6 +37,8 @@ import {
 
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
+  // 多市场扩展：cn | hk | us
+  const [market, setMarket] = useState<'cn' | 'hk' | 'us'>('cn')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
@@ -123,8 +125,8 @@ export function Screener() {
   const screenerAutoRun = prefs?.screener_auto_run ?? true
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies('all'),
-    queryFn: () => api.screenerStrategies(),
+    queryKey: QK.screenerStrategies(`${assetType}:${market}`),
+    queryFn: () => api.screenerStrategies(undefined, market),
   })
 
   // 卡片首屏只读取轻量摘要；明细在点击策略或“全部”时按需加载。
@@ -217,6 +219,7 @@ export function Screener() {
         date,
         strategyIds ?? visiblePool,
         assetType,
+        market,
       ),
     onSuccess: (data) => {
       if (data.as_of) setAsOf(data.as_of)
@@ -459,7 +462,7 @@ export function Screener() {
 
   const run = useMutation({
     mutationFn: ({ id, date }: { id: string; date: string }) =>
-      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType),
+      api.screenerRunPreset(id, undefined, date || undefined, extColumnsParam || undefined, assetType, market),
     onSuccess: (data, vars) => {
       setResult(data)
       // 同步更新卡片上的命中数
@@ -603,6 +606,22 @@ export function Screener() {
                     }`}
                 >
                   {t === 'stock' ? '股票' : 'ETF'}
+                </button>
+              ))}
+            </div>
+            {/* 市场切换（多市场扩展）: A股 / 港股 / 美股 */}
+            <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
+              {([['cn', 'A股'], ['hk', '港股'], ['us', '美股']] as const).map(([m, label]) => (
+                <button
+                  key={m}
+                  onClick={() => { setMarket(m); setActiveStrategy(null); setResult(null); setShowAll(false); setAsOf('') }}
+                  className={`h-full px-2.5 text-xs font-medium transition-colors cursor-pointer
+                    ${market === m
+                      ? 'bg-accent/10 text-accent'
+                      : 'text-muted hover:text-secondary hover:bg-elevated'
+                    }`}
+                >
+                  {label}
                 </button>
               ))}
             </div>

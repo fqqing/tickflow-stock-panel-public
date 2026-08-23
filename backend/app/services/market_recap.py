@@ -348,3 +348,98 @@ async def recap_market_once(
             logger.warning("market recap error event: %s", obj.get("message"))
             return None, meta
     return "".join(content_parts), meta
+
+
+# ================================================================
+# 港美股 AI 复盘（多市场扩展）
+# ================================================================
+
+_SYSTEM_PROMPT_MARKET = """你是一位拥有 15 年港美股市场研究经验的市场分析师,擅长从涨跌家数、60日新高/新低、动量强度、量能与市场情绪中客观提炼市场主线,产出一份**客观、中立、不包含任何买卖或操作建议**的盘后复盘报告。
+
+约束:
+- 港美股无涨跌停/连板概念,不得编造涨停、连板、封单等 A 股术语;以 60日新高/新低、动量档位、放量替代。
+- 数据不足或缺失时如实说明,不臆造。
+- 输出 Markdown:## 标题 + 分节(市场概览 / 强度结构 / 量能 / 风险提示 / 明日关注)。
+"""
+
+
+def _build_user_prompt_market(overview: dict, focus: str) -> str:
+    """港美股复盘用户消息:涨跌/强度/情绪/榜单。"""
+    as_of = overview.get("as_of") or "今日"
+    b = overview.get("breadth") or {}
+    t = overview.get("trend") or {}
+    l = overview.get("limit") or {}
+    e = overview.get("emotion") or {}
+
+    lines = [
+        f"复盘日期: {as_of}（市场: {overview.get('market', '').upper()}）",
+        "",
+        "## 涨跌概况",
+        f"- 全市场 {b.get('total', 0)} 只: 上涨 {b.get('up', 0)} 只({b.get('up_pct', 0):.1f}%)、下跌 {b.get('down', 0)} 只、平均涨跌 {b.get('avg_pct', 0) * 100:+.2f}%",
+        f"- 涨超 3%: {b.get('strong_up', 0)} 只; 跌超 3%: {b.get('strong_down', 0)} 只",
+        "",
+        "## 强度结构(替代涨跌停/连板)",
+        f"- 60日新高 {l.get('limit_up', 0)} 只 / 60日新低 {l.get('limit_down', 0)} 只",
+        f"- 站上 MA20: {t.get('above_ma20_pct', 0):.1f}%; 站上 MA60: {t.get('above_ma60_pct', 0):.1f}%",
+        "",
+        "## 市场情绪",
+        f"- 情绪分 {e.get('score', 50)} / {e.get('label', '—')}",
+        "",
+        "## 领涨榜",
+    ]
+    for r in (overview.get("top_gainers") or [])[:8]:
+        lines.append(f"- {r.get('symbol')} {r.get('name') or ''} {r.get('change_pct', 0) * 100:+.2f}%")
+    lines += ["", "## 领跌榜"]
+    for r in (overview.get("top_losers") or [])[:5]:
+        lines.append(f"- {r.get('symbol')} {r.get('name') or ''} {r.get('change_pct', 0) * 100:+.2f}%")
+    if focus:
+        lines += ["", f"## 用户关注点", focus]
+    return "\n".join(lines)
+
+
+async def recap_market_stream_market(
+    repo,
+    market: str,
+    as_of: date | None = None,
+    focus: str = "",
+) -> AsyncIterator[str]:
+    """港美股流式 AI 复盘（NDJSON 协议与 A 股一致）。"""
+    from app.services.market_overview_builder import build_market_overview_market
+
+    overview = build_market_overview_market(repo, market, as_of)
+    as_of_str = overview.get("as_of")
+    if not as_of_str:
+        yield json.dumps({
+            "type": "error",
+            "message": f"暂无{market.upper()}市场数据,请先在「数据」页同步后再复盘",
+        }, ensure_ascii=False)
+        return
+
+    emo = overview.get("emotion") or {}
+    yield json.dumps({
+        "type": "meta",
+        "as_of": as_of_str,
+        "emotion_score": emo.get("score", 50),
+        "emotion_label": emo.get("label", "—"),
+        "summary": _recap_summary(overview),
+    }, ensure_ascii=False)
+
+    try:
+        from app.services.ai_provider import stream_ai_text
+
+        user_prompt = _build_user_prompt_market(overview, focus)
+        async for delta in stream_ai_text(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT_MARKET},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            max_tokens=4500,
+        ):
+            yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("AI market recap(%s) failed: %s", market, e)
+        yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
+        return
+
+    yield json.dumps({"type": "done"}, ensure_ascii=False)

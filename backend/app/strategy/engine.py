@@ -1347,9 +1347,11 @@ class StrategyEngine:
             exprs.append(
                 pl.col("close") * pl.col("float_shares") <= bf["float_cap_max"]
             )
-        if bf.get("amount_min") is not None:
+        # 成交额过滤：数据源不提供 amount（港美股 SDK amount 恒 0）时跳过，避免误杀
+        _amount_available = "amount" in df.columns and bool(df["amount"].sum())
+        if bf.get("amount_min") is not None and _amount_available:
             exprs.append(pl.col("amount") >= bf["amount_min"])
-        if bf.get("amount_max") is not None:
+        if bf.get("amount_max") is not None and _amount_available:
             exprs.append(pl.col("amount") <= bf["amount_max"])
         # 换手率
         if bf.get("turnover_min") is not None and "turnover_rate" in df.columns:
@@ -1358,27 +1360,30 @@ class StrategyEngine:
             exprs.append(pl.col("turnover_rate") <= bf["turnover_max"])
         if bf.get("exclude_st") and "name" in df.columns:
             exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))
-        # 板块过滤
+        # 板块过滤（仅 A 股；数据含港美股 symbol 时跳过，避免误杀）
         boards = bf.get("boards")
         if boards and isinstance(boards, list) and len(boards) > 0:
             board_exprs: list[pl.Expr] = []
-            for b in boards:
-                if b == "沪主板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("60"))
-                elif b == "深主板":
-                    board_exprs.append(
-                        pl.col("symbol").str.starts_with("00")
-                        | pl.col("symbol").str.starts_with("001")
-                    )
-                elif b == "创业板":
-                    board_exprs.append(
-                        pl.col("symbol").str.starts_with("300")
-                        | pl.col("symbol").str.starts_with("301")
-                    )
-                elif b == "科创板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("688"))
-                elif b == "北交所":
-                    board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
+            if "symbol" in df.columns and not bool(
+                df["symbol"].str.contains(r"\.(HK|US)$").any()
+            ):
+                for b in boards:
+                    if b == "沪主板":
+                        board_exprs.append(pl.col("symbol").str.starts_with("60"))
+                    elif b == "深主板":
+                        board_exprs.append(
+                            pl.col("symbol").str.starts_with("00")
+                            | pl.col("symbol").str.starts_with("001")
+                        )
+                    elif b == "创业板":
+                        board_exprs.append(
+                            pl.col("symbol").str.starts_with("300")
+                            | pl.col("symbol").str.starts_with("301")
+                        )
+                    elif b == "科创板":
+                        board_exprs.append(pl.col("symbol").str.starts_with("688"))
+                    elif b == "北交所":
+                        board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
             if board_exprs:
                 exprs.append(pl.any_horizontal(board_exprs))
         if exprs:

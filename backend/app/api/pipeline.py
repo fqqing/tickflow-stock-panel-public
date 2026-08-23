@@ -104,3 +104,49 @@ def list_jobs(limit: int = 20) -> dict:
         "active_id": job_store.active_id(),
         "jobs": job_store.list_recent(limit=limit),
     }
+
+
+@router.post("/run-market")
+async def run_market_now(request: Request, market: str) -> dict:
+    """异步触发港美股数据同步 + enriched 计算（多市场扩展）。
+
+    market: hk | us。A 股仍走 POST /api/pipeline/run。
+    立即返回 job_id，客户端轮询 /jobs/{id} 拿进度。
+    """
+    from app.markets import ALL_MARKETS
+
+    if market not in ("hk", "us"):
+        raise HTTPException(status_code=400, detail=f"market 必须为 hk/us（可选: {ALL_MARKETS}）")
+
+    repo = request.app.state.repo
+    job_store.reap_stale()
+    job_id, is_new = job_store.create()
+    if not is_new:
+        return {"job_id": job_id, "reused": True}
+
+    async def task() -> None:
+        if not try_acquire_run_slot():
+            job_store.fail(job_id, "已有数据任务在运行,请稍后再试")
+            return
+        try:
+            job_store.start(job_id)
+
+            def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
+                         skip_log: bool = False) -> None:
+                job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+
+            def _run() -> dict:
+                return daily_pipeline.run_market_sync(market, repo, on_progress=progress)
+
+            result = await asyncio.get_event_loop().run_in_executor(_long_task_executor, _run)
+            job_store.succeed(job_id, result)
+            invalidate_storage_cache()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("market pipeline failed")
+            job_store.fail(job_id, str(e))
+            invalidate_storage_cache()
+        finally:
+            release_run_slot()
+
+    asyncio.create_task(task())
+    return {"job_id": job_id, "reused": False, "market": market}

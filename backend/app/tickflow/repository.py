@@ -31,9 +31,26 @@ from app.parquet import scan_enriched_parquet
 logger = logging.getLogger(__name__)
 
 
-def enriched_dirname(asset_type: str) -> str:
-    """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
-    return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
+def enriched_dirname(asset_type: str, market: str = "cn") -> str:
+    """asset_type + market → enriched parquet 目录名。
+
+    港股/美股使用独立目录（kline_daily_enriched_hk / kline_daily_enriched_us），
+    A 股保持原目录名（kline_daily_enriched）以兼容既有数据与视图。
+    """
+    if asset_type == "etf":
+        return "kline_etf_enriched"
+    if market == "cn":
+        return "kline_daily_enriched"
+    return f"kline_daily_enriched_{market}"
+
+
+def daily_dirname(asset_type: str, market: str = "cn") -> str:
+    """日K原始数据目录名。A 股保持 kline_daily；港美股 kline_daily_hk / kline_daily_us。"""
+    if asset_type == "etf":
+        return "kline_etf_daily"
+    if market == "cn":
+        return "kline_daily"
+    return f"kline_daily_{market}"
 
 
 def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
@@ -62,8 +79,16 @@ class DataStore:
         for sub in (
             "kline_daily",
             "kline_daily_enriched",
+            "kline_daily_hk",
+            "kline_daily_enriched_hk",
+            "kline_daily_us",
+            "kline_daily_enriched_us",
             "kline_index_daily",
             "kline_index_enriched",
+            "kline_index_daily_hk",
+            "kline_index_daily_us",
+            "instruments_index_hk",
+            "instruments_index_us",
             "kline_etf_daily",
             "kline_etf_enriched",
             "kline_etf_minute",
@@ -159,6 +184,15 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_enriched AS
                 SELECT * FROM read_parquet('{d}/kline_daily_enriched/**/*.parquet', union_by_name=true)""",
+            # 港美股独立存储（多市场扩展）
+            f"""CREATE OR REPLACE VIEW kline_daily_hk AS
+                SELECT * FROM read_parquet('{d}/kline_daily_hk/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_enriched_hk AS
+                SELECT * FROM read_parquet('{d}/kline_daily_enriched_hk/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_daily_us AS
+                SELECT * FROM read_parquet('{d}/kline_daily_us/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_enriched_us AS
+                SELECT * FROM read_parquet('{d}/kline_daily_enriched_us/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_index_daily AS
                 SELECT * FROM read_parquet('{d}/kline_index_daily/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_index_enriched AS
@@ -351,6 +385,122 @@ class KlineRepository:
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
+        # 港美股独立 enriched 存储（多市场扩展）
+        self._hk_enriched_glob = str(store.data_dir / "kline_daily_enriched_hk" / "**" / "*.parquet")
+        self._us_enriched_glob = str(store.data_dir / "kline_daily_enriched_us" / "**" / "*.parquet")
+
+    # ── 多市场辅助（cn/hk/us）──────────────────────────────────────
+    def _enriched_glob_for_market(self, market: str) -> str:
+        if market == "hk":
+            return self._hk_enriched_glob
+        if market == "us":
+            return self._us_enriched_glob
+        return self._enriched_glob
+
+    def latest_enriched_date_market(self, market: str) -> date | None:
+        """指定市场 enriched 的最新日期（读 parquet 分区目录）。"""
+        try:
+            import os
+            base = self.store.data_dir / f"kline_daily_enriched_{market}" if market != "cn" \
+                else self.store.data_dir / "kline_daily_enriched"
+            if not base.exists():
+                return None
+            dates = []
+            for name in os.listdir(base):
+                if name.startswith("date="):
+                    try:
+                        dates.append(date.fromisoformat(name[5:]))
+                    except ValueError:
+                        continue
+            return max(dates) if dates else None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("latest_enriched_date_market(%s) failed: %s", market, e)
+            return None
+
+    def get_enriched_latest_market(
+        self, market: str, symbols: list[str] | None = None
+    ) -> tuple[pl.DataFrame, date | None]:
+        """读取指定市场 enriched 最新日（含即时计算的完整指标）。
+
+        与 A 股 get_enriched_latest 同语义：读最近 ~300 天历史窄表 →
+        即时计算完整指标 → 只返回最新日。港美股无涨跌停/连板概念，
+        这些信号列由 compute_all(market=...) 补 0。
+        """
+        import os
+        from datetime import timedelta
+
+        enriched_base = self.store.data_dir / (
+            "kline_daily_enriched" if market == "cn" else f"kline_daily_enriched_{market}"
+        )
+        if not enriched_base.exists():
+            return pl.DataFrame(), None
+        # 取最近 60 个 date= 分区（≈ 300 交易日窗口，覆盖 MA60 等指标 warmup）
+        date_dirs = sorted(
+            (p for p in enriched_base.iterdir() if p.name.startswith("date=")),
+            reverse=True,
+        )[:60]
+        if not date_dirs:
+            return pl.DataFrame(), None
+        latest = date.fromisoformat(date_dirs[0].name[5:])
+        try:
+            frames = []
+            for p in date_dirs:
+                f = pl.read_parquet(p / "part.parquet")
+                if not f.is_empty():
+                    frames.append(f)
+            if not frames:
+                return pl.DataFrame(), latest
+            df = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("read enriched %s history failed: %s", market, e)
+            return pl.DataFrame(), latest
+        if symbols:
+            df = df.filter(pl.col("symbol").is_in(symbols))
+        # JOIN instruments 名称（instruments 含 market 列）
+        inst = self.get_instruments()
+        if not inst.is_empty() and "symbol" in inst.columns:
+            cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in inst.columns]
+            df = df.join(inst.select(cols), on="symbol", how="left")
+        # 即时计算完整指标
+        try:
+            from app.indicators.pipeline import compute_all
+            df = compute_all(df, market=market)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compute_all(%s) failed: %s", market, e)
+        # 只返回最新日
+        df = df.filter(pl.col("date") == latest)
+        return df, latest
+
+    def get_daily_market(
+        self,
+        market: str,
+        symbol: str,
+        start: date,
+        end: date,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        """指定市场单标的日K（含即时指标）。港美股读独立 enriched 目录。"""
+        try:
+            lf = scan_enriched_parquet(
+                self._enriched_glob_for_market(market),
+                cast_options=pl.ScanCastOptions(integer_cast="allow-float"),
+            ).filter(
+                (pl.col("symbol") == symbol)
+                & (pl.col("date") >= start)
+                & (pl.col("date") <= end)
+            ).sort("date")
+            if columns:
+                schema_names = lf.collect_schema().names()
+                existing = [c for c in columns if c in schema_names]
+                lf = lf.select(existing)
+            df = lf.collect()
+            if df.is_empty():
+                return df
+            from app.indicators.pipeline import compute_all
+            return compute_all(df, market=market)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("get_daily_market(%s, %s) failed: %s", market, symbol, e)
+            return pl.DataFrame()
 
     def execute_all(self, sql: str, params: list | None = None) -> list[tuple]:
         """线程安全的 SELECT → fetchall。DuckDB 单 connection 非线程安全，所有读路径须走此方法。"""
@@ -1250,10 +1400,17 @@ class KlineRepository:
             return pl.DataFrame()
         return self._etf_instruments_cache
 
-    def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
-        """按资产类型返回 instruments；老 stock 路径保持原样。"""
+    def get_instruments_asset(self, asset_type: str, market: str = "cn") -> pl.DataFrame:
+        """按资产类型返回 instruments；老 stock 路径保持原样。
+
+        market 参数（cn/hk/us）：instruments parquet 含 market 列（多市场扩展），
+        A 股调用方不传时保持全量（兼容旧行为），港美股按市场过滤。
+        """
         if asset_type == "stock":
-            return self.get_instruments()
+            df = self.get_instruments()
+            if market in ("hk", "us") and not df.is_empty() and "market" in df.columns:
+                return df.filter(pl.col("market") == market)
+            return df
         if asset_type == "index":
             df = self.get_index_instruments()
             if not df.is_empty() and "asset_type" in df.columns:
@@ -1453,7 +1610,10 @@ class KlineRepository:
         start: date,
         end: date,
         columns: list[str] | None = None,
+        market: str = "cn",
     ) -> pl.DataFrame:
+        if market in ("hk", "us"):
+            return self.get_daily_market(market, symbol, start, end, columns)
         if asset_type == "stock":
             return self.get_daily(symbol, start, end, columns)
         if asset_type == "index":
@@ -1882,20 +2042,20 @@ class KlineRepository:
     # 写入 (Pipeline / Sync)
     # ================================================================
 
-    def append_daily(self, df: pl.DataFrame) -> None:
-        """按日分区写入日K数据 (merge-upsert)。"""
+    def append_daily(self, df: pl.DataFrame, market: str = "cn") -> None:
+        """按日分区写入日K数据 (merge-upsert)。港美股按 market 路由到独立目录。"""
         if df.is_empty():
             return
-        self._write_daily_partition(df, "kline_daily")
+        self._write_daily_partition(df, daily_dirname("stock", market))
 
-    def append_enriched(self, df: pl.DataFrame) -> None:
+    def append_enriched(self, df: pl.DataFrame, market: str = "cn") -> None:
         """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 14 列存储列。"""
         if df.is_empty():
             return
         from app.indicators.pipeline import ENRICHED_STORAGE_COLS
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
         df_storage = df.select(storage_cols)
-        self._write_daily_partition(df_storage, "kline_daily_enriched")
+        self._write_daily_partition(df_storage, enriched_dirname("stock", market))
 
     def append_index_daily(self, df: pl.DataFrame) -> None:
         """按日分区写入指数日K数据 (merge-upsert)。"""

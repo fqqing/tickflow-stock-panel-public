@@ -53,6 +53,7 @@ import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
+import { useMarket } from '@/lib/market'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
@@ -116,9 +117,30 @@ function indexPctClass(v: number | null | undefined) {
   return n > 0 ? 'text-bull' : 'text-bear'
 }
 
+/** 全局市场切换器（多市场扩展）：A股 / 港股 / 美股 */
+function MarketSwitcher() {
+  const { market, setMarket } = useMarket()
+  const opts: [('cn' | 'hk' | 'us'), string][] = [
+    ['cn', 'A股'], ['hk', '港股'], ['us', '美股'],
+  ]
+  return (
+    <div className="mt-3 flex items-center h-7 rounded-btn border border-border overflow-hidden">
+      {opts.map(([m, label]) => (
+        <button
+          key={m}
+          onClick={() => setMarket(m)}
+          className={`h-full flex-1 px-1.5 text-[11px] font-medium transition-colors cursor-pointer
+            ${market === m ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground hover:bg-elevated'}`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /** 监控中心未读徽标 — 仅在非监控页且有未读时显示。 */
-function MonitorBadge({ active }: { active: boolean }) {
-  const unread = useUnreadAlerts()
+function MonitorBadge({ active }: { active: boolean }) {  const unread = useUnreadAlerts()
   // 尊重用户设置: 可在菜单设置里关闭数字提示
   const badgeEnabled = (() => {
     try { return localStorage.getItem('monitor_badge_enabled') !== '0' } catch { return true }
@@ -461,6 +483,9 @@ export function Layout() {
             configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
             model={settingsState?.ai_model}
           />
+
+          {/* 全局市场切换（多市场扩展）：A股 / 港股 / 美股 */}
+          <MarketSwitcher />
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">

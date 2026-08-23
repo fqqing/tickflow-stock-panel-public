@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Loader2, Lock, RefreshCw, Search } from 'lucide-react'
+import { useMarket } from '@/lib/market'
 import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -61,11 +62,31 @@ const PINNED_INDEXES = [
   { symbol: '000680.SH', name: '科创综指' },
 ]
 
+// 港美股置顶指数（多市场扩展）
+const MARKET_PINNED: Record<'hk' | 'us', { symbol: string; name: string }[]> = {
+  hk: [
+    { symbol: 'HSI', name: '恒生指数' },
+    { symbol: 'HSTECH', name: '恒生科技指数' },
+    { symbol: 'HSCEI', name: '恒生国企指数' },
+    { symbol: 'HSCCI', name: '红筹指数' },
+  ],
+  us: [
+    { symbol: 'SPX', name: '标普500' },
+    { symbol: 'IXIC', name: '纳斯达克' },
+    { symbol: 'DJI', name: '道琼斯' },
+    { symbol: 'NDX', name: '纳斯达克100' },
+  ],
+}
+
 function pinnedRank(item: IndexInstrument) {
   return PINNED_INDEXES.findIndex(p => item.symbol === p.symbol || item.name === p.name)
 }
 
 export function Indices() {
+  // 多市场扩展：港美股复用 A 股完整 UI（搜索/分时/同步除外）
+  const { market } = useMarket()
+  const isCn = market === 'cn'
+
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [keyword, setKeyword] = useState('')
@@ -75,19 +96,19 @@ export function Indices() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
 
-  // 分时数据需 Pro+ (kline.minute.batch) 能力
+  // 分时数据需 Pro+ (kline.minute.batch) 能力；港美股免费源无分时
   const caps = useCapabilities()
-  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
+  const hasMinuteCap = isCn && !!caps.data?.capabilities?.['kline.minute.batch']
 
   const list = useQuery({
-    queryKey: QK.indexList,
-    queryFn: api.indexList,
+    queryKey: [...QK.indexList, market] as const,
+    queryFn: () => isCn ? api.indexList() : api.indicesMarketList(market as 'hk' | 'us'),
   })
 
   const search = useQuery({
     queryKey: ['index-search', keyword],
     queryFn: () => api.indexSearch(keyword, 50),
-    enabled: keyword.trim().length > 0,
+    enabled: isCn && keyword.trim().length > 0,
   })
 
   const rows: IndexInstrument[] = keyword.trim()
@@ -95,11 +116,16 @@ export function Indices() {
     : (list.data?.results ?? [])
   const topRows = useMemo(() => {
     const all = list.data?.results ?? []
-    return PINNED_INDEXES.map(p => (
+    const pinned = isCn ? PINNED_INDEXES : MARKET_PINNED[market as 'hk' | 'us']
+    return pinned.map(p => (
       all.find(item => item.symbol === p.symbol || item.name === p.name) ?? { symbol: p.symbol, name: p.name, asset_type: 'index' as const }
     ))
-  }, [list.data?.results])
-  const listRows = useMemo(() => rows.filter(item => pinnedRank(item) < 0), [rows])
+  }, [list.data?.results, market, isCn])
+  const listRows = useMemo(() => {
+    if (isCn) return rows.filter(item => pinnedRank(item) < 0)
+    const pinnedSymbols = new Set(MARKET_PINNED[market as 'hk' | 'us'].map(p => p.symbol))
+    return rows.filter(item => !pinnedSymbols.has(item.symbol) && !pinnedSymbols.has(item.name ?? ''))
+  }, [rows, market, isCn])
 
   const selectedSymbol = selected || topRows[0]?.symbol || listRows[0]?.symbol || ''
 
@@ -113,21 +139,25 @@ export function Indices() {
   }
 
   const quotes = useQuery({
-    queryKey: QK.indexQuotes,
-    queryFn: () => api.indexQuotes(),
+    queryKey: [...QK.indexQuotes, market] as const,
+    queryFn: () => isCn ? api.indexQuotes() : api.indicesMarketQuotes(market as 'hk' | 'us'),
     placeholderData: (prev) => prev,
   })
 
   const daily = useQuery({
     queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
-    queryFn: () => api.indexDaily(selectedSymbol, 180, range),
+    queryFn: () => (isCn
+      ? api.indexDaily(selectedSymbol, 180, range)
+      : api.indicesMarketDaily(market as 'hk' | 'us', selectedSymbol, 180)) as any,
     enabled: !!selectedSymbol,
     placeholderData: (prev) => prev,
   })
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
-    queryFn: () => api.indexMinute(selectedSymbol, selectedDate ?? undefined),
+    queryFn: () => (isCn
+      ? api.indexMinute(selectedSymbol, selectedDate ?? undefined)
+      : api.indicesMarketMinute(market as 'hk' | 'us', selectedSymbol)) as any,
     enabled: !!selectedSymbol && !!selectedDate && hasMinuteCap,
     placeholderData: (prev) => prev,
   })
@@ -141,7 +171,7 @@ export function Indices() {
   })
 
   const syncDaily = useMutation({
-    mutationFn: () => api.syncIndexDaily(365),
+    mutationFn: () => (isCn ? api.syncIndexDaily(365) : api.indicesMarketSync(market as 'hk' | 'us')) as any,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
@@ -211,14 +241,16 @@ export function Indices() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => syncInstruments.mutate()}
-            disabled={syncInstruments.isPending}
-            className="inline-flex items-center gap-1.5 rounded-btn bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
-          >
-            {syncInstruments.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            同步指数列表
-          </button>
+          {isCn && (
+            <button
+              onClick={() => syncInstruments.mutate()}
+              disabled={syncInstruments.isPending}
+              className="inline-flex items-center gap-1.5 rounded-btn bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
+            >
+              {syncInstruments.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              同步指数列表
+            </button>
+          )}
           <button
             onClick={() => syncDaily.mutate()}
             disabled={syncDaily.isPending}
@@ -232,15 +264,17 @@ export function Indices() {
 
       <div className="grid grid-cols-[15rem_1fr] gap-4">
         <aside className="rounded-card border border-border bg-surface p-3">
-          <div className="relative mb-3">
-            <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted" />
-            <input
-              value={keyword}
-              onChange={e => setKeyword(e.target.value)}
-              placeholder="搜索指数代码/名称"
-              className="w-full rounded-btn border border-border bg-base py-1.5 pl-7 pr-2 text-xs text-foreground outline-none focus:border-accent"
-            />
-          </div>
+          {isCn && (
+            <div className="relative mb-3">
+              <Search className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted" />
+              <input
+                value={keyword}
+                onChange={e => setKeyword(e.target.value)}
+                placeholder="搜索指数代码/名称"
+                className="w-full rounded-btn border border-border bg-base py-1.5 pl-7 pr-2 text-xs text-foreground outline-none focus:border-accent"
+              />
+            </div>
+          )}
           <div className="mb-3 space-y-1 border-b border-border/60 pb-3">
             {topRows.map(renderIndexItem)}
           </div>
@@ -347,3 +381,6 @@ export function Indices() {
     </div>
   )
 }
+
+
+// ================================================================

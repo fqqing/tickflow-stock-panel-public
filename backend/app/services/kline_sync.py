@@ -94,11 +94,15 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     adjust: str = "none") -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
     仅传 count 时按条数回溯。
+
+    adjust: SDK 复权参数。A 股走 none（项目用 adj_factor 自行前复权）；
+    港美股无除权因子表，直接传 forward（前复权）一步到位。
 
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
@@ -113,14 +117,14 @@ def sync_daily_batch(symbols: list[str],
         try:
             if start_time and end_time:
                 raw = tf.klines.batch(
-                    chunk, period="1d", adjust="none",
+                    chunk, period="1d", adjust=adjust,
                     start_time=_datetime_to_ms(start_time),
                     end_time=_datetime_to_ms(end_time),
                     count=10000,
                     as_dataframe=True, show_progress=False,
                 )
             else:
-                raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
+                raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust=adjust,
                                       as_dataframe=True, show_progress=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",

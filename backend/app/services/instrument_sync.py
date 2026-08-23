@@ -17,7 +17,22 @@ from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
 
+# A 股三个交易所; 港美股按市场注册表（见 app.markets）
 _EXCHANGES = ["SH", "SZ", "BJ"]
+
+# 市场 → TickFlow 交易所（多市场扩展）
+_MARKET_EXCHANGES: dict[str, list[str]] = {
+    "cn": ["SH", "SZ", "BJ"],
+    "hk": ["HK"],
+    "us": ["US"],
+}
+
+
+def _market_of_exchange(exchange: str) -> str:
+    for market, exchanges in _MARKET_EXCHANGES.items():
+        if exchange in exchanges:
+            return market
+    return "cn"
 
 
 def _flatten_instruments(items: list[dict]) -> list[dict]:
@@ -32,6 +47,7 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
             "region": item.get("region"),
             "type": item.get("type"),
         }
+        row["market"] = _market_of_exchange(item.get("exchange") or "")
         ext = item.get("ext") or {}
         row["listing_date"] = ext.get("listing_date")
         row["total_shares"] = ext.get("total_shares")
@@ -71,24 +87,31 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
-def sync_instruments(data_dir: Path) -> int:
+def sync_instruments(data_dir: Path, markets: list[str] | None = None) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
+    markets: 指定同步哪些市场（cn/hk/us），缺省同步全部市场。
     返回写入的行数。
     """
+    from app.markets import ALL_MARKETS, get_market
+
+    if markets is None:
+        markets = list(ALL_MARKETS)
+
     all_rows = _fetch_instruments_via_provider()
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
         tf = get_client()
         all_rows = []
-        for ex in _EXCHANGES:
-            try:
-                items = tf.exchanges.get_instruments(ex, instrument_type="stock")
-                if items:
-                    all_rows.extend(_flatten_instruments(items))
-                    logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
-                logger.warning("get_instruments(%s) failed: %s", ex, e)
+        for market in markets:
+            for ex in get_market(market).exchanges:
+                try:
+                    items = tf.exchanges.get_instruments(ex, instrument_type="stock")
+                    if items:
+                        all_rows.extend(_flatten_instruments(items))
+                        logger.info("instruments %s (%s): %d stocks", ex, market, len(items))
+                except Exception as e:
+                    logger.warning("get_instruments(%s) failed: %s", ex, e)
 
     if not all_rows:
         return 0

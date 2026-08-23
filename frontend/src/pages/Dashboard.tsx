@@ -8,6 +8,7 @@ import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type Overv
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { useDataStatus, useCapabilities, useSettings } from '@/lib/useSharedQueries'
+import { useMarket } from '@/lib/market'
 import { SealedBadge } from '@/components/SealedBadge'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { SettingsModal } from '@/components/data/SettingsModal'
@@ -544,9 +545,10 @@ export function Dashboard() {
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
   const [showWelcomeModal, setShowWelcomeModal] = useState(false)
   const dataStatus = useDataStatus({ staleTime: 60_000 })
+  const { market } = useMarket()
   const overview = useQuery({
-    queryKey: QK.overviewMarket(selectedDate),
-    queryFn: () => api.overviewMarket(selectedDate),
+    queryKey: QK.overviewMarket(selectedDate, market),
+    queryFn: () => api.overviewMarket(selectedDate, market),
     staleTime: 5_000,
     placeholderData: (prev) => prev,
   })

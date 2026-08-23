@@ -710,7 +710,10 @@ export interface LimitLadderStock {
   change_pct?: number | null
   consecutive_limit_ups?: number | null
   consecutive_limit_downs?: number | null
-  status?: 'limit_up' | 'broken' | 'failed' | 'limit_down' | 'recovery' | null
+  status?: 'limit_up' | 'broken' | 'failed' | 'limit_down' | 'recovery'
+    | 'high' | 'momentum' | 'volume' | null
+  /** 强度档位（港美股：20日动量档 1-5） */
+  boards?: number | null
   /** 五档 sealed: real=真封板, fake=假涨停(已归炸板), pending=待确认, null=降级/无能力 */
   sealed_status?: 'real' | 'fake' | 'pending' | null
   /** 封单量(买一/卖一量), 仅真封板有值 */
@@ -719,8 +722,58 @@ export interface LimitLadderStock {
   is_one_word?: boolean
 }
 
-export interface LimitLadderTier {
-  boards: number
+/** 港美股主要指数（多市场扩展） */
+export interface MarketIndexItem {
+  symbol: string
+  name: string
+  code: string
+  market: string
+  type: string
+  latest?: { date: string; close: number; change_pct: number; snapshot?: boolean } | null
+}
+
+export interface MarketIndexKlineRow {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+
+/** 港美股市场环境行（多市场扩展） */
+export interface RegimeMarketRow {  date: string
+  state: string
+  score: number
+  profit: number
+  momentum: number
+  resilience: number
+  trend: number
+  total: number
+  up: number
+  down: number
+  up_pct: number
+  avg_pct: number
+  new_high: number
+  new_low: number
+  above_ma20_pct: number
+}
+
+/** 港美股强度榜行（多市场扩展） */
+export interface MarketStrengthRow {  symbol: string
+  name?: string | null
+  close?: number | null
+  change_pct?: number | null
+  momentum_20d?: number | null
+  momentum_60d?: number | null
+  vol_ratio_5d?: number | null
+  high_60d?: number | null
+  ma20_bias?: number | null
+  rsi_14?: number | null
+}
+
+export interface LimitLadderTier {  boards: number
   count: number
   stocks: LimitLadderStock[]
 }
@@ -1549,29 +1602,71 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index') => {
+  screenerStrategies: async (assetType?: 'stock' | 'etf' | 'index', market?: string) => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
+      `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d&market=${market ?? 'cn'}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
-  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock', market: string = 'cn') =>
     request<ScreenerResult>('/api/screener/run_preset', {
       method: 'POST',
-      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType }),
+      body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, market }),
     }),
-  screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock', market: string = 'cn') =>
     request<ScreenerResult>('/api/screener/run', {
       method: 'POST',
-      body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
+      body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType, market }),
     }),
-  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock') =>
+  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', market: string = 'cn') =>
     request<{ as_of: string | null; results: Record<string, ScreenerResultSummary> }>(
-      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true }) },
+      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true, market }) },
     ),
   screenerCachedSummary: () =>
     request<ScreenerCachedSummary>('/api/screener/cached-summary'),
-  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+
+  // 港美股市场环境（多市场扩展）：momentum 替代 A 股投机维度
+  regimeMarket: (market: 'hk' | 'us', days = 120) =>
+    request<{ rows: RegimeMarketRow[]; total: number; market: string }>(
+      `/api/regime/market?market=${market}&days=${days}`,
+    ),
+
+  // 港美股主要指数（多市场扩展）
+  indicesMarketList: (market: 'hk' | 'us') =>
+    request<{ results: IndexInstrument[]; count: number }>(`/api/indices/market/list?market=${market}`),
+  indicesMarket: (market: 'hk' | 'us') =>
+    request<{ market: string; items: MarketIndexItem[] }>(`/api/indices/market?market=${market}`),
+  indicesMarketKline: (market: 'hk' | 'us', symbol: string, days = 250) =>
+    request<{ symbol: string; market: string; rows: MarketIndexKlineRow[] }>(
+      `/api/indices/market/kline?market=${market}&symbol=${symbol}&days=${days}`,
+    ),
+
+
+
+  indicesMarketQuotes: (market: 'hk' | 'us') =>
+    request<{ rows: IndexQuote[]; count: number }>(`/api/indices/market/quotes?market=${market}`),
+  indicesMarketDaily: (market: 'hk' | 'us', symbol: string, days = 180) =>
+    request<{ symbol: string; rows: KlineRow[]; index_info: IndexInstrument | null }>(
+      `/api/indices/market/daily?market=${market}&symbol=${symbol}&days=${days}`,
+    ),
+  indicesMarketMinute: (market: 'hk' | 'us', symbol: string) =>
+    request<{ symbol: string; rows: MinuteKlineRow[]; index_info: IndexInstrument | null }>(
+      `/api/indices/market/minute?market=${market}&symbol=${symbol}`,
+    ),
+  indicesMarketSync: (market: 'hk' | 'us') =>
+    request<{ ok: boolean; rows: number; market: string }>(`/api/indices/market/sync?market=${market}`, { method: 'POST' }),
+
+  // 港美股数据版复盘（多市场扩展，不依赖 AI）
+  marketRecapData: (market: 'hk' | 'us') =>
+    request<{ as_of: string | null; content: string; market: string }>(
+      `/api/market-recap/market-data?market=${market}`,
+    ),
+
+  // 港美股强度榜（替代 A 股连板梯队）：high=新高突破 | momentum=动量榜 | volume=放量榜
+  marketStrength: (market: 'hk' | 'us', kind: 'high' | 'momentum' | 'volume', limit = 20) =>
+    request<{ as_of: string | null; market: string; kind: string; rows: MarketStrengthRow[] }>(
+      `/api/screener/strength?market=${market}&kind=${kind}&limit=${limit}`,
+    ),  screenerCachedResult: (strategyId: string, extColumns?: string) =>
     request<ScreenerCachedResult>(
       extColumns
         ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
@@ -1585,37 +1680,40 @@ export const api = {
     ),
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
-  overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+  overviewMarket: (asOf?: string, market?: string) => request<OverviewMarket>(`/api/overview/market${asOf || market ? `?${asOf ? `as_of=${asOf}&` : ''}market=${market ?? 'cn'}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>
     request<RpsRotationData>(`/api/rps/rotation?days=${days}${kind ? `&kind=${kind}` : ''}${level ? `&level=${level}` : ''}`),
 
   // 市场环境(Regime)
-  regimeHistory: (start?: string, end?: string, limit?: number) => {
+  regimeHistory: (start?: string, end?: string, limit?: number, market?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
     if (end) params.set('end', end)
     if (limit) params.set('limit', String(limit))
+    if (market && market !== 'cn') params.set('market', market)
     const qs = params.toString()
     return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
   },
-  regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
-  regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
-  regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
-  regimeRecompute: (start?: string, end?: string) => {
+  regimeLatest: (market?: string) => request<{ row: RegimeRow | null }>(`/api/regime/latest${market && market !== 'cn' ? `?market=${market}` : ''}`),
+  regimeStates: (days = 60, market?: string) => request<RegimeStates>(`/api/regime/states?days=${days}${market && market !== 'cn' ? `&market=${market}` : ''}`),
+  regimeCoverage: (market?: string) => request<RegimeCoverage>(`/api/regime/coverage${market && market !== 'cn' ? `?market=${market}` : ''}`),
+  regimeRecompute: (start?: string, end?: string, market?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
     if (end) params.set('end', end)
+    if (market && market !== 'cn') params.set('market', market)
     const qs = params.toString()
     return request<{ ok: boolean; computed: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
   },
 
-  limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
+  limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down', market?: string) => {
     const params = new URLSearchParams()
     if (asOf) params.set('as_of', asOf)
     if (extColumns) params.set('ext_columns', extColumns)
     if (direction === 'down') params.set('direction', 'down')
+    if (market && market !== 'cn') params.set('market', market)
     const qs = params.toString()
     return request<LimitLadderResult>(
       `/api/screener/limit-ladder${qs ? `?${qs}` : ''}`,
@@ -1679,11 +1777,17 @@ export const api = {
     position_sizing?: 'equal' | 'score_weight'
     asset_type?: 'stock' | 'etf' | 'index'
     minute_fill?: boolean
+    market?: 'cn' | 'hk' | 'us'
   }) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  pipelineRunMarket: (market: 'hk' | 'us') =>
+    request<{ job_id: string; reused: boolean; market: string }>(
+      `/api/pipeline/run-market?market=${market}`, { method: 'POST' },
+    ),
 
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
@@ -2030,12 +2134,13 @@ export const api = {
   },
 
   // ===== 大盘复盘 =====
-  reviewReportsList: () =>
-    request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
+  reviewReportsList: (market?: string) =>
+    request<{ reports: AiReviewReport[] }>(`/api/market-recap/reports${market && market !== 'cn' ? `?market=${market}` : ''}`),
 
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
+    market?: string
   }) =>
     request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
       method: 'POST', body: JSON.stringify(r),
@@ -2048,7 +2153,7 @@ export const api = {
    * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。
    * meta 里带 as_of / emotion_score / emotion_label / summary,供前端先渲染信号灯。
    */
-  async *reviewStream(asOf?: string, focus?: string): AsyncGenerator<{
+  async *reviewStream(asOf?: string, focus?: string, market?: string): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     as_of?: string
     emotion_score?: number
@@ -2060,7 +2165,7 @@ export const api = {
     const res = await fetch('/api/market-recap/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '', market: market ?? 'cn' }),
     })
     if (!res.ok) {
       let detail = ''

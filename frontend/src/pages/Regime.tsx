@@ -21,6 +21,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
 import { toast } from '@/components/Toast'
+import { useMarket } from '@/lib/market'
 import { Modal } from '@/components/Modal'
 import { cn } from '@/lib/cn'
 
@@ -111,6 +112,10 @@ const cardCls = 'rounded-card border border-border bg-surface/80 shadow-[0_1px_2
 
 // ── 主组件 ────────────────────────────────────────────────
 export function Regime() {
+  // 多市场扩展：港美股复用 A 股完整 UI（动量替代投机维度，新高/新低替代涨跌停）
+  const { market } = useMarket()
+  const isCn = market === 'cn'
+
   const qc = useQueryClient()
   const [range, setRange] = useState<RangePreset>('1y')
   const [customOpen, setCustomOpen] = useState(false)
@@ -120,8 +125,8 @@ export function Regime() {
 
   // coverage: "全部"模式 + 标题展示依赖
   const coverage = useQuery({
-    queryKey: QK.regimeCoverage,
-    queryFn: () => api.regimeCoverage(),
+    queryKey: [...QK.regimeCoverage, market] as const,
+    queryFn: () => api.regimeCoverage(market),
     staleTime: 5 * 60 * 1000,
   })
 
@@ -130,13 +135,13 @@ export function Regime() {
 
   // queryKey 用 range 的完整三元组区分: limit / start+end(全部) / custom天数
   const history = useQuery({
-    queryKey: ['regime-history', range] as const,
-    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit),
+    queryKey: ['regime-history', range, market] as const,
+    queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit, market),
     staleTime: 5 * 60 * 1000,
   })
   const states = useQuery({
-    queryKey: QK.regimeStates(days),
-    queryFn: () => api.regimeStates(days),
+    queryKey: [...QK.regimeStates(days), market] as const,
+    queryFn: () => api.regimeStates(days, market),
     staleTime: 5 * 60 * 1000,
   })
   const [recomputing, setRecomputing] = useState(false)
@@ -220,10 +225,12 @@ export function Regime() {
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, textStyle: { color: ct.tooltipText } },
       legend: {
-        data: ['综合分', '涨停数', '赚钱', '投机', '抗跌', '趋势'],
+        data: isCn ? ['综合分', '涨停数', '赚钱', '投机', '抗跌', '趋势'] : ['综合分', '新高数', '赚钱', '动量', '抗跌', '趋势'],
         textStyle: { color: ct.text, fontSize: 10 }, top: 0,
         // 默认只显示综合分 + 涨停数(简洁); 4 个子维度默认隐藏, 点图例展开看驱动因素
-        selected: { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false },
+        selected: (isCn
+          ? { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false }
+          : { '综合分': true, '新高数': true, '赚钱': false, '动量': false, '抗跌': false, '趋势': false }) as Record<string, boolean>,
       },
       grid: { left: 48, right: 64, top: 36, bottom: 56 },
       xAxis: {
@@ -232,7 +239,7 @@ export function Regime() {
         axisLine: { lineStyle: { color: ct.grid } },
       },
       yAxis: [
-        { type: 'value', name: '涨停', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: isCn ? '涨停' : '新高', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
         { type: 'value', name: '综合分', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
       ],
       dataZoom: [
@@ -240,13 +247,13 @@ export function Regime() {
         { type: 'slider', bottom: 8, height: 16, borderColor: ct.border, fillerColor: ct.zoomFill, textStyle: { color: ct.text } },
       ],
       series: [
-        // 涨停数柱状(半透明背景, 左轴)
-        { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 0, barMaxWidth: 6,
+        // 涨停数/新高数柱状(半透明背景, 左轴)
+        { name: isCn ? '涨停数' : '新高数', type: 'bar', data: limitUps, yAxisIndex: 0, barMaxWidth: 6,
           itemStyle: { color: REGIME_STATE_COLORS.strong, opacity: 0.35 }, z: 1 },
         // 4 子维度曲线(右轴=综合分): 帮助理解综合分由什么驱动(点图例可切换)
         { name: '赚钱', type: 'line', data: profit, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#f59e0b' }, z: 2 },
-        { name: '投机', type: 'line', data: speculation, smooth: true, symbol: 'none', yAxisIndex: 1,
+        { name: isCn ? '投机' : '动量', type: 'line', data: speculation, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#a855f7' }, z: 2 },
         { name: '抗跌', type: 'line', data: resilience, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#10b981' }, z: 2 },
@@ -360,7 +367,7 @@ export function Regime() {
   const handleRecompute = async () => {
     setRecomputing(true)
     try {
-      const r = await api.regimeRecompute()
+      const r = await api.regimeRecompute(undefined, undefined, market)
       toast(r.computed > 0 ? `重算完成 · 新增 ${r.computed} 天` : '重算完成 · 数据已是最新', 'success')
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['regime-history'] }),
@@ -387,7 +394,7 @@ export function Regime() {
         <div className="absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" />
         <div className="flex items-center gap-3">
           <Activity className="h-5 w-5 text-accent" />
-          <h1 className="text-base font-semibold text-foreground">市场环境</h1>
+          <h1 className="text-base font-semibold text-foreground">{isCn ? '市场环境' : `${market === 'hk' ? '港股' : '美股'} · 市场环境`}</h1>
           <span className="text-xs text-muted">每日环境状态 · 赚钱效应 · 趋势分析</span>
           <div className="ml-auto flex items-center gap-2">
             {/* 时间范围按钮组 */}
@@ -720,3 +727,6 @@ function CustomDaysModal({ current, onClose, onApply }: {
     </Modal>
   )
 }
+
+
+// ================================================================

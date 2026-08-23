@@ -55,6 +55,8 @@ class MatcherConfig:
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
+    # 印花税是否买卖双边收取（港股 0.1% 双边；A 股 0.05% 仅卖出；美股无）
+    stamp_tax_double_sided: bool = False
     slippage_bps: float = 5.0
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
@@ -84,8 +86,11 @@ class MatcherConfig:
         return self.commission_pct if self.commission_pct is not None else self.fees_pct
 
     def buy_cost_pct(self) -> float:
-        # 买入腿: 佣金 + 滑点。
-        return self._commission_pct() + self.slippage_bps / 10000.0
+        # 买入腿: 佣金 + 滑点 (+ 港股双边印花税)。
+        stamp = 0.0
+        if self.stamp_tax_double_sided and self.stamp_tax_pct is not None:
+            stamp = self.stamp_tax_pct
+        return self._commission_pct() + stamp + self.slippage_bps / 10000.0
 
     def sell_cost_pct(self) -> float:
         # 卖出腿: 佣金 + 印花税 + 滑点。印花税未设时为 0 (向后兼容)。
@@ -213,8 +218,9 @@ class PanelCache:
         columns: list[str] | None,
         compute_fn,
         asset_type: str = "stock",
+        market: str = "cn",
     ) -> pl.DataFrame:
-        key = self._make_key(symbols, start, end, columns, asset_type)
+        key = self._make_key(symbols, start, end, columns, asset_type, market)
         now = time.monotonic()
 
         with self._lock:
@@ -244,7 +250,7 @@ class PanelCache:
         # leader: compute 放锁外 (不同 key 仍可并发, 保留原设计优点)。
         t_compute = time.perf_counter()
         try:
-            df = compute_fn(symbols, start, end, columns, asset_type)
+            df = compute_fn(symbols, start, end, columns, asset_type, market)
         except BaseException as e:
             # 失败不缓存: 摘除 inflight 让后续线程重试, 并把异常透传给已在等的跟随者。
             with self._lock:
@@ -280,13 +286,13 @@ class PanelCache:
             self._cache.clear()
 
     @staticmethod
-    def _make_key(symbols: list[str] | None, start: date, end: date, columns: list[str] | None, asset_type: str = "stock") -> str:
+    def _make_key(symbols: list[str] | None, start: date, end: date, columns: list[str] | None, asset_type: str = "stock", market: str = "cn") -> str:
         if symbols is None:
             h = "all"
         else:
             h = hashlib.md5(",".join(sorted(symbols)).encode()).hexdigest()[:12]
         cols = "all" if columns is None else hashlib.md5(",".join(sorted(columns)).encode()).hexdigest()[:8]
-        return f"{asset_type}:{h}:{start}:{end}:{cols}"
+        return f"{market}:{asset_type}:{h}:{start}:{end}:{cols}"
 
 
 # ================================================================
@@ -309,9 +315,10 @@ class BacktestEngine:
         end: date,
         columns: list[str] | None = None,
         asset_type: str = "stock",
+        market: str = "cn",
     ) -> pl.DataFrame:
-        """加载 enriched 数据面板，带缓存。asset_type='etf' 时读 ETF enriched。"""
-        return self._cache.get_or_compute(symbols, start, end, columns, self._load_panel_inner, asset_type=asset_type)
+        """加载 enriched 数据面板，带缓存。asset_type='etf' 时读 ETF enriched；market 决定港美股目录。"""
+        return self._cache.get_or_compute(symbols, start, end, columns, self._load_panel_inner, asset_type=asset_type, market=market)
 
     def load_panel_for_backtest(
         self,
@@ -320,6 +327,7 @@ class BacktestEngine:
         end: date,
         feature_plan,
         asset_type: str = "stock",
+        market: str = "cn",
     ) -> pl.DataFrame:
         """按解析后的依赖加载窄基础列并计算回测所需特征。"""
         from app.indicators.pipeline import (
@@ -334,12 +342,13 @@ class BacktestEngine:
             end,
             columns=sorted(feature_plan.base_columns),
             asset_type=asset_type,
+            market=market,
         )
         if df.is_empty():
             return df
 
         instruments = (
-            self.repo.get_instruments_asset(asset_type)
+            self.repo.get_instruments_asset(asset_type, market)
             if self.repo is not None
             else pl.DataFrame()
         )
@@ -347,7 +356,8 @@ class BacktestEngine:
         if not matrix_native:
             df = compute_indicators(df, needed=set(feature_plan.indicator_columns))
             df = compute_signals(df, needed=set(feature_plan.signal_columns))
-        if not instruments.is_empty():
+        # 涨跌停信号是 A 股专属（港美股无涨停概念，compute_limit_signals 跳过）
+        if not instruments.is_empty() and market == "cn":
             df = compute_limit_signals(
                 df,
                 instruments,
@@ -402,21 +412,22 @@ class BacktestEngine:
         cache_profile: MatrixCacheProfile | None = None,
         coverage_start: date | None = None,
         coverage_end: date | None = None,
+        market: str = "cn",
     ) -> MarketDataMatrix:
         """Load a matrix-native backtest directly from projected parquet batches."""
         if feature_plan.execution_backend != "matrix_native":
             raise ValueError("direct market matrix loading requires matrix_native backend")
         from app.tickflow.repository import enriched_dirname
 
-        parquet_root = self.repo.store.data_dir / enriched_dirname(asset_type)
-        instruments = self.repo.get_instruments_asset(asset_type)
+        parquet_root = self.repo.store.data_dir / enriched_dirname(asset_type, market)
+        instruments = self.repo.get_instruments_asset(asset_type, market)
         field_columns = (
             set(feature_plan.base_columns)
             | set(feature_plan.instrument_columns)
             | set(feature_plan.matrix_columns)
         )
         cache_root = (
-            self.repo.store.data_dir / ".backtest_matrix_cache"
+            self.repo.store.data_dir / f".backtest_matrix_cache_{market}"
             if settings.backtest_matrix_disk_cache_enabled
             else None
         )
@@ -468,12 +479,13 @@ class BacktestEngine:
         end: date,
         columns: list[str] | None = None,
         asset_type: str = "stock",
+        market: str = "cn",
     ) -> pl.DataFrame:
         t0 = time.perf_counter()
 
-        # 近期区间优先复用 repository 的预计算 enriched 历史缓存 (仅 stock: 该缓存为股票专用)。
+        # 近期区间优先复用 repository 的预计算 enriched 历史缓存 (仅 stock/cn: 该缓存为股票专用)。
         try:
-            if columns is None and asset_type == "stock" and self.repo is not None and hasattr(self.repo, "get_enriched_range"):
+            if columns is None and asset_type == "stock" and market == "cn" and self.repo is not None and hasattr(self.repo, "get_enriched_range"):
                 cached = self.repo.get_enriched_range(start, end, symbols=symbols, columns=columns)
                 if cached is not None and not cached.is_empty():
                     elapsed = (time.perf_counter() - t0) * 1000
@@ -483,7 +495,7 @@ class BacktestEngine:
             logger.debug("backtest load panel cache miss: %s", e)
 
         from app.tickflow.repository import enriched_dirname
-        enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
+        enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type, market) / "**" / "*.parquet")
 
         try:
             lf = scan_enriched_parquet(enriched_glob)

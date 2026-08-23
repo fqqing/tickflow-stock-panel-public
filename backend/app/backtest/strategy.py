@@ -464,6 +464,7 @@ class StrategyBacktestConfig:
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
+    stamp_tax_double_sided: bool = False
     slippage_bps: float = 5.0
     max_positions: int = 10
     max_exposure_pct: float = 1.0
@@ -474,6 +475,8 @@ class StrategyBacktestConfig:
     holding_days: int = 5
     # 分钟K精确成交: 开启后用当日分钟K确定穿越价/VWAP (需 Pro+ 分钟K能力)
     minute_fill: bool = False
+    # 市场: cn | hk | us（多市场扩展；决定数据目录路由与默认规则）
+    market: str = "cn"
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
     # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
     regime_filter: dict | None = None
@@ -810,6 +813,7 @@ class StrategyBacktestService:
                 cache_profile=cache_profile,
                 coverage_start=coverage_start,
                 coverage_end=coverage_end,
+                market=first.market,
             )
             direct_load_ms = round((time.perf_counter() - started) * 1000, 1)
         else:
@@ -1063,6 +1067,7 @@ class StrategyBacktestService:
                     cache_profile=cache_profile,
                     coverage_start=coverage_start,
                     coverage_end=coverage_end,
+                    market=config.market,
                 )
             except (ValueError, OSError) as e:
                 return _err(f"回测矩阵准备失败: {e}")
@@ -1090,6 +1095,7 @@ class StrategyBacktestService:
                     load_end,
                     feature_plan,
                     asset_type=config.asset_type,
+                    market=config.market,
                 )
             except (ValueError, pl.exceptions.PolarsError) as e:
                 return _err(f"回测特征准备失败: {e}")
@@ -1108,6 +1114,7 @@ class StrategyBacktestService:
             fees_pct=config.fees_pct,
             commission_pct=config.commission_pct,
             stamp_tax_pct=config.stamp_tax_pct,
+            stamp_tax_double_sided=config.stamp_tax_double_sided,
             slippage_bps=config.slippage_bps,
             stop_loss_pct=stop_loss,
             take_profit_pct=take_profit,

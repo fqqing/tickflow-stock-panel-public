@@ -910,6 +910,8 @@ export function StrategyBacktest() {
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
+  // 多市场扩展：cn | hk | us
+  const [market, setMarket] = useState<'cn' | 'hk' | 'us'>(saved?.market ?? 'cn')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
@@ -1097,6 +1099,7 @@ export function StrategyBacktest() {
     startBacktest({
       strategy_id: selectedStrategy,
       asset_type: assetType,
+      market,
       symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
@@ -2421,7 +2424,21 @@ export function StrategyBacktest() {
                         </button>
                       ))}
                     </div>
-                    <span className="text-[11px] text-muted/70">ETF 仅技术类策略,读 ETF enriched</span>
+                    <span className="text-[11px] text-muted">市场</span>
+                    <div className="inline-flex h-8 rounded-btn border border-border overflow-hidden">
+                      {([['cn', 'A股'], ['hk', '港股'], ['us', '美股']] as const).map(([m, label]) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => { setMarket(m); setSelectedStrategy(null); setSymbols('') }}
+                          className={`h-full px-3 text-xs font-medium transition-colors cursor-pointer
+                            ${market === m ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-[11px] text-muted/70">港美股无涨跌停/连板,费率按市场(港双印花)</span>
                   </div>
                   <StockPoolPicker value={symbols} onChange={setSymbols} assetType={assetType} />
                   <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>

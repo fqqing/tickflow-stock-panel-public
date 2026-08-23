@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react'
+import React, { useState, useCallback, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle } from 'lucide-react'
@@ -12,6 +12,7 @@ import { fmtPct, priceColorClass } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { useTheme } from '@/lib/theme'
+import { useMarket } from '@/lib/market'
 import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
@@ -183,8 +184,7 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
     codeCls: 'text-muted/60',
     badge: 'text-purple-400',
     badgeText: d => d === 'down' ? '撬' : '炸',
-  },
-  recovery: {
+  },  recovery: {
     bg: 'opacity-75',
     bar: 'border-l border-purple-400/30',
     nameCls: 'text-foreground/70 text-xs',
@@ -199,6 +199,46 @@ const STATUS_STYLE: Record<string, { bg: string; bar: string; nameCls: string; c
     codeCls: 'text-muted/60',
     badge: 'text-muted/80',
     badgeText: d => d === 'down' ? '止' : '断',
+  },
+  // ── 港美股强度状态（多市场扩展）──
+  high: {
+    bg: '',
+    bar: 'border-l-2 border-bull/60',
+    nameCls: 'text-rose-900 dark:text-rose-50 text-[13px]',
+    codeCls: 'text-muted/80',
+    badge: 'text-bull',
+    badgeText: '新高',
+    cardStyle: {
+      background: 'linear-gradient(105deg, hsl(4 60% 45% / 0.16) 0%, hsl(6 50% 30% / 0.10) 40%, hsl(220 15% 12% / 0.0) 100%)',
+      boxShadow: 'inset 1px 0 0 hsl(4 80% 55% / 0.14), 0 0 10px -4px hsl(4 80% 50% / 0.12)',
+    },
+    hoverShadow: 'inset 1px 0 0 hsl(4 80% 55% / 0.32), 0 0 18px -4px hsl(4 80% 50% / 0.30)',
+  },
+  momentum: {
+    bg: '',
+    bar: 'border-l-2 border-blue-400/50',
+    nameCls: 'text-blue-900 dark:text-blue-100 text-[13px]',
+    codeCls: 'text-muted/80',
+    badge: 'text-blue-400',
+    badgeText: '动量',
+    cardStyle: {
+      background: 'linear-gradient(105deg, hsl(210 80% 45% / 0.13) 0%, hsl(215 60% 35% / 0.08) 40%, hsl(220 15% 12% / 0.0) 100%)',
+      boxShadow: 'inset 1px 0 0 hsl(210 80% 55% / 0.12), 0 0 10px -4px hsl(210 80% 50% / 0.10)',
+    },
+    hoverShadow: 'inset 1px 0 0 hsl(210 80% 55% / 0.30), 0 0 18px -4px hsl(210 80% 50% / 0.28)',
+  },
+  volume: {
+    bg: '',
+    bar: 'border-l-2 border-orange-400/50',
+    nameCls: 'text-orange-900 dark:text-orange-100 text-[13px]',
+    codeCls: 'text-muted/80',
+    badge: 'text-orange-400',
+    badgeText: '放量',
+    cardStyle: {
+      background: 'linear-gradient(105deg, hsl(25 85% 50% / 0.13) 0%, hsl(28 70% 40% / 0.08) 40%, hsl(220 15% 12% / 0.0) 100%)',
+      boxShadow: 'inset 1px 0 0 hsl(25 85% 55% / 0.12), 0 0 10px -4px hsl(25 85% 50% / 0.10)',
+    },
+    hoverShadow: 'inset 1px 0 0 hsl(25 85% 55% / 0.30), 0 0 18px -4px hsl(25 85% 50% / 0.28)',
   },
 }
 
@@ -629,6 +669,7 @@ function MonitorMenu({ stock, direction, sealMode, monitorRule, anchorRect, hasD
 // ===== 过滤（多选） =====
 
 type FilterKey = 'limit_up' | 'broken' | 'failed' | 'limit_down' | 'recovery' | 'main' | 'chinext' | 'star' | 'bj' | 'st'
+  | 'high' | 'momentum' | 'volume' | 'tier5' | 'tier4' | 'tier3' | 'tier2' | 'hk_main' | 'hk_gem'
 
 const STATUS_TABS_UP: { key: FilterKey; label: string }[] = [
   { key: 'limit_up', label: '涨停' },
@@ -678,11 +719,67 @@ function matchFilter(stock: LimitLadderStock, key: FilterKey): boolean {
       return /\.BJ$/.test(s)
     case 'st':
       return n.includes('ST')
+    // ── 港美股强度状态/档位/板块（多市场扩展）──
+    case 'high':
+      return stock.status === 'high'
+    case 'momentum':
+      return stock.status === 'momentum'
+    case 'volume':
+      return stock.status === 'volume'
+    case 'tier5':
+      return Number(stock.boards) === 5
+    case 'tier4':
+      return Number(stock.boards) === 4
+    case 'tier3':
+      return Number(stock.boards) === 3
+    case 'tier2':
+      return Number(stock.boards) === 2
+    case 'hk_main':
+      return !/^8\d{4}\.HK$/.test(s)   // 港股: 非 8 开头 = 主板
+    case 'hk_gem':
+      return /^8\d{4}\.HK$/.test(s)   // 港股: 8 开头 = 创业板(GEM)
   }
 }
 
 function isStatusKey(key: FilterKey): boolean {
   return key === 'limit_up' || key === 'limit_down' || key === 'broken' || key === 'recovery' || key === 'failed'
+    || key === 'high' || key === 'momentum' || key === 'volume'
+}
+
+// ── 港美股强度梯队分类（多市场扩展）──
+const MARKET_STATUS_TABS: { key: FilterKey; label: string }[] = [
+  { key: 'high', label: '新高' },
+  { key: 'momentum', label: '动量' },
+  { key: 'volume', label: '放量' },
+]
+
+const MARKET_TIER_TABS: { key: FilterKey; label: string }[] = [
+  { key: 'tier5', label: '动量5档' },
+  { key: 'tier4', label: '动量4档' },
+  { key: 'tier3', label: '动量3档' },
+  { key: 'tier2', label: '动量2档' },
+]
+
+const MARKET_BOARD_TABS: Record<'hk' | 'us', { key: FilterKey; label: string }[]> = {
+  hk: [
+    { key: 'hk_main', label: '主板' },
+    { key: 'hk_gem', label: '创业板GEM' },
+  ],
+  us: [],  // 美股无交易所/板块字段，暂不提供板块分类
+}
+
+function marketStatusTabs(): { key: FilterKey; label: string }[] {
+  return MARKET_STATUS_TABS
+}
+
+function marketBoardTabs(market: 'hk' | 'us'): { key: FilterKey; label: string }[] {
+  return MARKET_BOARD_TABS[market]
+}
+
+function marketDefaultFilters(market: 'hk' | 'us'): Set<FilterKey> {
+  const keys: FilterKey[] = ['high', 'momentum', 'volume', 'tier5', 'tier4', 'tier3', 'tier2']
+  keys.push(...marketBoardTabs(market).map(t => t.key))
+  return new Set(keys)
 }
 
 function filterTiers(tiers: LimitLadderTier[], keys: Set<FilterKey>, bf?: BrokenFailedConfig): LimitLadderTier[] {
@@ -756,18 +853,20 @@ function tierTextCls(n: number): string {
   return 'text-muted'
 }
 
-function tierLabel(n: number, direction: Direction): string {
+function tierLabel(n: number, direction: Direction, isCn = true): string {
+  if (!isCn) return `动量${n}档`
   if (direction === 'down') return n === 1 ? '首跌' : `${n}连跌`
   return n === 1 ? '首板' : `${n}板`
 }
 
 // ===== 梯队总览条 =====
 
-function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction }: {
+function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction, isCn = true }: {
   tiers: LimitLadderTier[]
   dateValue: string
   onDateChange: (v: string) => void
   filterKeys: Set<FilterKey>
+  isCn: boolean
   bf?: BrokenFailedConfig
   direction: Direction
 }) {
@@ -796,7 +895,7 @@ function OverviewBar({ tiers, dateValue, onDateChange, filterKeys, bf, direction
           const luCount = limitUpCounts[idx]
           return (
             <div key={t.boards} className="flex items-center gap-1">
-              <span className={`font-medium ${tierTextCls(t.boards)}`}>{tierLabel(t.boards, direction)}</span>
+              <span className={`font-medium ${tierTextCls(t.boards)}`}>{tierLabel(t.boards, direction, isCn)}</span>
               <div
                 className="h-2 rounded-sm bg-accent/40"
                 style={{ width: `${Math.max(8, (luCount / maxCount) * 48)}px` }}
@@ -924,11 +1023,12 @@ function TagStats({ title, tiers, extFields, fieldKey, color, selectedTag, onSel
 
 // ===== 梯队分组 =====
 
-function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth }: {
+function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth, isCn = true }: {
   tier: LimitLadderTier
   defaultOpen: boolean
   extFields: ExtFieldConfig
   filterKeys: Set<FilterKey>
+  isCn: boolean
   bf?: BrokenFailedConfig
   onStockClick: (symbol: string, name?: string) => void
   selectedTag: { fieldKey: 'concept' | 'industry'; tag: string } | null
@@ -994,7 +1094,7 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
         className="w-full flex items-center gap-2 px-3 py-2 hover:bg-surface/80 transition-colors"
       >
         <Flame className={`h-3.5 w-3.5 ${tier.boards >= 5 ? 'text-orange-500' : tier.boards >= 3 ? 'text-yellow-500' : 'text-muted'}`} />
-        <span className={`text-sm font-bold tabular-nums ${tierTextCls(tier.boards)}`}>{tierLabel(tier.boards, direction)}<span className="text-muted/40 mx-1">·</span>{luCount}</span>
+        <span className={`text-sm font-bold tabular-nums ${tierTextCls(tier.boards)}`}>{tierLabel(tier.boards, direction, isCn)}<span className="text-muted/40 mx-1">·</span>{luCount}</span>
         {(showBroken && brCount > 0) || (showFailed && faCount > 0) ? (
           <span className="text-[11px] text-muted/60">
             {showBroken && brCount > 0 && <span className="text-purple-400">{brCount}{brokenBadge}</span>}
@@ -1432,10 +1532,15 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 // ===== 主页面 =====
 
 export function LimitUpLadder() {
+  // 多市场扩展：港美股走同构「强度梯队」（动量档位替代连板数，复用 A 股 UI）
+  const { market } = useMarket()
+  const isCn = market === 'cn'
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
-  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(loadFilterKeys)
+  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(() =>
+    isCn ? loadFilterKeys() : marketDefaultFilters(market as 'hk' | 'us'),
+  )
   const [extFields, setExtFields] = useState<ExtFieldConfig>(loadExtFields)
   const [showExtConfig, setShowExtConfig] = useState(false)
   const [showConcept, setShowConcept] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).concept)
@@ -1463,6 +1568,12 @@ export function LimitUpLadder() {
     setDirection(d)
     storage.limitLadderDirection.set(d)
     // 切换方向时重置状态筛选为该方向默认集(避免涨跌状态键错配)
+    if (!isCn) {
+      const mk = marketDefaultFilters(market as 'hk' | 'us')
+      setFilterKeys(mk)
+      storage.limitLadderBoard.set([...mk])
+      return
+    }
     const defaultKeys = d === 'down'
       ? ['limit_down', 'main', 'chinext', 'star', 'bj']
       : ['limit_up', 'main', 'chinext', 'star', 'bj']
@@ -1470,7 +1581,16 @@ export function LimitUpLadder() {
     const valid = defaultKeys.filter(k => allTabs.some(t => t.key === k)) as FilterKey[]
     setFilterKeys(new Set(valid))
     storage.limitLadderBoard.set(valid)
-  }, [])
+  }, [isCn, market])
+
+  // 市场切换时重置过滤为市场默认（A股↔港美股切换）
+  useEffect(() => {
+    if (!isCn) {
+      const mk = marketDefaultFilters(market as 'hk' | 'us')
+      setFilterKeys(mk)
+    }
+    // 切回 A 股时保留用户此前保存的 A 股过滤
+  }, [market, isCn])
 
   const toggleConcept = useCallback(() => {
     setShowConcept(prev => {
@@ -1517,8 +1637,8 @@ export function LimitUpLadder() {
   const extColumnsParam = useMemo(() => buildExtColumnsParam(extFields), [extFields])
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: [QK.limitLadder(asOf || undefined), extColumnsParam, direction],
-    queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction),
+    queryKey: [QK.limitLadder(asOf || undefined), extColumnsParam, direction, market],
+    queryFn: () => api.limitLadder(asOf || undefined, extColumnsParam, direction, market),
     staleTime: 5 * 60_000,
   })
   const handleOpenDimension = useCallback((kind: DimensionKind, value: string, sourceField?: string) => {
@@ -1546,8 +1666,10 @@ export function LimitUpLadder() {
   if (!data || rawTiers.length === 0) {
     return (
       <div className="flex flex-col h-full">
-        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
-        <EmptyState icon={Flame} title={direction === 'down' ? '暂无连跌数据' : '暂无连板数据'} hint={direction === 'down' ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无涨停股或 enriched 数据未就绪'} />
+        <PageHeader title={isCn ? (direction === 'down' ? '连跌梯队' : '连板梯队') : '强度梯队'} />
+        <EmptyState icon={Flame}
+          title={isCn ? (direction === 'down' ? '暂无连跌数据' : '暂无连板数据') : '暂无强度数据'}
+          hint={isCn ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无动量≥3% 的标的或数据未就绪'} />
       </div>
     )
   }
@@ -1555,19 +1677,21 @@ export function LimitUpLadder() {
   return (
     <div className="flex flex-col h-full">
       <PageHeader
-        title={direction === 'down' ? '连跌梯队' : '连板梯队'}
+        title={isCn ? (direction === 'down' ? '连跌梯队' : '连板梯队') : '强度梯队'}
         titleExtra={
           <div className="flex items-center gap-2">
-            <SealedBadge
-              degraded={sealedDegrade.degraded}
-              hasDepth={sealedDegrade.hasDepth}
-              isHistorical={sealedDegrade.isHistorical}
-              sealedReady={sealedDegrade.sealedReady}
+            {isCn && (
+              <SealedBadge
+                degraded={sealedDegrade.degraded}
+                hasDepth={sealedDegrade.hasDepth}
+                isHistorical={sealedDegrade.isHistorical}
+                sealedReady={sealedDegrade.sealedReady}
               sealedCountsUp={data?.sealed_counts_up}
               sealedCountsDown={data?.sealed_counts_down}
               rawUp={data?.counts_raw?.up}
               rawDown={data?.counts_raw?.down}
             />
+            )}
             {/* 涨跌停切换(胶囊式): 点击切换方向, 当前方向有背景 */}
             <div className="flex items-center rounded-full bg-elevated/60 p-0.5">
               <button
@@ -1578,7 +1702,7 @@ export function LimitUpLadder() {
                     : 'text-muted hover:text-bull/70'
                 }`}
               >
-                <span>涨停</span>
+                <span>{isCn ? '涨停' : '新高'}</span>
                 <span>{data?.counts?.up ?? 0}</span>
               </button>
               <button
@@ -1589,7 +1713,7 @@ export function LimitUpLadder() {
                     : 'text-muted hover:text-bear/70'
                 }`}
               >
-                <span>跌停</span>
+                <span>{isCn ? '跌停' : '新低'}</span>
                 <span>{data?.counts?.down ?? 0}</span>
               </button>
             </div>
@@ -1622,8 +1746,8 @@ export function LimitUpLadder() {
               </>
             )}
 
-            {/* 状态组: 涨停/炸板/断板 或 跌停/翘板/止跌 */}
-            {statusTabs(direction).map(tab => (
+            {/* 状态组: A股 涨停/炸板/断板；港美股 新高/动量/放量 */}
+            {(isCn ? statusTabs(direction) : marketStatusTabs()).map(tab => (
               <button
                 key={tab.key}
                 onClick={() => toggleFilter(tab.key)}
@@ -1637,34 +1761,38 @@ export function LimitUpLadder() {
               </button>
             ))}
 
+            {isCn && <div className="w-px h-4 bg-border mx-1" />}
+
+            {/* 显示组: 概念/行业（仅 A 股） */}
+            {isCn && (
+              <>
+                <button
+                  onClick={toggleConcept}
+                  className={`px-2 py-1 text-xs transition-colors ${
+                    showConcept
+                      ? 'bg-yellow-500/15 text-yellow-400 font-medium'
+                      : 'text-secondary hover:text-foreground hover:bg-surface'
+                  }`}
+                >
+                  概念
+                </button>
+                <button
+                  onClick={toggleIndustry}
+                  className={`px-2 py-1 text-xs transition-colors ${
+                    showIndustry
+                      ? 'bg-blue-500/15 text-blue-400 font-medium'
+                      : 'text-secondary hover:text-foreground hover:bg-surface'
+                  }`}
+                >
+                  行业
+                </button>
+              </>
+            )}
+
             <div className="w-px h-4 bg-border mx-1" />
 
-            {/* 显示组: 概念/行业 */}
-            <button
-              onClick={toggleConcept}
-              className={`px-2 py-1 text-xs transition-colors ${
-                showConcept
-                  ? 'bg-yellow-500/15 text-yellow-400 font-medium'
-                  : 'text-secondary hover:text-foreground hover:bg-surface'
-              }`}
-            >
-              概念
-            </button>
-            <button
-              onClick={toggleIndustry}
-              className={`px-2 py-1 text-xs transition-colors ${
-                showIndustry
-                  ? 'bg-blue-500/15 text-blue-400 font-medium'
-                  : 'text-secondary hover:text-foreground hover:bg-surface'
-              }`}
-            >
-              行业
-            </button>
-
-            <div className="w-px h-4 bg-border mx-1" />
-
-            {/* 板块组 */}
-            {BOARD_TABS.map(tab => (
+            {/* 板块组: A股 主板/创业板/科创板/北交所/ST；港美股 强度档 + 主板/GEM */}
+            {(isCn ? BOARD_TABS : [...MARKET_TIER_TABS, ...marketBoardTabs(market as 'hk' | 'us')]).map(tab => (
               <button
                 key={tab.key}
                 onClick={() => toggleFilter(tab.key)}
@@ -1698,7 +1826,7 @@ export function LimitUpLadder() {
       />
 
       {/* 总览条 + 日期 */}
-      <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} />
+      <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} isCn={isCn} />
 
       {/* 概念统计 */}
       {(extFields.showConceptStats ?? true) && (
@@ -1749,6 +1877,7 @@ export function LimitUpLadder() {
             ladderRules={ladderRules}
             onMonitorChange={refetchMonitorRules}
             hasDepth={sealedDegrade.hasDepth}
+            isCn={isCn}
           />
         ))}
       </div>
@@ -1782,3 +1911,6 @@ export function LimitUpLadder() {
     </div>
   )
 }
+
+
+// ================================================================

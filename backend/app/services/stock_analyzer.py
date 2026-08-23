@@ -45,8 +45,10 @@ def _load_kline(repo, symbol: str) -> pl.DataFrame:
 
     end = date.today()
     start = end - timedelta(days=_KLINE_WINDOW * 2)  # 多取一些保证交易日够
-    # 按资产类型分流: ETF/指数走独立 enriched 存储 (无财务数据, 提示词已有兜底)
-    df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
+    # 按资产类型 + 市场分流: ETF/指数走独立 enriched 存储, 港美股走市场独立目录
+    from app.markets import market_of
+    market = market_of(symbol)
+    df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end, market=market)
     if df.is_empty():
         return df
     return df.tail(_KLINE_WINDOW)

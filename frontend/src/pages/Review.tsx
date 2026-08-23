@@ -23,6 +23,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
+import { useMarket } from '@/lib/market'
 import { useReviewState } from '@/lib/useReviewStore'
 import {
   startReviewGeneration, resetReview, isReviewGenerating,
@@ -67,6 +68,10 @@ function fmtArchivedAt(iso: string): string {
 // Phase 类型复用 store 的定义(单一来源)
 
 export function Review() {
+  // 多市场扩展：港美股走与 A 股一致的 AI 复盘 UI（新高/动量替代涨停/连板语义）
+  const { market } = useMarket()
+  const isCn = market === 'cn'
+
   const qc = useQueryClient()
   // 复盘日期:当前固定取最新交易日(后续如需日期选择可改回 useState)
   const asOf: string | undefined = undefined
@@ -78,16 +83,16 @@ export function Review() {
 
   // 看板数据(与总览页同源)
   const marketQuery = useQuery<OverviewMarket>({
-    queryKey: QK.overviewMarket(asOf),
-    queryFn: () => api.overviewMarket(asOf),
+    queryKey: QK.overviewMarket(asOf, market),
+    queryFn: () => api.overviewMarket(asOf, market),
     staleTime: 5_000,
     placeholderData: (prev) => prev,
   })
 
   // 历史报告
   const historyQuery = useQuery<{ reports: AiReviewReport[] }>({
-    queryKey: QK.reviewReports,
-    queryFn: () => api.reviewReportsList(),
+    queryKey: [...QK.reviewReports, market] as const,
+    queryFn: () => api.reviewReportsList(market),
   })
 
   const deleteMut = useMutation({
@@ -167,6 +172,7 @@ export function Review() {
         summary: doneMeta?.summary,
         emotion_score: doneMeta?.emotion_score ?? null,
         emotion_label: doneMeta?.emotion_label ?? '',
+        market,
       })
       qc.invalidateQueries({ queryKey: QK.reviewReports })
     } catch { /* 静默 */ }
@@ -179,7 +185,7 @@ export function Review() {
     resetReview()
     startReviewGeneration(asOf, focus, (full, doneMeta) => {
       onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
-    })
+    }, market)
   }, [asOf, focus, onGenerationDone])
 
   // 复制全文到剪贴板(viewing 优先,与主区域显示一致)
@@ -224,7 +230,7 @@ export function Review() {
   return (
     <>
       <PageHeader
-        title="AI 复盘"
+        title={isCn ? 'AI 复盘' : `${market === 'hk' ? '港股' : '美股'} · AI 复盘`}
         titleExtra={<Sparkles className="h-4 w-4 text-accent" />}
         subtitle={`${displayDate}${data?.emotion ? ` · 情绪 ${data.emotion.label}` : ''}`}
         right={
@@ -840,3 +846,6 @@ function HistoryPanel({
     </div>
   )
 }
+
+
+// ================================================================

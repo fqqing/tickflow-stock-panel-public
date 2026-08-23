@@ -596,3 +596,135 @@ def build_market_overview(
         "concept_rank": concept_rank,
         "industry_rank": industry_rank,
     })
+
+
+# ================================================================
+# 港美股市场总览（多市场扩展）
+# ================================================================
+def build_market_overview_market(
+    repo,
+    market: str,
+    as_of: date | None = None,
+) -> dict:
+    """港美股市场总览：字段与 A 股 build_market_overview 对齐，语义按市场适配。
+
+    差异:
+      - 无涨停/连板概念 → limit 字段改为「60日新高/新低」统计。
+      - 无同花顺概念/行业扩展表 → concept_rank / industry_rank 为空。
+      - SDK 不提供成交额/换手率 → amount 为 0，activity 只保留量比。
+      - 无指数行情 → indices 为空（前端自行隐藏指数区块）。
+    """
+    from app.markets import get_market
+    from app.services.screener import ScreenerService
+
+    meta = get_market(market)
+    svc = ScreenerService(repo, market=market)
+    as_of = as_of or svc.latest_date()
+
+    empty = {
+        "as_of": None, "quote_status": {"enabled": False},
+        "indices": [], "breadth": {"total": 0, "up": 0, "down": 0, "flat": 0, "up_pct": 0, "down_pct": 0},
+        "amount": {"total": 0, "avg": 0}, "boards": [],
+        "limit": {"limit_up": 0, "broken": 0, "failed": 0, "limit_down": 0, "max_boards": 0, "tiers": []},
+        "distribution": [],
+        "trend": {"above_ma5": 0, "above_ma20": 0, "above_ma60": 0, "above_ma5_pct": 0, "above_ma20_pct": 0, "above_ma60_pct": 0, "new_high": 0, "new_low": 0},
+        "activity": {"avg_turnover": 0, "high_turnover": 0, "high_vol_ratio": 0, "vol_ratio": 1},
+        "radar": [], "emotion": {"score": 50, "label": "暂无"},
+        "top_gainers": [], "top_losers": [], "turnover_leaders": [], "active_leaders": [],
+        "concept_rank": {"leading": [], "lagging": []},
+        "industry_rank": {"leading": [], "lagging": []},
+        "market": market,
+    }
+    if not as_of:
+        empty["as_of"] = None
+        return empty
+
+    df = svc._load_enriched_for_date(as_of)
+    if df.is_empty():
+        empty["as_of"] = str(as_of)
+        return empty
+
+    cols = [
+        "symbol", "name", "close", "change_pct", "amount", "volume",
+        "vol_ratio_5d", "ma5", "ma20", "ma60", "high_60d", "low_60d",
+        "signal_n_day_high", "signal_n_day_low", "momentum_20d",
+    ]
+    df = df.select([c for c in cols if c in df.columns])
+    rows = df.to_dicts()
+    rows = [r for r in rows if (_finite(r.get("volume")) or 0) > 0 or (_finite(r.get("change_pct")) or 0) != 0]
+
+    total = len(rows)
+    up = sum(1 for r in rows if (_finite(r.get("change_pct")) or 0) > 0)
+    down = sum(1 for r in rows if (_finite(r.get("change_pct")) or 0) < 0)
+    flat = max(0, total - up - down)
+    up_pct = up / total * 100 if total else 0
+    down_pct = down / total * 100 if total else 0
+
+    pct_values = [_finite(r.get("change_pct")) for r in rows]
+    pct_values = [v for v in pct_values if v is not None]
+    avg_pct = sum(pct_values) / len(pct_values) if pct_values else 0
+    median_pct = sorted(pct_values)[len(pct_values) // 2] if pct_values else 0
+    strong_up = sum(1 for v in pct_values if v >= 0.03)
+    strong_down = sum(1 for v in pct_values if v <= -0.03)
+
+    above_ma5 = sum(1 for r in rows if (_finite(r.get("ma5")) or 1e18) and (_finite(r.get("close")) or 0) > (_finite(r.get("ma5")) or 0))
+    above_ma20 = sum(1 for r in rows if (_finite(r.get("ma20")) or 1e18) and (_finite(r.get("close")) or 0) > (_finite(r.get("ma20")) or 0))
+    above_ma60 = sum(1 for r in rows if (_finite(r.get("ma60")) or 1e18) and (_finite(r.get("close")) or 0) > (_finite(r.get("ma60")) or 0))
+    # 60日新高 / 新低（替代 A 股涨停/跌停语义）
+    new_high = sum(1 for r in rows if bool(r.get("signal_n_day_high"))
+                   or ((_finite(r.get("high_60d")) or 0) > 0 and (_finite(r.get("close")) or 0) >= (_finite(r.get("high_60d")) or 0) * 0.995))
+    new_low = sum(1 for r in rows if bool(r.get("signal_n_day_low"))
+                  or ((_finite(r.get("low_60d")) or 0) > 0 and (_finite(r.get("close")) or 0) <= (_finite(r.get("low_60d")) or 0) * 1.005))
+
+    vol_ratios = [_finite(r.get("vol_ratio_5d")) for r in rows]
+    vol_ratios = [v for v in vol_ratios if v is not None]
+    avg_vol_ratio = sum(vol_ratios) / len(vol_ratios) if vol_ratios else 1
+    high_vol_ratio = sum(1 for v in vol_ratios if v >= 1.5)
+
+    strong_diff_pct = (strong_up - strong_down) / total * 100 if total else 0
+    high_vol_pct = high_vol_ratio / total * 100 if total else 0
+    strong_down_pct = strong_down / total * 100 if total else 0
+    new_high_pct = new_high / total * 100 if total else 0
+
+    radar = [
+        {"key": "profit", "label": "赚钱", "value": round(_score(up_pct, 20, 80) * 0.45 + _score(avg_pct, -0.02, 0.02) * 0.25 + _score(median_pct, -0.02, 0.02) * 0.20 + _score(strong_diff_pct, -8, 8) * 0.10)},
+        {"key": "money", "label": "量能", "value": round(_score(avg_vol_ratio, 0.6, 1.8) * 0.70 + _score(high_vol_pct, 2, 12) * 0.30)},
+        {"key": "momentum", "label": "动量", "value": round(_score(new_high_pct, 0.5, 8) * 0.6 + _score(new_high - new_low, -20, 40) * 0.4)},
+        {"key": "resilience", "label": "抗跌", "value": 100 - round(_score(down_pct, 20, 80) * 0.55 + _score(strong_down_pct, 1, 12) * 0.45)},
+    ]
+    emotion_score = round(sum(r["value"] for r in radar) / len(radar)) if radar else 50
+    emotion_label = ("强势" if emotion_score >= 70 else "偏暖" if emotion_score >= 55
+                     else "震荡" if emotion_score >= 45 else "偏冷" if emotion_score >= 30 else "冰点")
+
+    return _json_safe({
+        "as_of": str(as_of),
+        "quote_status": {"enabled": False, "is_trading_hours": False},
+        "indices": [],
+        "breadth": {
+            "total": total, "up": up, "down": down, "flat": flat,
+            "up_pct": up_pct, "down_pct": down_pct, "avg_pct": avg_pct,
+            "median_pct": median_pct, "strong_up": strong_up, "strong_down": strong_down,
+        },
+        "amount": {"total": 0, "avg": 0},
+        "boards": [{"board": meta.label, "count": total, "up": up, "down": down, "amount": 0.0}],
+        "limit": {"limit_up": new_high, "broken": 0, "failed": 0, "limit_down": new_low,
+                  "max_boards": 0, "seal_rate": None, "tiers": [], "sealed_ready": False},
+        "distribution": _pct_band_rows(pct_values),
+        "trend": {
+            "above_ma5": above_ma5, "above_ma20": above_ma20, "above_ma60": above_ma60,
+            "above_ma5_pct": above_ma5 / total * 100 if total else 0,
+            "above_ma20_pct": above_ma20 / total * 100 if total else 0,
+            "above_ma60_pct": above_ma60 / total * 100 if total else 0,
+            "new_high": new_high, "new_low": new_low,
+        },
+        "activity": {"avg_turnover": 0, "high_turnover": 0, "high_vol_ratio": high_vol_pct, "vol_ratio": avg_vol_ratio},
+        "radar": radar,
+        "emotion": {"score": emotion_score, "label": emotion_label},
+        "top_gainers": _top_rows(rows, "change_pct", True),
+        "top_losers": _top_rows(rows, "change_pct", False),
+        "turnover_leaders": _top_rows(rows, "amount", True),
+        "active_leaders": _top_rows(rows, "vol_ratio_5d", True),
+        "concept_rank": {"leading": [], "lagging": []},
+        "industry_rank": {"leading": [], "lagging": []},
+        "market": market,
+    })

@@ -3861,6 +3861,9 @@ def _required_field_for_bound(
 def _apply_bound(mask: np.ndarray, values: np.ndarray, config: dict, prefix: str) -> None:
     minimum = config.get(f"{prefix}_min")
     maximum = config.get(f"{prefix}_max")
+    # 数据源不提供该字段时全为 0（如港美股 SDK 的 amount）→ 不施加过滤，避免误杀
+    if np.all(values == 0):
+        return
     if minimum is not None and np.isfinite(values).any():
         mask &= values >= float(minimum)
     if maximum is not None and np.isfinite(values).any():
@@ -3868,6 +3871,9 @@ def _apply_bound(mask: np.ndarray, values: np.ndarray, config: dict, prefix: str
 
 
 def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
+    # 非 A 股 symbol（含 .HK/.US 等）不参与 A 股板块过滤（多市场扩展）
+    if not symbol.split(".")[0].isdigit():
+        return True
     for board in boards:
         if board == "沪主板" and symbol.startswith("60"):
             return True

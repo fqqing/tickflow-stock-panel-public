@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.indicators.pipeline import run_pipeline
+from app.indicators.pipeline import run_pipeline, run_pipeline_market
 from app.config import settings
 from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -103,6 +103,75 @@ def run_instruments_sync(repo: KlineRepository) -> dict:
         repo.clear_cache()
         repo.refresh_cache()
     return {"instruments_rows": rows}
+
+
+def run_market_sync(
+    market: str,
+    repo: KlineRepository,
+    on_progress: ProgressCb | None = None,
+    count_days: int = 400,
+) -> dict:
+    """港美股数据同步 + enriched 计算（多市场扩展）。
+
+    流程: instruments(market 过滤) → 日K(forward 前复权批量拉取) → enriched 计算。
+    A 股走 run_now；本函数服务港美股，供 API/脚本按需触发。
+
+    返回: {"universe": n, "daily_rows": n, "enriched_rows": n, "skipped": [...]}
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    emit = on_progress or _noop
+    skipped: list[str] = []
+
+    # Step 0: universe = 该市场 instruments
+    inst = repo.get_instruments_asset("stock", market)
+    universe = sorted(inst["symbol"].to_list()) if not inst.is_empty() and "symbol" in inst.columns else []
+    if not universe:
+        emit("resolve_universe", 10, f"{market} 无标的（请先同步个股维表）")
+        return {"universe": 0, "daily_rows": 0, "enriched_rows": 0, "skipped": skipped}
+    emit("resolve_universe", 10, f"{market} 标的池:{len(universe)} 只")
+
+    # Step 1: 日K（forward 前复权，港美股无除权因子表）
+    end = _dt.now()
+    start = end - _td(days=count_days)
+    emit("sync_daily", 12, f"获取 {market} 日K [{start.date()} ~ {end.date()}]…")
+
+    def _chunk(cur: int, tot: int) -> None:
+        emit("sync_daily", 12 + int(30 * cur / tot),
+             f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+
+    df = kline_sync.sync_daily_batch(
+        universe,
+        batch_size=100, rpm=60,
+        start_time=start, end_time=end,
+        on_chunk_done=_chunk,
+        adjust="forward",
+    )
+    if df.is_empty():
+        emit("sync_daily", 45, f"{market} 日K 未获取到数据")
+        return {"universe": len(universe), "daily_rows": 0, "enriched_rows": 0, "skipped": skipped}
+    daily_rows = repo.append_daily(df, market=market)
+    emit("sync_daily", 45, f"{market} 日K 写入 {daily_rows} 行")
+    _invalidate(f"kline_daily_{market}")
+
+    # Step 2: enriched 计算
+    emit("compute_enriched", 60, f"计算 {market} enriched 指标…")
+    try:
+        enriched_rows = run_pipeline_market(market, repo.store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("%s enriched 计算失败", market)
+        skipped.append("enriched")
+        enriched_rows = 0
+    emit("compute_enriched", 90, f"{market} enriched 完成,{enriched_rows} 行")
+
+    # 刷新 DuckDB 视图（新 parquet 已写入）
+    try:
+        repo.store._register_views()  # noqa: SLF001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh views failed: %s", e)
+    emit("done", 100, f"{market} 管道完成")
+    return {"universe": len(universe), "daily_rows": daily_rows,
+            "enriched_rows": enriched_rows, "skipped": skipped}
 
 
 def run_now(

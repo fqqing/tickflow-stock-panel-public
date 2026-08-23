@@ -1,22 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import {
-  Database,
-  Play,
-  Loader2,
-  HardDrive,
-  Clock,
-  Calendar,
-  CheckSquare,
-  Trash2,
-  Plus,
-  Wifi,
-  SlidersHorizontal,
-  AlertTriangle,
-  Info,
-  WandSparkles,
-} from 'lucide-react'
+import {Database, Play, Loader2, HardDrive, Clock, Calendar, CheckSquare, Trash2, Plus, Wifi, SlidersHorizontal, AlertTriangle, Info, WandSparkles} from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
 import { api, type ExtDataConfig } from '@/lib/api'
@@ -102,6 +87,16 @@ export function Data() {
       startTime.current = Date.now()
     },
   })
+
+  // 港美股同步（多市场扩展）：走 /api/pipeline/run-market，与 A 股同步共用活跃任务槽
+  const startMarketSync = useMutation({
+    mutationFn: (market: 'hk' | 'us') => api.pipelineRunMarket(market),
+    onSuccess: ({ job_id }) => {
+      setActiveJobId(job_id)
+      startTime.current = Date.now()
+    },
+  })
+  const isMarketStarting = startMarketSync.isPending
 
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const clearData = useMutation({
@@ -591,6 +586,25 @@ export function Data() {
                 <Play className="h-3.5 w-3.5" />
               )}
               {isStarting ? '启动中…' : isRunning ? '同步中…' : '立即同步'}
+            </button>
+            {/* 港美股同步（多市场扩展） */}
+            <button
+              onClick={() => startMarketSync.mutate('hk')}
+              disabled={isMarketStarting || isStarting || isRunning}
+              title="同步全量港股日K + 指标（免费模式约 10 分钟）"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-border text-secondary hover:text-accent hover:border-accent/30 text-xs font-medium disabled:opacity-40 transition-all duration-150"
+            >
+              {isMarketStarting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              港股同步
+            </button>
+            <button
+              onClick={() => startMarketSync.mutate('us')}
+              disabled={isMarketStarting || isStarting || isRunning}
+              title="同步全量美股日K + 指标（免费模式约 30-40 分钟）"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-border text-secondary hover:text-accent hover:border-accent/30 text-xs font-medium disabled:opacity-40 transition-all duration-150"
+            >
+              {isMarketStarting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              美股同步
             </button>
             <button
               onClick={() => setOpenSettings('pipeline-scope')}

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -575,3 +576,234 @@ def earliest_enriched_date(repo) -> date | None:
     """返回 enriched 最早日期(供全量重算定起点)。无数据返回 None。"""
     dates = enriched_date_set(repo)
     return min(dates) if dates else None
+
+
+# ================================================================
+# 港美股市场环境（多市场扩展）
+# ================================================================
+
+# 港美股权重: 投机(涨停)→动量(60日新高/新低), 其余维度沿用
+MARKET_WEIGHTS = {
+    "profit": 0.35,
+    "momentum": 0.25,     # 替代 A 股"投机"(无涨停概念)
+    "resilience": 0.20,
+    "trend": 0.20,
+}
+
+
+def _compute_subscores_market(metrics: dict) -> dict:
+    """港美股 4 维评分：赚钱/动量/抗跌/趋势。
+
+    差异: 用 60日新高占比 + 新高-新低净差 替代 A 股的涨停/封板率/连板高度。
+    """
+    profit = (
+        _score(metrics.get("up_pct", 50), 21, 75) * 0.45
+        + _score(metrics.get("avg_pct", 0) * 100, -1.2, 1.3) * 0.25
+        + _score(metrics.get("median_pct", 0) * 100, -1.2, 1.3) * 0.20
+        + _score(metrics.get("strong_diff_pct", 0), -13, 14) * 0.10
+    )
+    momentum = (
+        _score(metrics.get("new_high_pct", 0) * 100, 0.5, 8) * 0.50   # 60日新高占比
+        + _score(metrics.get("new_high_net", 0), -30, 60) * 0.50      # 新高-新低净差
+    )
+    resilience = 100 - _score(metrics.get("strong_down_pct", 0), 2, 18)
+    trend = (
+        _score(metrics.get("avg_pct", 0) * 100, -2.5, 2.5) * 0.50     # 港美股无指数 → 均涨幅代理
+        + _score((metrics.get("above_ma20_pct", 0.5) or 0.5) * 100, 22, 76) * 0.50
+    )
+    score = (
+        profit * MARKET_WEIGHTS["profit"]
+        + momentum * MARKET_WEIGHTS["momentum"]
+        + resilience * MARKET_WEIGHTS["resilience"]
+        + trend * MARKET_WEIGHTS["trend"]
+    )
+    return {
+        "profit": profit, "momentum": momentum,
+        "resilience": resilience, "trend": trend,
+        "score": max(0, min(100, score)),
+    }
+
+
+def build_regime_market(repo, market: str, start: date, end: date,
+                        progress: Callable | None = None) -> pl.DataFrame:
+    """按日计算港美股市场环境时序（一次性，不持久化）。
+
+    流程: 读 market enriched 窄表 → 即时算指标（compute_all）→ 按日 group_by 聚合 →
+    每日评分 + classify_state。返回列: date/state/score/profit/momentum/resilience/trend 等。
+    """
+    from datetime import timedelta
+    from app.indicators.pipeline import compute_all
+
+    # 读取区间窄表（含 warmup 前缀 60 天保证指标稳定）
+    warmup_start = start - timedelta(days=150)
+    enriched_dir = repo.store.data_dir / (
+        "kline_daily_enriched" if market == "cn" else f"kline_daily_enriched_{market}"
+    )
+    if not enriched_dir.exists() or not any(enriched_dir.rglob("*.parquet")):
+        return pl.DataFrame()
+
+    from app.parquet import scan_enriched_parquet
+    try:
+        lf = (
+            scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
+            .filter((pl.col("date") >= warmup_start) & (pl.col("date") <= end))
+            .sort(["symbol", "date"])
+        )
+        df = lf.collect(streaming=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("regime_market(%s) load failed: %s", market, e)
+        return pl.DataFrame()
+    if df.is_empty():
+        return pl.DataFrame()
+
+    df = compute_all(df, market=market)
+
+    # 逐日聚合
+    rows: list[dict] = []
+    for day, day_df in df.group_by("date"):
+        d = day[0] if isinstance(day, tuple) else day
+        if d < start:
+            continue
+        total = day_df.height
+        if total == 0:
+            continue
+        chg = day_df["change_pct"].fill_null(0.0)
+        up = int((chg > 0).sum())
+        down = int((chg < 0).sum())
+        up_pct = up / total * 100 if total else 0
+        down_pct = down / total * 100 if total else 0
+        pct_vals = day_df["change_pct"].drop_nulls().to_list()
+        avg_pct = sum(pct_vals) / len(pct_vals) if pct_vals else 0.0
+        sorted_pct = sorted(pct_vals)
+        median_pct = sorted_pct[len(sorted_pct) // 2] if sorted_pct else 0.0
+        strong_up = sum(1 for v in pct_vals if v >= 0.03)
+        strong_down = sum(1 for v in pct_vals if v <= -0.03)
+        strong_up_pct = strong_up / total * 100 if total else 0
+        strong_down_pct = strong_down / total * 100 if total else 0
+        strong_diff_pct = (strong_up - strong_down) / total * 100 if total else 0
+        # 60日新高/新低
+        new_high = 0
+        new_low = 0
+        if "high_60d" in day_df.columns and "close" in day_df.columns:
+            new_high = int((day_df["close"] >= day_df["high_60d"].fill_null(0) * 0.995).sum())
+        if "low_60d" in day_df.columns and "close" in day_df.columns:
+            new_low = int((day_df["close"] <= day_df["low_60d"].fill_null(0) * 1.005).sum())
+        new_high_pct = new_high / total * 100 if total else 0
+        new_high_net = new_high - new_low
+        # MA20 上方
+        above_ma20 = 0
+        if "ma20" in day_df.columns and "close" in day_df.columns:
+            above_ma20 = int((day_df["close"] > day_df["ma20"].fill_null(0)).sum())
+        above_ma20_pct = above_ma20 / total * 100 if total else 0
+
+        metrics = {
+            "up_pct": up_pct, "down_pct": down_pct, "avg_pct": avg_pct,
+            "median_pct": median_pct, "strong_up_pct": strong_up_pct,
+            "strong_down_pct": strong_down_pct, "strong_diff_pct": strong_diff_pct,
+            "new_high": new_high, "new_low": new_low, "new_high_pct": new_high_pct,
+            "new_high_net": new_high_net, "above_ma20_pct": above_ma20_pct / 100.0,
+        }
+        sub = _compute_subscores_market(metrics)
+        score = max(0, min(100, round(sub["score"])))
+        state = "range"
+        if score >= STATE_STRONG:
+            state = "strong"
+        elif score >= STATE_LEAN_STRONG:
+            state = "lean_strong"
+        elif score >= STATE_RANGE:
+            state = "range"
+        elif score >= STATE_LEAN_WEAK:
+            state = "lean_weak"
+        else:
+            state = "weak"
+        # 最大动量档（当日最高 boards，替代 A 股 max_consecutive 连板高度）
+        max_momentum_tier = 1
+        if "momentum_20d" in day_df.columns:
+            mom_max = day_df["momentum_20d"].max()
+            if mom_max is not None:
+                mom_max = float(mom_max)
+                max_momentum_tier = (5 if mom_max >= 0.25 else 4 if mom_max >= 0.15
+                                     else 3 if mom_max >= 0.08 else 2 if mom_max >= 0.03 else 1)
+        rows.append({
+            # 对齐 A 股 RegimeRow 字段（前端复用 A 股渲染，语义替换）
+            "date": d, "state": state, "score": score,
+            "limit_up": new_high,          # 60日新高（替代涨停数）
+            "limit_down": new_low,         # 60日新低
+            "broken_limit": 0,
+            "max_consecutive": max_momentum_tier,
+            "seal_rate": 0,
+            "up_count": up, "down_count": down,
+            "up_ratio": round(up / down, 4) if down > 0 else (float(up) if up > 0 else 1.0),
+            "index_pct": round(avg_pct, 4),  # 无指数 → 均涨幅代理
+            "above_ma20_pct": round(above_ma20_pct / 100, 4),
+            "total_amount": 0, "avg_turnover": 0,
+            "avg_pct": round(avg_pct, 4), "median_pct": round(median_pct, 4),
+            "strong_up_pct": round(strong_up_pct, 4), "strong_down_pct": round(strong_down_pct, 4),
+            # 4 子维度：speculation_score 用 momentum 替代
+            "profit_score": round(sub["profit"]),
+            "speculation_score": round(sub["momentum"]),
+            "resilience_score": round(sub["resilience"]),
+            "trend_score": round(sub["trend"]),
+            "market": market,
+        })
+        if progress:
+            progress(d, rows[-1])
+    if not rows:
+        return pl.DataFrame()
+    return pl.DataFrame(rows).sort("date")
+
+
+# ───────────────────────── 港美股持久化（多市场扩展）────────────────────────
+
+def regime_market_path(data_dir: Path, market: str) -> Path:
+    return data_dir / f"regime_{market}" / "part.parquet"
+
+
+def save_regime_market(data_dir: Path, market: str, new_rows: pl.DataFrame) -> None:
+    """按 date upsert 港美股 regime 时序（仿 A 股 upsert_regime_history）。"""
+    if new_rows.is_empty() or "date" not in new_rows.columns:
+        return
+    p = regime_market_path(data_dir, market)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    new_dates = set(new_rows["date"].to_list())
+    old = load_regime_market_history(data_dir, market)
+    if old.is_empty():
+        combined = new_rows
+    else:
+        kept = old.filter(~pl.col("date").is_in(list(new_dates)))
+        target_cols = new_rows.columns
+        keep_exprs = []
+        for c in target_cols:
+            if c in kept.columns:
+                keep_exprs.append(pl.col(c))
+            else:
+                keep_exprs.append(pl.lit(None).alias(c))
+        kept = kept.select(keep_exprs)
+        new_rows = new_rows.select(target_cols)
+        combined = pl.concat([kept, new_rows], how="vertical_relaxed")
+    combined = combined.sort("date").unique(subset=["date"], keep="last")
+    combined.write_parquet(p)
+
+
+def load_regime_market_history(data_dir: Path, market: str) -> pl.DataFrame:
+    """读取港美股 regime 时序；不存在返回空。"""
+    p = regime_market_path(data_dir, market)
+    if not p.exists():
+        return pl.DataFrame()
+    try:
+        return pl.read_parquet(p)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_regime_market_history(%s) failed: %s", market, e)
+        return pl.DataFrame()
+
+
+def get_regime_market_coverage(data_dir: Path, market: str) -> dict:
+    """港美股 regime 覆盖元信息。"""
+    df = load_regime_market_history(data_dir, market)
+    if df.is_empty():
+        return {"rows": 0, "earliest_date": None, "latest_date": None}
+    return {
+        "rows": df.height,
+        "earliest_date": str(df["date"].min()),
+        "latest_date": str(df["date"].max()),
+    }

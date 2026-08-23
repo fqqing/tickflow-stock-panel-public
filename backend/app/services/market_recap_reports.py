@@ -31,13 +31,17 @@ _store = JsonReportStore(
 )
 
 
-def list_reports() -> list[dict]:
-    """返回全部报告(按 created_at 降序)。"""
-    return _store.list_reports()
+def list_reports(market: str | None = None) -> list[dict]:
+    """返回全部报告(按 created_at 降序)。market 非空时只返回该市场。"""
+    reports = _store.list_reports()
+    if market and market != "cn":
+        return [r for r in reports if r.get("market", "cn") == market]
+    return reports
 
 
 def save_report(report: dict) -> dict:
     """新增一条报告并持久化。返回保存后的报告(含 id / created_at)。"""
+    report.setdefault("market", "cn")  # 多市场扩展
     return _store.save_report(report)
 
 

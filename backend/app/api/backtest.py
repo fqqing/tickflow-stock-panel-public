@@ -208,17 +208,39 @@ class StrategyBacktestRequest(BaseModel):
     asset_type: str = "stock"
     minute_fill: bool = False
     regime_filter: dict | None = None
+    market: str = "cn"   # cn | hk | us（多市场扩展；决定默认费率，涨跌停规则随数据自动）
+
+
+def _market_default_fees(market: str) -> tuple[float, bool]:
+    """按市场返回默认印花税（未显式指定时使用）。
+
+    A 股 0.05% 仅卖出；港股 0.1% 买卖双边；美股无印花税。
+    返回 (stamp_tax_pct, double_sided)。
+    """
+    if market == "hk":
+        return 0.001, True
+    if market == "us":
+        return 0.0, False
+    return 0.0005, False
 
 
 @router.post("/strategy/run")
 def strategy_run(req: StrategyBacktestRequest, request: Request):
-    """策略回测 — 复用 StrategyDef 体系做全周期回测。"""
+    """策略回测 — 复用 StrategyDef 体系做全周期回测。
+
+    market 参数（cn/hk/us）：未显式传印花税时按市场取默认（港股双边 0.1%、
+    A 股卖出 0.05%、美股无）；涨跌停买入/卖出拦截由 enriched 信号列驱动，
+    港美股无 signal_limit_* 列 → 自动不拦截。
+    """
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
     end = req.end or date.today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
+
+    default_stamp, double_sided = _market_default_fees(req.market)
+    stamp_tax = req.stamp_tax_pct if req.stamp_tax_pct is not None else default_stamp
 
     cfg = StrategyBacktestConfig(
         strategy_id=req.strategy_id,
@@ -232,7 +254,8 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         exit_fill=req.exit_fill,
         fees_pct=req.fees_pct,
         commission_pct=req.commission_pct,
-        stamp_tax_pct=req.stamp_tax_pct,
+        stamp_tax_pct=stamp_tax,
+        stamp_tax_double_sided=double_sided,
         slippage_bps=req.slippage_bps,
         max_positions=req.max_positions,
         max_exposure_pct=req.max_exposure_pct,
@@ -243,6 +266,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         asset_type=req.asset_type,
         minute_fill=req.minute_fill,
         regime_filter=req.regime_filter,
+        market=req.market,
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     return run_worker_task(task)
@@ -318,8 +342,9 @@ def _make_job_key(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    market: str = "cn",
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{market}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -348,6 +373,7 @@ async def strategy_stream(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    market: str = "cn",
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -388,6 +414,7 @@ async def strategy_stream(
         asset_type=asset_type,
         minute_fill=minute_fill,
         regime_filter=regime_filter,
+        market=market,
     )
 
     _cleanup_stale_jobs()
@@ -438,7 +465,10 @@ async def strategy_stream(
                 exit_fill=exit_fill,
                 fees_pct=fees_pct,
                 commission_pct=commission_pct,
-                stamp_tax_pct=stamp_tax_pct,
+                # 未显式传印花税时按市场取默认（港股双边 0.1% / 美股无 / A股卖出 0.05%）
+                stamp_tax_pct=stamp_tax_pct if stamp_tax_pct is not None
+                else (0.001 if market == "hk" else (0.0 if market == "us" else None)),
+                stamp_tax_double_sided=(market == "hk"),
                 slippage_bps=slippage_bps,
                 max_positions=int(max_positions),
                 max_exposure_pct=float(max_exposure_pct),
@@ -449,6 +479,7 @@ async def strategy_stream(
                 asset_type=asset_type,
                 minute_fill=minute_fill,
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
+                market=market,
             )
 
             def _run_backtest():
