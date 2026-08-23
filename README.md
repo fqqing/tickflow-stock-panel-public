@@ -11,9 +11,10 @@
 [![Python](https://img.shields.io/badge/Python-≥3.11-blue.svg)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Markets](https://img.shields.io/badge/Markets-A股_·_港股_·_美股-e91e63.svg)](#-本-fork-新增功能多市场扩展)
-[![Deploy: Docker](https://img.shields.io/badge/Deploy-Docker-2496ed.svg)](./Dockerfile)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-amd64_·_arm64-2496ed?logo=docker&logoColor=white)](https://github.com/hzy1522/tickflow-stock-panel/pkgs/container/tickflow-stock-panel)
+[![CI](https://github.com/hzy1522/tickflow-stock-panel/actions/workflows/docker.yml/badge.svg)](https://github.com/hzy1522/tickflow-stock-panel/actions/workflows/docker.yml)
 
-**[新增功能](#-本-fork-新增功能多市场扩展)** · **[快速开始](#-快速开始)** · **[港美股初始化](#-港美股数据初始化)** · **[已知限制](#️-已知限制与市场差异)** · **[致谢与版权](#-致谢与版权)**
+**[新增功能](#-本-fork-新增功能多市场扩展)** · **[快速开始](#-快速开始)** · **[预构建镜像](#方式-b预构建镜像最快无需编译)** · **[港美股初始化](#-港美股数据初始化)** · **[已知限制](#️-已知限制与市场差异)** · **[致谢与版权](#-致谢与版权)**
 
 </div>
 
@@ -242,6 +243,8 @@
 ## 🚀 快速开始
 
 > 前置依赖：Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
+>
+> 👉 **只想跑起来看看？走 [方式 B](#方式-b预构建镜像最快无需编译) —— 只需要 Docker，上述依赖一个都不用装。**
 
 ### 方式 A：Dev 模式（二次开发推荐）
 
@@ -252,7 +255,34 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 
 自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
 
-### 方式 B：Docker（部署最省心）
+### 方式 B：预构建镜像（最快，无需编译）
+
+本 fork 的 CI 自动构建多架构镜像并发布到 GHCR，支持 `linux/amd64` 与 `linux/arm64`（含 Apple Silicon），**无需克隆仓库、无需本地编译**：
+
+```bash
+mkdir -p data
+docker run -d --name tickflow \
+  -p 3018:3018 \
+  -e DATA_DIR=/app/data \
+  -v "$PWD/data:/app/data" \
+  ghcr.io/hzy1522/tickflow-stock-panel:latest
+# 打开 http://localhost:3018
+```
+
+需要配置 TickFlow Key / AI 接口时追加 `--env-file`（也可在面板**设置**页填）：
+
+```bash
+curl -O https://raw.githubusercontent.com/hzy1522/tickflow-stock-panel/main/.env.example
+mv .env.example .env    # 按需填写后加上 --env-file .env 重新 run
+```
+
+> ⚠️ **`-e DATA_DIR=/app/data` 必须显式指定。** `.env.example` 里的 `DATA_DIR=./data` 是开发模式用的相对路径，原样传入容器会让数据写到未挂载的目录，重建容器时**丢数据**。
+>
+> 想锁定版本可用 commit sha 标签替代 `latest`，例如 `ghcr.io/hzy1522/tickflow-stock-panel:212afd8`。
+>
+> 用 Compose 跑预构建镜像：把 `docker-compose.yml` 里的 `build:` 段换成 `image: ghcr.io/hzy1522/tickflow-stock-panel:latest` 即可复用其余配置（端口、卷、重启策略）。
+
+### 方式 C：Docker 本地构建
 
 ```bash
 cp .env.example .env
