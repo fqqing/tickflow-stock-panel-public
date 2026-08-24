@@ -224,3 +224,45 @@ def test_mixed_signals_still_rejected(market):
         "exit_signals": ["signal_rsi_high"],
     }
     assert _market_compatible_strategy(meta, market) is False
+
+
+# ============================================================
+# 4. 策略结果缓存按市场隔离
+# ============================================================
+def test_strategy_cache_files_isolated_per_market(tmp_path):
+    """run_all 写缓存必须落到市场独立文件, 否则港股结果会覆盖 A 股结果。"""
+    from app.services import strategy_cache
+
+    for market in ("cn", "hk", "us"):
+        strategy_cache.write_cache(
+            tmp_path, "2026-07-20",
+            {f"strategy_{market}": {"total": 1, "as_of": "2026-07-20", "rows": [{"symbol": "X"}]}},
+            market=market,
+        )
+
+    # cn 沿用原文件名(向后兼容), hk/us 独立文件
+    assert (tmp_path / "user_data" / "strategy_cache.json").exists()
+    assert (tmp_path / "user_data" / "strategy_cache_hk.json").exists()
+    assert (tmp_path / "user_data" / "strategy_cache_us.json").exists()
+
+    # 各市场读到自己的结果, 互不串扰
+    assert "strategy_cn" in strategy_cache.read_cache(tmp_path, "cn")["results"]
+    assert "strategy_hk" in strategy_cache.read_cache(tmp_path, "hk")["results"]
+    assert "strategy_us" in strategy_cache.read_cache(tmp_path, "us")["results"]
+    assert "strategy_hk" not in strategy_cache.read_cache(tmp_path, "cn")["results"]
+
+
+def test_strategy_cache_clear_all_markets(tmp_path):
+    """策略代码 reload 后清缓存必须清全部市场, 否则港美股继续展示旧公式结果。"""
+    from app.services import strategy_cache
+
+    for market in ("cn", "hk", "us"):
+        strategy_cache.write_cache(
+            tmp_path, "2026-07-20",
+            {f"strategy_{market}": {"total": 1, "as_of": "2026-07-20", "rows": []}},
+            market=market,
+        )
+    strategy_cache.clear_cache(tmp_path)  # market=None → 全部
+    assert not (tmp_path / "user_data" / "strategy_cache.json").exists()
+    assert not (tmp_path / "user_data" / "strategy_cache_hk.json").exists()
+    assert not (tmp_path / "user_data" / "strategy_cache_us.json").exists()

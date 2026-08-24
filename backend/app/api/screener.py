@@ -229,10 +229,11 @@ def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]])
     return payload
 
 
-def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict) -> None:
+def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict,
+                           market: str = "cn") -> None:
     """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
     from app.services import strategy_cache
-    cached = strategy_cache.read_cache(data_dir)
+    cached = strategy_cache.read_cache(data_dir, market)
     if cached and cached.get("as_of") == as_of:
         results = cached.get("results", {})
         results[strategy_id] = {
@@ -240,7 +241,7 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
             "as_of": as_of,
             "rows": safe_data.get("rows", []),
         }
-        strategy_cache.write_cache(data_dir, as_of, results)
+        strategy_cache.write_cache(data_dir, as_of, results, market)
 
 
 @router.get("/strategies")
@@ -339,21 +340,26 @@ def run_preset(req: PresetRequest, request: Request):
         raise HTTPException(status_code=status_code, detail=str(e)) from e
 
     safe_data = _safe(asdict(result))
-    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data, req.market)
 
     return _result_with_ext(safe_data, ext_values)
 
 
-def _cached_with_realtime(request: Request) -> dict:
-    """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
+def _cached_with_realtime(request: Request, market: str = "cn") -> dict:
+    """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。
+
+    实时结果仅由 A 股监控引擎产出, 港美股只返回盘后缓存(不叠加实时)。
+    """
     data_dir = request.app.state.repo.store.data_dir
-    cached = strategy_cache.read_cache(data_dir)
+    cached = strategy_cache.read_cache(data_dir, market)
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
     # 叠加监控引擎内存里的实时结果 (若有), 用新鲜数据覆盖同策略的盘后结果
+    # 仅 A 股: 监控引擎的实时结果基于 A 股实时行情算出, 叠加到港美股缓存上会
+    # 把 A 股个股混进港美股结果里。
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
-    if monitor_engine is not None:
+    if market == "cn" and monitor_engine is not None:
         realtime_results = monitor_engine.latest_strategy_results()
         if realtime_results:
             results = dict(cached.get("results") or {})
@@ -371,6 +377,7 @@ def _cached_with_realtime(request: Request) -> dict:
 def get_cached(
     request: Request,
     ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    market: str = Query("cn", description="cn|hk|us"),
 ):
     """读取策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
 
@@ -378,8 +385,11 @@ def get_cached(
     - 监控引擎内存结果 (latest_strategy_results): 实时行情每轮对「加入监控的策略」算出,
       不落盘 (避免与 read_cache 的 mtime 校验冲突), 在此直接叠加覆盖盘后结果。
       被监控的策略拿到新鲜数据, 非监控策略仍用盘后缓存。
+    - 缓存按 market 隔离 (A 股沿用原文件名, 港美股各自独立文件)。
+    - market 未显式传参时可能是 Query 默认对象而非字符串, 先规范化再做比较。
     """
-    cached = _cached_with_realtime(request)
+    market = str(market) or "cn"
+    cached = _cached_with_realtime(request, market)
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
@@ -390,9 +400,13 @@ def get_cached(
 
 
 @router.get("/cached-summary")
-def get_cached_summary(request: Request):
+def get_cached_summary(
+    request: Request,
+    market: str = Query("cn", description="cn|hk|us"),
+):
     """返回策略卡片所需的轻量摘要，不序列化股票明细。"""
-    cached = _cached_with_realtime(request)
+    market = str(market) or "cn"
+    cached = _cached_with_realtime(request, market)
     results = cached.get("results") or {}
     summary = {
         sid: {
@@ -428,9 +442,11 @@ def get_cached_result(
     strategy_id: str,
     request: Request,
     ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    market: str = Query("cn", description="cn|hk|us"),
 ):
     """按需返回单个策略的完整明细及其今日失效行。"""
-    cached = _cached_with_realtime(request)
+    market = str(market) or "cn"
+    cached = _cached_with_realtime(request, market)
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {
@@ -527,7 +543,11 @@ def run_all(request: Request, body: Optional[dict] = None):
     repo = request.app.state.repo
     asset_type = str(body.get("asset_type") or "stock")
     timeframe = str(body.get("timeframe") or "1d")
-    svc = ScreenerService(repo, asset_type=asset_type)
+    # 多市场: 前端一直在请求体里发 market, 但此处此前从未读取 —— 切到港股跑全部
+    # 策略实际返回的是 A 股结果。必须传入 ScreenerService, 否则 enriched 目录
+    # 与最新日期都会落到 A 股。
+    market = str(body.get("market") or "cn")
+    svc = ScreenerService(repo, asset_type=asset_type, market=market)
     engine = getattr(request.app.state, "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
@@ -549,12 +569,22 @@ def run_all(request: Request, body: Optional[dict] = None):
         unknown = [sid for sid in all_ids if not engine.has(sid)]
         if unknown:
             raise HTTPException(status_code=404, detail=f"unknown strategies: {unknown}")
+        # 显式指定的策略同样要做市场兼容过滤: 前端策略池可能含依赖涨跌停/连板的
+        # A 股专属策略, 在港美股上跑只会产出无意义结果。这里静默跳过而不报错 ——
+        # 策略本身是合法的, 只是不适用于当前市场。
+        if market != "cn":
+            meta_by_id = {m["id"]: m for m in engine.list_strategies()}
+            all_ids = [
+                sid for sid in all_ids
+                if _market_compatible_strategy(meta_by_id.get(sid) or {}, market)
+            ]
     else:
         all_ids = [
             meta["id"]
             for meta in engine.list_strategies()
             if asset_type in meta.get("asset_types", ["stock"])
             and timeframe in meta.get("timeframes", ["1d"])
+            and _market_compatible_strategy(meta, market)
         ]
 
     if not all_ids:
@@ -603,7 +633,7 @@ def run_all(request: Request, body: Optional[dict] = None):
     # 写入策略缓存 (供页面秒加载)
     if results:
         try:
-            strategy_cache.write_cache(data_dir, str(as_of), results)
+            strategy_cache.write_cache(data_dir, str(as_of), results, market)
         except Exception:  # noqa: BLE001
             pass
 
@@ -643,7 +673,7 @@ def limit_ladder(
       counts.up/down = 60日新高/新低数。前端复用 A 股连板梯队 UI。
     """
     if market in ("hk", "us"):
-        return _limit_ladder_market(request, market, as_of, direction, limit=None)
+        return _limit_ladder_market(request, market, as_of)
     import polars as pl
 
     is_down = direction == "down"
@@ -957,8 +987,7 @@ def market_strength(
 # ================================================================
 # 港美股强度梯队（多市场扩展）— 与 A 股连板梯队同构返回
 # ================================================================
-def _limit_ladder_market(request: Request, market: str, as_of: date | None,
-                         direction: str, limit: int | None) -> dict:
+def _limit_ladder_market(request: Request, market: str, as_of: date | None) -> dict:
     """港美股强度梯队：复用 A 股连板梯队 UI，语义替换。
 
     - boards = 20日动量档位: ≥25%→5, ≥15%→4, ≥8%→3, ≥3%→2, 其余不显示

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import { MarketNotSupportedHint } from '@/components/MarketNotSupported'
 import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
@@ -273,7 +274,13 @@ export function IndustryAnalysis() {
   // 多市场扩展：行业分析基于同花顺行业表（A 股专属），港美股暂不支持
   const { market } = useMarket()
   if (market !== 'cn') {
-    return <MarketBoardNotSupported market={market} pageName="行业分析" />
+    return (
+      <MarketNotSupportedHint
+        pageName="行业分析"
+        description="{pageName}基于同花顺概念/行业表（A 股专属数据源），当前市场 {label} 暂不支持。"
+        showGuide={false}
+      />
+    )
   }
   const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(loadConfig)
   const [showConfig, setShowConfig] = useState(false)
@@ -882,31 +889,4 @@ function ScoreExplain({ stock }: { stock?: EnrichedStock }) {
 
 function Part({ label, value, cls }: { label: string; value: number; cls: string }) {
   return <div className="rounded-lg bg-base/35 px-2 py-1.5"><div className="mb-1 flex justify-between text-[10px] text-muted"><span>{label}</span><span>{Math.round(value * 100)}</span></div><div className="h-1 rounded-full bg-elevated"><div className={cn('h-full rounded-full', cls)} style={{ width: `${Math.max(3, value * 100)}%` }} /></div></div>
-}
-
-
-/** 港美股不支持提示条（多市场扩展） */
-
-
-/** 港美股暂不支持提示（多市场扩展） */
-function MarketBoardNotSupported({ market, pageName }: { market: string; pageName: string }) {
-  const { setMarket } = useMarket()
-  return (
-    <div className="p-6">
-      <div className="rounded-btn border border-border bg-surface p-6 text-center">
-        <div className="text-base font-medium mb-2">{pageName}</div>
-        <p className="text-sm text-muted mb-4">
-          {pageName}基于同花顺概念/行业表（A 股专属数据源），当前市场
-          <span className="mx-1 text-accent">{market === 'hk' ? '港股' : '美股'}</span>
-          暂不支持。
-        </p>
-        <button
-          onClick={() => setMarket('cn')}
-          className="h-8 px-4 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 cursor-pointer"
-        >
-          切换到 A 股
-        </button>
-      </div>
-    </div>
-  )
 }

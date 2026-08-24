@@ -75,9 +75,7 @@ def _run_ladder(
     market: str = "hk",
     as_of: date | None = None,
 ) -> dict:
-    return _limit_ladder_market(
-        _make_request(repo), market, as_of, direction="up", limit=None
-    )
+    return _limit_ladder_market(_make_request(repo), market, as_of)
 
 
 def _flatten_tiers(result: dict) -> dict[str, dict]:

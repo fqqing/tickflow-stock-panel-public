@@ -10,6 +10,7 @@ import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
 import { isExpertOrAbove } from '@/lib/capability-labels'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { useMarket } from '@/lib/market'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
@@ -37,8 +38,9 @@ import {
 
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
-  // 多市场扩展：cn | hk | us
-  const [market, setMarket] = useState<'cn' | 'hk' | 'us'>('cn')
+  // 多市场扩展：跟随侧边栏全局市场切换器（useMarket），页面不再维护局部市场状态。
+  // 切市场时清除当前结果，避免把上一市场的结果当成当前市场展示。
+  const { market } = useMarket()
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
@@ -63,6 +65,14 @@ export function Screener() {
       return next
     })
   }, [])
+
+  // 跟随全局市场切换：清除上一市场的结果与日期，防止跨市场串数据。
+  useEffect(() => {
+    setActiveStrategy(null)
+    setResult(null)
+    setShowAll(false)
+    setAsOf('')
+  }, [market])
   // 分时图显示开关（仅当 intraday 列可见时才有意义；持久化）
   const [intradayChartVisible, setIntradayChartVisible] = useState<boolean>(() => storage.screenerIntraday.get(true))
   const toggleIntradayChart = useCallback(() => {
@@ -130,21 +140,23 @@ export function Screener() {
   })
 
   // 卡片首屏只读取轻量摘要；明细在点击策略或“全部”时按需加载。
+  // 摘要/明细缓存端点新增 market 维度: 切市场后 queryKey 变化自动失效并重取,
+  // 避免把上一市场(A 股)的命中数当成当前市场展示。
   const summaryQuery = useQuery({
-    queryKey: QK.screenerCachedSummary,
-    queryFn: api.screenerCachedSummary,
+    queryKey: QK.screenerCachedSummary(market),
+    queryFn: () => api.screenerCachedSummary(market),
     enabled: assetType === 'stock',
   })
 
   const fullCachedQuery = useQuery({
-    queryKey: QK.screenerCached(asOf, extColumnsParam),
-    queryFn: () => api.screenerCached(extColumnsParam || undefined),
+    queryKey: QK.screenerCached(asOf, extColumnsParam, market),
+    queryFn: () => api.screenerCached(extColumnsParam || undefined, market),
     enabled: assetType === 'stock' && showAll,
   })
 
   const singleCachedQuery = useQuery({
-    queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam),
-    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined),
+    queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam, market),
+    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined, market),
     enabled: assetType === 'stock'
       && !showAll
       && !!activeStrategy
@@ -609,22 +621,7 @@ export function Screener() {
                 </button>
               ))}
             </div>
-            {/* 市场切换（多市场扩展）: A股 / 港股 / 美股 */}
-            <div className="flex items-center h-7 rounded-btn border border-border overflow-hidden">
-              {([['cn', 'A股'], ['hk', '港股'], ['us', '美股']] as const).map(([m, label]) => (
-                <button
-                  key={m}
-                  onClick={() => { setMarket(m); setActiveStrategy(null); setResult(null); setShowAll(false); setAsOf('') }}
-                  className={`h-full px-2.5 text-xs font-medium transition-colors cursor-pointer
-                    ${market === m
-                      ? 'bg-accent/10 text-accent'
-                      : 'text-muted hover:text-secondary hover:bg-elevated'
-                    }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            {/* 市场跟随侧边栏全局切换器（useMarket），页面不再提供局部市场按钮 */}
             {/* 重新运行策略：重载策略文件并重跑全部策略，更新命中个股 */}
             <button
               onClick={() => reloadStrategies.mutate()}

@@ -742,24 +742,6 @@ export interface MarketIndexKlineRow {
 }
 
 
-/** 港美股市场环境行（多市场扩展） */
-export interface RegimeMarketRow {  date: string
-  state: string
-  score: number
-  profit: number
-  momentum: number
-  resilience: number
-  trend: number
-  total: number
-  up: number
-  down: number
-  up_pct: number
-  avg_pct: number
-  new_high: number
-  new_low: number
-  above_ma20_pct: number
-}
-
 /** 港美股强度榜行（多市场扩展） */
 export interface MarketStrengthRow {  symbol: string
   name?: string | null
@@ -1622,14 +1604,8 @@ export const api = {
     request<{ as_of: string | null; results: Record<string, ScreenerResultSummary> }>(
       '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true, market }) },
     ),
-  screenerCachedSummary: () =>
-    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
-
-  // 港美股市场环境（多市场扩展）：momentum 替代 A 股投机维度
-  regimeMarket: (market: 'hk' | 'us', days = 120) =>
-    request<{ rows: RegimeMarketRow[]; total: number; market: string }>(
-      `/api/regime/market?market=${market}&days=${days}`,
-    ),
+  screenerCachedSummary: (market: string = 'cn') =>
+    request<ScreenerCachedSummary>(`/api/screener/cached-summary?market=${market}`),
 
   // 港美股主要指数（多市场扩展）
   indicesMarketList: (market: 'hk' | 'us') =>
@@ -1666,17 +1642,17 @@ export const api = {
   marketStrength: (market: 'hk' | 'us', kind: 'high' | 'momentum' | 'volume', limit = 20) =>
     request<{ as_of: string | null; market: string; kind: string; rows: MarketStrengthRow[] }>(
       `/api/screener/strength?market=${market}&kind=${kind}&limit=${limit}`,
-    ),  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+    ),  screenerCachedResult: (strategyId: string, extColumns?: string, market: string = 'cn') =>
     request<ScreenerCachedResult>(
       extColumns
-        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
-        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
+        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}&market=${market}`
+        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}?market=${market}`,
     ),
-  screenerCached: (extColumns?: string) =>
+  screenerCached: (extColumns?: string, market: string = 'cn') =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
       extColumns
-        ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
-        : '/api/screener/cached',
+        ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}&market=${market}`
+        : `/api/screener/cached?market=${market}`,
     ),
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),

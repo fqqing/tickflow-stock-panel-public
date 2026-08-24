@@ -46,7 +46,10 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
     }
     monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_args: cached)
 
-    payload = screener_api.get_cached_summary(_request(tmp_path, realtime))
+    # market 显式传 "cn": 直接调用端点时 FastAPI 不会注入 Query 默认值,
+    # 默认参数是 Query 对象而非字符串, market == "cn" 会恒为 False,
+    # 导致实时叠加被跳过。显式传参同时让测试意图更清晰。
+    payload = screener_api.get_cached_summary(_request(tmp_path, realtime), market="cn")
 
     assert payload["results"] == {"strategy_a": {"total": 2, "as_of": "2026-07-20"}}
     assert payload["today_ever_counts"] == {"strategy_a": 4}
