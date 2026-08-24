@@ -2,13 +2,13 @@
 
 Covers _limit_ladder_market, the HK/US re-interpretation of the A-share
 limit-up ladder (boards = 20d momentum tier, status = high/momentum/volume,
-counts = 60d new-high/new-low counts), plus the related market_strength
-handler behind /api/screener/strength.
+counts = 60d new-high/new-low counts). This is the endpoint the HK/US ladder
+page actually consumes, via GET /api/screener/limit-ladder?market=hk|us.
 
 The data store is stubbed with a minimal repo that returns a prepared
 enriched frame through get_enriched_latest_market (the same cache path the
 service uses for the latest trading date), so the tests exercise the real
-ladder/strength logic without recomputing indicators from raw parquet.
+ladder logic without recomputing indicators from raw parquet.
 """
 from __future__ import annotations
 
@@ -18,9 +18,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from fastapi import HTTPException
 
-from app.api.screener import _limit_ladder_market, market_strength
+from app.api.screener import _limit_ladder_market
 
 
 class _FakeRepo:
@@ -323,150 +322,3 @@ def test_tier_structure_order_and_alias_fields(tmp_path) -> None:
         assert stock["consecutive_limit_downs"] == 0
         assert stock["sealed_status"] is None
         assert stock["sealed_vol"] is None
-
-
-# ---------------------------------------------------------------------------
-# /api/screener/strength handler (market_strength)
-# ---------------------------------------------------------------------------
-def test_strength_rejects_cn_market() -> None:
-    with pytest.raises(HTTPException) as exc:
-        market_strength(
-            _make_request(_FakeRepo(pl.DataFrame(), None, Path("/tmp"))),
-            market="cn",
-            kind="high",
-            as_of=None,
-            limit=20,
-        )
-    assert exc.value.status_code == 400
-    assert "hk/us" in exc.value.detail
-
-
-def test_strength_no_date_raises_http_400(tmp_path) -> None:
-    with pytest.raises(HTTPException) as exc:
-        market_strength(
-            _make_request(_FakeRepo(pl.DataFrame(), None, tmp_path)),
-            market="hk",
-            kind="high",
-            as_of=None,
-            limit=20,
-        )
-    assert exc.value.status_code == 400
-
-
-def test_strength_empty_frame_response_shape_matches_non_empty(tmp_path) -> None:
-    # The empty-data response must carry the same keys as the non-empty one,
-    # including total=0, so callers can read result["total"] unconditionally.
-    result = market_strength(
-        _make_request(_FakeRepo(pl.DataFrame(), date(2025, 1, 1), tmp_path)),
-        market="hk",
-        kind="high",
-        as_of=date(2025, 1, 1),
-        limit=20,
-    )
-    assert result == {
-        "as_of": "2025-01-01",
-        "market": "hk",
-        "kind": "high",
-        "rows": [],
-        "total": 0,
-    }
-
-
-def test_strength_momentum_kind_sorts_by_momentum_desc(tmp_path) -> None:
-    df = pl.DataFrame(
-        [
-            _base_row("m1", momentum_20d=0.10),
-            _base_row("m2", momentum_20d=0.30),
-            _base_row("m3", momentum_20d=0.05),
-        ]
-    )
-    result = market_strength(
-        _make_request(_FakeRepo(df, date(2025, 1, 1), tmp_path)),
-        market="hk",
-        kind="momentum",
-        as_of=date(2025, 1, 1),
-        limit=2,
-    )
-    assert [r["symbol"] for r in result["rows"]] == ["m2", "m1"]
-    assert result["total"] == 2
-    assert result["as_of"] == "2025-01-01"
-    # every row carries the documented key set, None for absent columns
-    assert set(result["rows"][0]) == {
-        "symbol", "name", "close", "change_pct", "momentum_20d",
-        "momentum_60d", "vol_ratio_5d", "high_60d", "ma20_bias", "rsi_14",
-    }
-    assert result["rows"][0]["momentum_60d"] is None
-
-
-def test_strength_volume_kind_sorts_by_vol_ratio_desc(tmp_path) -> None:
-    df = pl.DataFrame(
-        [
-            _base_row("v1", vol_ratio_5d=0.5),
-            _base_row("v2", vol_ratio_5d=3.0),
-            _base_row("v3", vol_ratio_5d=1.0),
-        ]
-    )
-    result = market_strength(
-        _make_request(_FakeRepo(df, date(2025, 1, 1), tmp_path)),
-        market="hk",
-        kind="volume",
-        as_of=date(2025, 1, 1),
-        limit=20,
-    )
-    assert [r["symbol"] for r in result["rows"]] == ["v2", "v3", "v1"]
-
-
-def test_strength_high_kind_filters_new_high_and_positive_change(tmp_path) -> None:
-    rows = [
-        # new high (close >= 99.5% of high_60d) with positive change
-        _base_row("h1", close=10.0, high_60d=10.0, change_pct=0.02),
-        # below the 99.5% threshold: filtered out
-        _base_row("h2", close=9.0, high_60d=10.0, change_pct=0.05),
-        # new high but flat/negative change: filtered out
-        _base_row("h3", close=10.0, high_60d=10.0, change_pct=-0.01),
-        # borderline new high, smallest positive change
-        _base_row("h4", close=9.96, high_60d=10.0, change_pct=0.01),
-    ]
-    result = market_strength(
-        _make_request(_FakeRepo(pl.DataFrame(rows), date(2025, 1, 1), tmp_path)),
-        market="hk",
-        kind="high",
-        as_of=date(2025, 1, 1),
-        limit=20,
-    )
-    # sorted by change_pct descending
-    assert [r["symbol"] for r in result["rows"]] == ["h1", "h4"]
-
-
-def test_strength_momentum_kind_without_column_returns_rows_unchanged(
-    tmp_path,
-) -> None:
-    df = pl.DataFrame(
-        [
-            _base_row("a", momentum_20d=0.05),
-            _base_row("b", momentum_20d=0.10),
-        ]
-    ).drop("momentum_20d")
-    result = market_strength(
-        _make_request(_FakeRepo(df, date(2025, 1, 1), tmp_path)),
-        market="hk",
-        kind="momentum",
-        as_of=date(2025, 1, 1),
-        limit=20,
-    )
-    # no sort branch matches, so the frame order is preserved
-    assert [r["symbol"] for r in result["rows"]] == ["a", "b"]
-
-
-def test_strength_us_market_uses_latest_date(tmp_path) -> None:
-    df = pl.DataFrame([_base_row("u1")])
-    result = market_strength(
-        _make_request(_FakeRepo(df, date(2025, 1, 1), tmp_path)),
-        market="us",
-        kind="high",
-        as_of=None,
-        limit=20,
-    )
-    assert result["market"] == "us"
-    assert result["as_of"] == "2025-01-01"
-    assert [r["symbol"] for r in result["rows"]] == ["u1"]

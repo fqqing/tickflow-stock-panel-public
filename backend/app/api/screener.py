@@ -50,6 +50,12 @@ _LIMIT_DEPENDENT_SIGNALS = {
     "signal_limit_down_recovery",
 }
 
+# 港美股「接近 60 日新高/新低」的容差: 收盘价触及 60 日极值的 99.5% / 100.5%
+# 即算突破。提为常量而非散落字面量 —— 同一语义在新高计数与状态判定两处使用,
+# 分别硬编码会在调参时静默分叉。
+_NEAR_HIGH_RATIO = 0.995
+_NEAR_LOW_RATIO = 1.005
+
 
 def _market_compatible_strategy(meta: dict, market: str) -> bool:
     """策略是否适用于目标市场。港美股跳过依赖涨停/连板信号的策略。"""
@@ -927,64 +933,6 @@ def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:
 
 
 # ================================================================
-# 港美股强度榜（多市场扩展）— 替代 A 股「连板梯队」概念
-# ================================================================
-@router.get("/strength")
-def market_strength(
-    request: Request,
-    market: str = Query("hk", description="hk|us"),
-    kind: str = Query("high", description="high=新高突破 | momentum=动量榜 | volume=放量榜"),
-    as_of: date | None = None,
-    limit: int = Query(20, ge=1, le=100),
-):
-    """港美股强度榜：新高突破 / 20日动量 / 放量，基于 enriched 最新日指标。
-
-    A 股无涨跌停概念的对标物，供港美股用户快速捕捉强势标的。
-    仅对 hk/us 市场开放；cn 返回 400（A 股请用连板梯队 /limit-ladder）。
-    """
-    if market not in ("hk", "us"):
-        raise HTTPException(status_code=400, detail="strength 榜单仅适用于 hk/us 市场")
-    repo = request.app.state.repo
-    svc = ScreenerService(repo, market=market)
-    as_of = as_of or svc.latest_date()
-    if not as_of:
-        raise HTTPException(status_code=400, detail="无可用数据日期,请先运行港美股盘后管道")
-
-    df = svc._load_enriched_for_date(as_of)
-    if df.is_empty():
-        return {"as_of": str(as_of), "market": market, "kind": kind, "rows": [], "total": 0}
-
-    import polars as pl
-    # 分榜单：排序 / 过滤
-    if kind == "momentum" and "momentum_20d" in df.columns:
-        df = df.sort("momentum_20d", descending=True)
-    elif kind == "volume" and "vol_ratio_5d" in df.columns:
-        df = df.sort("vol_ratio_5d", descending=True)
-    elif kind == "high" and "high_60d" in df.columns and "close" in df.columns:
-        # 60 日新高突破（收盘 ≥ 60日最高 99.5%）且当日收阳
-        df = df.filter(
-            (pl.col("close") >= pl.col("high_60d").fill_null(0) * 0.995)
-            & (pl.col("change_pct").fill_null(0) >= 0)
-        ).sort("change_pct", descending=True)
-
-    rows = []
-    for r in df.head(limit).to_dicts():
-        rows.append({
-            "symbol": r.get("symbol"),
-            "name": r.get("name"),
-            "close": r.get("close"),
-            "change_pct": r.get("change_pct"),
-            "momentum_20d": r.get("momentum_20d"),
-            "momentum_60d": r.get("momentum_60d"),
-            "vol_ratio_5d": r.get("vol_ratio_5d"),
-            "high_60d": r.get("high_60d"),
-            "ma20_bias": r.get("ma20_bias"),
-            "rsi_14": r.get("rsi_14"),
-        })
-    return {"as_of": str(as_of), "market": market, "kind": kind, "rows": rows, "total": len(rows)}
-
-
-# ================================================================
 # 港美股强度梯队（多市场扩展）— 与 A 股连板梯队同构返回
 # ================================================================
 def _limit_ladder_market(request: Request, market: str, as_of: date | None) -> dict:
@@ -1022,16 +970,16 @@ def _limit_ladder_market(request: Request, market: str, as_of: date | None) -> d
     if "signal_n_day_high" in df.columns:
         count_up = int(df.filter(pl.col("signal_n_day_high").fill_null(False)).height)
     elif "high_60d" in df.columns and "close" in df.columns:
-        count_up = int((df["close"] >= df["high_60d"].fill_null(0) * 0.995).sum())
+        count_up = int((df["close"] >= df["high_60d"].fill_null(0) * _NEAR_HIGH_RATIO).sum())
     if "signal_n_day_low" in df.columns:
         count_down = int(df.filter(pl.col("signal_n_day_low").fill_null(False)).height)
     elif "low_60d" in df.columns and "close" in df.columns:
-        count_down = int((df["close"] <= df["low_60d"].fill_null(0) * 1.005).sum())
+        count_down = int((df["close"] <= df["low_60d"].fill_null(0) * _NEAR_LOW_RATIO).sum())
 
     # 状态计算
     is_high = pl.lit(False)
     if "high_60d" in df.columns and "close" in df.columns:
-        is_high = (pl.col("close") >= pl.col("high_60d").fill_null(0) * 0.995)
+        is_high = (pl.col("close") >= pl.col("high_60d").fill_null(0) * _NEAR_HIGH_RATIO)
     if "signal_n_day_high" in df.columns:
         is_high = is_high | pl.col("signal_n_day_high").fill_null(False)
     is_volume = pl.lit(False)

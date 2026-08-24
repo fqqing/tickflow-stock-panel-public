@@ -81,6 +81,22 @@ export function Review() {
   const [viewing, setViewing] = useState<AiReviewReport | null>(null)  // 查看历史报告
   const reportEndRef = useRef<HTMLDivElement>(null)
 
+  // 无 AI 兜底(仅港美股): GET /api/market-recap/market-data 纯模板复盘,
+  // 不依赖 AI 接口。AI 复盘失败时用户可一键切换到这里。
+  const [dataRecap, setDataRecap] = useState<{ as_of: string | null; content: string } | null>(null)
+  const [dataRecapLoading, setDataRecapLoading] = useState(false)
+  const loadDataRecap = useCallback(async () => {
+    if (isCn || dataRecapLoading) return
+    setDataRecapLoading(true)
+    try {
+      const res = await api.marketRecapData(market as 'hk' | 'us')
+      setDataRecap(res.content ? { as_of: res.as_of, content: res.content } : null)
+    } catch { /* request() 已 toast */ }
+    finally { setDataRecapLoading(false) }
+  }, [isCn, market, dataRecapLoading])
+  // 切市场后旧的兜底复盘不再适用, 丢弃
+  useEffect(() => { setDataRecap(null) }, [market])
+
   // 看板数据(与总览页同源)
   const marketQuery = useQuery<OverviewMarket>({
     queryKey: QK.overviewMarket(asOf, market),
@@ -182,15 +198,16 @@ export function Review() {
   const generate = useCallback(() => {
     if (isReviewGenerating()) return
     setViewing(null)
+    setDataRecap(null)  // 新生成替换掉兜底的数据版复盘
     resetReview()
     startReviewGeneration(asOf, focus, (full, doneMeta) => {
       onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
     }, market)
   }, [asOf, focus, onGenerationDone])
 
-  // 复制全文到剪贴板(viewing 优先,与主区域显示一致)
+  // 复制全文到剪贴板(viewing 优先,与主区域显示一致; 兜底数据版复盘可复制)
   const copyContent = useCallback(async () => {
-    const text = viewing?.content ?? content
+    const text = viewing?.content ?? dataRecap?.content ?? content
     if (!text) return
     try {
       await navigator.clipboard.writeText(text)
@@ -198,13 +215,13 @@ export function Review() {
     } catch {
       toast('复制失败,请手动选择文本', 'error')
     }
-  }, [content, viewing])
+  }, [content, viewing, dataRecap])
 
   // 下载为 .md 文件(viewing 优先)
   const downloadContent = useCallback(() => {
-    const text = viewing?.content ?? content
+    const text = viewing?.content ?? dataRecap?.content ?? content
     if (!text) return
-    const reportDate = viewing?.as_of ?? meta?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
+    const reportDate = viewing?.as_of ?? dataRecap?.as_of ?? meta?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
     const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -212,7 +229,7 @@ export function Review() {
     a.download = `复盘_${reportDate}.md`
     a.click()
     URL.revokeObjectURL(url)
-  }, [content, viewing, meta, asOf])
+  }, [content, viewing, dataRecap, meta, asOf])
 
   // 查看历史报告(不中断后台生成:仅临时把 viewing 覆盖到主区域,
   // 生成中的流仍在 store 里继续跑,点"生成中"项即可切回)
@@ -224,8 +241,10 @@ export function Review() {
   const displayDate = viewing?.as_of ?? meta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? '最新'
   const data = marketQuery.data
   // 主区域显示的内容:viewing(查看历史)优先于 store 的生成 content,
-  // 这样点历史报告不会覆盖后台生成中的流。
-  const displayContent = viewing?.content ?? content
+  // 这样点历史报告不会覆盖后台生成中的流。兜底的数据版复盘在两者之后。
+  const displayContent = viewing?.content ?? dataRecap?.content ?? content
+  // 数据版复盘就绪时按"已完成"渲染(即使 store 里 AI 流程处于 error)
+  const displayPhase: ReviewPhase = dataRecap && !viewing ? 'done' : phase
 
   return (
     <>
@@ -326,7 +345,7 @@ export function Review() {
               {/* ===== 报告 + 历史 双栏(报告为主体)===== */}
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_18rem]">
                 <ReportPanel
-                  phase={phase}
+                  phase={displayPhase}
                   content={displayContent}
                   error={error}
                   isGenerating={isGenerating}
@@ -334,6 +353,9 @@ export function Review() {
                   onCopy={copyContent}
                   onDownload={downloadContent}
                   onRegenerate={generate}
+                  showDataRecap={!isCn && !viewing}
+                  dataRecapLoading={dataRecapLoading}
+                  onDataRecap={loadDataRecap}
                   reportEndRef={reportEndRef}
                 />
                 <HistoryPanel
@@ -609,7 +631,7 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
 // 报告面板(流式 + 错误 + 历史/完成态)
 // ================================================================
 function ReportPanel({
-  phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
+  phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, onDataRecap, showDataRecap, dataRecapLoading, reportEndRef,
 }: {
   phase: ReviewPhase
   content: string
@@ -619,6 +641,9 @@ function ReportPanel({
   onCopy: () => void
   onDownload: () => void
   onRegenerate: () => void
+  onDataRecap: () => void
+  showDataRecap: boolean
+  dataRecapLoading: boolean
   reportEndRef: React.RefObject<HTMLDivElement>
 }) {
   if (phase === 'error') {
@@ -629,12 +654,25 @@ function ReportPanel({
         </div>
         <div className="text-sm font-medium text-foreground">复盘失败</div>
         <div className="max-w-md text-center text-xs text-secondary">{error || '请检查 AI 配置后重试'}</div>
-        <button
-          onClick={onRegenerate}
-          className="mt-1 inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/20"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />重新生成
-        </button>
+        <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+          <button
+            onClick={onRegenerate}
+            className="inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/20"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />重新生成
+          </button>
+          {showDataRecap && (
+            <button
+              onClick={onDataRecap}
+              disabled={dataRecapLoading}
+              className="inline-flex items-center gap-1.5 rounded-btn bg-elevated px-3 py-1.5 text-xs text-secondary transition-colors hover:text-foreground hover:bg-elevated/70 disabled:opacity-50"
+              title="不依赖 AI 接口, 直接基于本地数据生成模板复盘"
+            >
+              <Database className="h-3.5 w-3.5" />
+              {dataRecapLoading ? '生成中…' : '改用数据版复盘（无需 AI）'}
+            </button>
+          )}
+        </div>
       </div>
     )
   }

@@ -104,7 +104,7 @@
 | 涨停数 / 跌停数 | 60 日新高数 / 新低数 |
 | 板块过滤 | 港股支持主板 / GEM |
 
-页面 UI 与交互完全复用。另提供独立的 `GET /api/screener/strength` 输出新高突破 / 动量榜 / 放量榜。
+页面 UI 与交互完全复用，由 `GET /api/screener/limit-ladder?market=hk|us` 提供数据（新高/动量/放量语义已并入梯队返回，不再维护独立的 `/strength` 端点，避免两份口径相近的实现漂移）。
 
 ### 6. 港美股市场环境（Regime）
 
@@ -169,7 +169,8 @@
 **待改进（欢迎 PR）**：
 
 - 选股页与策略回测页的市场选择现已**跟随侧边栏全局切换器**（2026-08 修复，含后端 `run_all` 尊重 `market`、策略结果缓存按市场隔离）
-- `GET /api/screener/strength` 与 `GET /api/market-recap/market-data` 后端已实现但前端尚未挂接 UI
+- `GET /api/market-recap/market-data` 已接入复盘页：港美股 AI 复盘失败时可一键改用「数据版复盘」（纯模板、不依赖 AI 接口）
+- 重复实现已收敛（2026-08）：`GET /api/screener/strength` 删除 —— 其语义（新高/动量/放量）与 `/limit-ladder?market=hk|us` 同源，后者已接入连板梯队页，保留两份实现只会让口径漂移
 - `api.ts` 中 `regimeMarket()` 与概念/行业页的内联"市场不支持"提示已清理（2026-08），统一使用 `MarketNotSupportedHint` 组件
 - 市场注册表的两处口径不一致已修复（2026-08）：`market_limit_pct` 改为委托 `app/price_limits.py`（全仓库涨跌停单一事实源，ST 仅压主板且含时间切换），`normalize_symbol` 补上北交所 `920/8/4` 号段判定（此前 `920344` 会被错配成 `.SH`）
 - **本 fork 落后上游约 67 个提交**（上游 `v0.2.1`，本地 `v0.1.88`），其中包含数据正确性修复（停机缺口检测、僵死 enriched 标记、回测市场环境过滤未生效等），建议同步后再做二次开发

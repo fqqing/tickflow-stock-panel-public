@@ -742,19 +742,6 @@ export interface MarketIndexKlineRow {
 }
 
 
-/** 港美股强度榜行（多市场扩展） */
-export interface MarketStrengthRow {  symbol: string
-  name?: string | null
-  close?: number | null
-  change_pct?: number | null
-  momentum_20d?: number | null
-  momentum_60d?: number | null
-  vol_ratio_5d?: number | null
-  high_60d?: number | null
-  ma20_bias?: number | null
-  rsi_14?: number | null
-}
-
 export interface LimitLadderTier {  boards: number
   count: number
   stocks: LimitLadderStock[]
@@ -1638,11 +1625,7 @@ export const api = {
       `/api/market-recap/market-data?market=${market}`,
     ),
 
-  // 港美股强度榜（替代 A 股连板梯队）：high=新高突破 | momentum=动量榜 | volume=放量榜
-  marketStrength: (market: 'hk' | 'us', kind: 'high' | 'momentum' | 'volume', limit = 20) =>
-    request<{ as_of: string | null; market: string; kind: string; rows: MarketStrengthRow[] }>(
-      `/api/screener/strength?market=${market}&kind=${kind}&limit=${limit}`,
-    ),  screenerCachedResult: (strategyId: string, extColumns?: string, market: string = 'cn') =>
+  screenerCachedResult: (strategyId: string, extColumns?: string, market: string = 'cn') =>
     request<ScreenerCachedResult>(
       extColumns
         ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}&market=${market}`
