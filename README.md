@@ -50,19 +50,29 @@
 
 - `frontend/src/lib/market.tsx`（新增 `MarketProvider` / `useMarket()`）、`components/Layout.tsx`
 
-### 2. 市场注册表：交易规则的单一事实来源
+### 2. 市场注册表：交易规则的元数据中心
 
-新增 `backend/app/markets.py`，把各市场的交易规则集中收敛为可查询的元数据，避免规则散落在业务代码里：
+新增 `backend/app/markets.py`，把各市场的交易规则收敛为一处可查询的元数据：
 
-| 能力 | 说明 |
-| :--- | :--- |
-| `market_of(symbol)` | 按后缀解析市场（`.SH/.SZ/.BJ`→cn、`.HK`→hk、`.US`→us） |
-| `normalize_symbol` | 代码归一化（`hk00700`→`00700.HK`、`AAPL`→`AAPL.US`） |
-| `market_limit_pct` | A 股按板块返回 5/10/20/30%，港美股恒为 `None`（无涨跌停） |
-| `stamp_tax_for` / `lot_size_for` | 印花税率（含是否双边）、最小交易单位 |
-| `is_trading_now` | 按北京时间判断各市场交易时段 |
+| 能力 | 说明 | 现状 |
+| :--- | :--- | :--- |
+| `market_of(symbol)` | 按后缀解析市场（`.SH/.SZ/.BJ`→cn、`.HK`→hk、`.US`→us） | ✅ 已接入 |
+| `get_market` / `ALL_MARKETS` | 取市场元数据、遍历全部市场 | ✅ 已接入 |
+| `stamp_tax_for` / `stamp_tax_double_sided` | 印花税率与是否双边收取 | ✅ 已接入回测费率 |
+| `normalize_symbol` | 代码归一化（`hk00700`→`00700.HK`、`AAPL`→`AAPL.US`） | ⚠️ 暂无调用方 |
+| `market_limit_pct` | A 股按板块返回 5/10/20/30%，港美股恒为 `None`（无涨跌停） | ⚠️ 暂无调用方 |
+| `lot_size_for` / `is_trading_now` / `exchanges_for` | 最小交易单位、北京时间交易时段判断、交易所列表 | ⚠️ 暂无调用方 |
 
 此外还包含 T+N 交收、价格精度等元数据。
+
+> **关于"暂无调用方"**：注册表定义了完整的交易规则元数据，但目前只有
+> `market_of`、`get_market`、`ALL_MARKETS` 和印花税三项被业务代码真正读取，
+> 其余仍是为后续接入预留的脚手架。这里不写成"所有规则的单一事实来源"，
+> 因为那还不是事实 —— 涨跌幅限制等规则目前仍由各自的模块（如
+> `app/price_limits.py`）独立实现。已完成的一处收口是回测印花税：
+> `api/backtest.py::_market_default_fees` 现在委托给注册表而非重复硬编码，
+> 并有测试锁住"改注册表必须传导到回测"，防止两处口径再次分叉。
+
 
 ### 3. 港美股数据同步
 
@@ -160,6 +170,8 @@
 - `GET /api/screener/strength` 与 `GET /api/market-recap/market-data` 后端已实现但前端尚未挂接 UI
 - `frontend/src/components/MarketNotSupported.tsx` 组件目前未被引用，概念/行业页各自内联了重复实现
 - `api.ts` 中 `regimeMarket()` 指向一个不存在的后端路由，属残留死代码（页面实际走带 `market` 参数的 `regimeHistory`）
+- 市场注册表中尚未接入的几个函数存在已知不一致，接入前需先修：`market_limit_pct` 的 ST 判定在板块判定**之前**返回 5%，与 `app/price_limits.py` 中「创业板/科创板 ST 仍保持 20%」的口径矛盾；`normalize_symbol("920344")` 会把北交所代码错配成 `.SH` 后缀
+- `_limit_ladder_market` 的 `direction` 与 `limit` 形参未被使用（端点始终传 `limit=None`）
 
 ---
 
