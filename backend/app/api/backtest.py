@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.markets import MARKET_CN, stamp_tax_double_sided, stamp_tax_for
 from app.services.backtest import (
     BacktestConfig,
     BacktestService,
@@ -214,14 +215,18 @@ class StrategyBacktestRequest(BaseModel):
 def _market_default_fees(market: str) -> tuple[float, bool]:
     """按市场返回默认印花税（未显式指定时使用）。
 
-    A 股 0.05% 仅卖出；港股 0.1% 买卖双边；美股无印花税。
+    税率与是否双边收取统一取自 app.markets 市场注册表，不在此重复硬编码 ——
+    否则改注册表不会传导到回测，两处口径会静默分叉。
+    当前口径: A 股 0.05% 仅卖出；港股 0.1% 买卖双边；美股无印花税。
+
+    未知市场回落到 A 股: 回落到"有成本"比回落到"零成本"安全，后者会让回测
+    结果偏乐观。
     返回 (stamp_tax_pct, double_sided)。
     """
-    if market == "hk":
-        return 0.001, True
-    if market == "us":
-        return 0.0, False
-    return 0.0005, False
+    try:
+        return stamp_tax_for(market), stamp_tax_double_sided(market)
+    except ValueError:
+        return stamp_tax_for(MARKET_CN), stamp_tax_double_sided(MARKET_CN)
 
 
 @router.post("/strategy/run")

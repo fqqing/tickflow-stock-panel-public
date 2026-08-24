@@ -9,10 +9,13 @@
 但既有测试全部只覆盖 A 股路径, 故单独补齐。
 """
 
+from dataclasses import replace
+
 import pytest
 
 from app.api.backtest import _market_default_fees
 from app.api.screener import _LIMIT_DEPENDENT_SIGNALS, _market_compatible_strategy
+from app.markets import stamp_tax_double_sided, stamp_tax_for
 from app.tickflow.repository import daily_dirname, enriched_dirname
 
 # ============================================================
@@ -120,6 +123,31 @@ def test_zero_tax_implies_not_double_sided():
         tax, double_sided = _market_default_fees(market)
         if tax == 0.0:
             assert double_sided is False
+
+
+@pytest.mark.parametrize("market", ["cn", "hk", "us"])
+def test_default_fees_delegate_to_market_registry(market):
+    """费率必须真正取自 app.markets 注册表, 而不是在 API 层重复硬编码。
+
+    这条断言的意义在于: 若有人把数字重新写死回 _market_default_fees,
+    改注册表就不会传导到回测, 两处口径会静默分叉 —— 本测试会失败。
+    """
+    assert _market_default_fees(market) == (
+        stamp_tax_for(market),
+        stamp_tax_double_sided(market),
+    )
+
+
+def test_registry_change_propagates_to_default_fees(monkeypatch):
+    """改注册表里的税率, 回测默认费率必须跟着变(证明是同一份事实来源)。"""
+    from app import markets as markets_mod
+
+    bumped = replace(markets_mod.get_market("hk"), stamp_tax=0.007)
+    monkeypatch.setitem(markets_mod._META, "hk", bumped)
+
+    tax, double_sided = _market_default_fees("hk")
+    assert tax == pytest.approx(0.007), "注册表改了税率, 回测默认值却没跟上"
+    assert double_sided is True
 
 
 # ============================================================

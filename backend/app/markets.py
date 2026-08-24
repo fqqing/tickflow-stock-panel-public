@@ -11,7 +11,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -79,8 +80,12 @@ def get_market(market: str) -> MarketMeta:
 
 
 def market_of(symbol: str) -> str:
-    """从 symbol 后缀解析市场。600000.SH → cn，00700.HK → hk，AAPL.US → us。"""
-    s = symbol.upper()
+    """从 symbol 后缀解析市场。600000.SH → cn，00700.HK → hk，AAPL.US → us。
+
+    入参先 strip：带首尾空白的 symbol 会导致 endswith 后缀匹配失败并错误
+    兜底（" 600000.SH " 曾被判为 us），且与 normalize_symbol 的行为不一致。
+    """
+    s = symbol.strip().upper()
     for suffix, market in _SUFFIX_MAP.items():
         if s.endswith(suffix):
             return market

@@ -86,14 +86,24 @@ def test_market_of_unknown_suffix(symbol, expected):
     ("symbol", "expected"),
     [
         (" AAPL.US ", MARKET_US),
-        (" 600000.SH ", MARKET_US),
+        (" 600000.SH ", MARKET_CN),
+        ("\t00700.HK\n", MARKET_HK),
+        ("  600000  ", MARKET_CN),
     ],
 )
-def test_market_of_whitespace_padded_input(symbol, expected):
-    # Documenting actual behavior: padded input no longer ends with the
-    # suffix, and the leading space is not a digit, so the US branch wins
-    # even for numeric A-share codes. Suspected bug, see summary.
+def test_market_of_strips_whitespace(symbol, expected):
+    # Padded input must resolve to the same market as the trimmed form:
+    # market_of strips before matching, so the suffix still matches and a
+    # numeric A-share code is no longer mis-routed to US.
     assert market_of(symbol) == expected
+    assert market_of(symbol) == market_of(symbol.strip())
+
+
+def test_market_of_agrees_with_normalize_symbol_on_padded_input():
+    # Regression guard: market_of and normalize_symbol must not disagree on
+    # whitespace handling (normalize_symbol has always stripped first).
+    for raw in (" 600000.SH ", "\t00700.HK\n", " AAPL.US "):
+        assert market_of(raw) == market_of(normalize_symbol(raw))
 
 
 def test_market_of_empty_and_none():

@@ -249,25 +249,27 @@ def test_missing_name_and_amount_are_tolerated(tmp_path) -> None:
     assert "amount" not in stock
 
 
-@pytest.mark.parametrize(
-    ("drop_col", "keep_col"),
-    [
-        # boards expression references momentum_20d without a column guard
-        ("momentum_20d", "vol_ratio_5d"),
-        # is_volume references change_pct whenever vol_ratio_5d is present
-        ("change_pct", "vol_ratio_5d"),
-    ],
-)
-def test_unguarded_missing_column_raises_column_not_found(
-    tmp_path, drop_col: str, keep_col: str
-) -> None:
-    # Suspected bug: these columns are referenced by pl.col() outside the
-    # guarded "if col in df.columns" sections, so a frame without them
-    # crashes instead of degrading. The test documents actual behavior.
-    df = pl.DataFrame([_base_row("A")]).drop(drop_col)
-    assert keep_col in df.columns
-    with pytest.raises(pl.exceptions.ColumnNotFoundError):
-        _run_ladder(_FakeRepo(df, date(2025, 1, 1), tmp_path))
+def test_missing_momentum_column_degrades_to_empty_ladder(tmp_path) -> None:
+    # momentum_20d is now guarded like the neighbouring is_momentum block:
+    # without it every row falls to boards=1 and is filtered out by
+    # boards >= 2, yielding an empty ladder instead of ColumnNotFoundError.
+    df = pl.DataFrame([_base_row("A")]).drop("momentum_20d")
+    assert "vol_ratio_5d" in df.columns
+    result = _run_ladder(_FakeRepo(df, date(2025, 1, 1), tmp_path))
+    assert result["tiers"] == []
+    # up/down counts come from the 60-day signals and stay available.
+    assert set(result["counts"]) == {"up", "down"}
+
+
+def test_missing_change_pct_degrades_without_crash(tmp_path) -> None:
+    # is_volume now requires BOTH vol_ratio_5d and change_pct to be present,
+    # so a frame missing change_pct degrades instead of crashing. The row
+    # still qualifies on momentum, so the ladder is not empty.
+    df = pl.DataFrame([_base_row("A")]).drop("change_pct")
+    assert "vol_ratio_5d" in df.columns
+    result = _run_ladder(_FakeRepo(df, date(2025, 1, 1), tmp_path))
+    stock = next(iter(_flatten_tiers(result).values()))
+    assert stock["status"] != "volume"
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +355,9 @@ def test_strength_no_date_raises_http_400(tmp_path) -> None:
     assert exc.value.status_code == 400
 
 
-def test_strength_empty_frame_returns_empty_rows_without_total(tmp_path) -> None:
+def test_strength_empty_frame_response_shape_matches_non_empty(tmp_path) -> None:
+    # The empty-data response must carry the same keys as the non-empty one,
+    # including total=0, so callers can read result["total"] unconditionally.
     result = market_strength(
         _make_request(_FakeRepo(pl.DataFrame(), date(2025, 1, 1), tmp_path)),
         market="hk",
@@ -361,8 +365,13 @@ def test_strength_empty_frame_returns_empty_rows_without_total(tmp_path) -> None
         as_of=date(2025, 1, 1),
         limit=20,
     )
-    assert result == {"as_of": "2025-01-01", "market": "hk", "kind": "high", "rows": []}
-    assert "total" not in result
+    assert result == {
+        "as_of": "2025-01-01",
+        "market": "hk",
+        "kind": "high",
+        "rows": [],
+        "total": 0,
+    }
 
 
 def test_strength_momentum_kind_sorts_by_momentum_desc(tmp_path) -> None:

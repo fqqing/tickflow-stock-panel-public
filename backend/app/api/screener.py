@@ -47,7 +47,7 @@ class PresetRequest(BaseModel):
 # 港美股不适用的策略：依赖涨跌停/连板信号（A 股专属概念）
 _LIMIT_DEPENDENT_SIGNALS = {
     "signal_limit_up", "signal_limit_down", "signal_broken_limit_up",
-    "signal_limit_down_recovery", "signal_broken_limit_up",
+    "signal_limit_down_recovery",
 }
 
 
@@ -904,7 +904,7 @@ def market_strength(
     request: Request,
     market: str = Query("hk", description="hk|us"),
     kind: str = Query("high", description="high=新高突破 | momentum=动量榜 | volume=放量榜"),
-    as_of: Optional[date] = None,
+    as_of: date | None = None,
     limit: int = Query(20, ge=1, le=100),
 ):
     """港美股强度榜：新高突破 / 20日动量 / 放量，基于 enriched 最新日指标。
@@ -922,7 +922,7 @@ def market_strength(
 
     df = svc._load_enriched_for_date(as_of)
     if df.is_empty():
-        return {"as_of": str(as_of), "market": market, "kind": kind, "rows": []}
+        return {"as_of": str(as_of), "market": market, "kind": kind, "rows": [], "total": 0}
 
     import polars as pl
     # 分榜单：排序 / 过滤
@@ -957,7 +957,7 @@ def market_strength(
 # ================================================================
 # 港美股强度梯队（多市场扩展）— 与 A 股连板梯队同构返回
 # ================================================================
-def _limit_ladder_market(request: Request, market: str, as_of: Optional[date],
+def _limit_ladder_market(request: Request, market: str, as_of: date | None,
                          direction: str, limit: int | None) -> dict:
     """港美股强度梯队：复用 A 股连板梯队 UI，语义替换。
 
@@ -1006,14 +1006,16 @@ def _limit_ladder_market(request: Request, market: str, as_of: Optional[date],
     if "signal_n_day_high" in df.columns:
         is_high = is_high | pl.col("signal_n_day_high").fill_null(False)
     is_volume = pl.lit(False)
-    if "vol_ratio_5d" in df.columns:
+    if "vol_ratio_5d" in df.columns and "change_pct" in df.columns:
         is_volume = (pl.col("vol_ratio_5d").fill_null(0) >= 1.5) & (pl.col("change_pct").fill_null(0) > 0)
     is_momentum = pl.lit(False)
     if "momentum_20d" in df.columns:
         is_momentum = (pl.col("momentum_20d").fill_null(0) >= 0.03)
 
     # boards = 20日动量档位
-    mom = pl.col("momentum_20d").fill_null(0)
+    # 缺 momentum_20d 时降级为 0（等价于全部落到 otherwise(1)，随后被 boards>=2 过滤掉），
+    # 与上面 is_momentum 的列存在性保护保持一致，避免直接抛 ColumnNotFoundError。
+    mom = pl.col("momentum_20d").fill_null(0) if "momentum_20d" in df.columns else pl.lit(0.0)
     boards = (pl.when(mom >= 0.25).then(5)
               .when(mom >= 0.15).then(4)
               .when(mom >= 0.08).then(3)
