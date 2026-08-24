@@ -78,8 +78,13 @@ jobs:
       - uses: actions/checkout@v4
 
       # 版本取自 frontend/package.json 的 packageManager 字段(pnpm@9.10.0)。
+      # 必须显式指定 package_json_file: 本项目 package.json 在 frontend/ 子目录,
+      # 而 defaults.run.working-directory 只作用于 run 步骤, 不影响 uses 动作 ——
+      # 该动作默认在仓库根目录找 packageManager, 找不到会直接失败。
       - name: Install pnpm
         uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
 
       # 与 Dockerfile 的 frontend-builder 阶段保持一致(node:20)。
       - name: Set up Node 20
