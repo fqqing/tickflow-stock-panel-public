@@ -59,8 +59,8 @@
 | `market_of(symbol)` | 按后缀解析市场（`.SH/.SZ/.BJ`→cn、`.HK`→hk、`.US`→us） | ✅ 已接入 |
 | `get_market` / `ALL_MARKETS` | 取市场元数据、遍历全部市场 | ✅ 已接入 |
 | `stamp_tax_for` / `stamp_tax_double_sided` | 印花税率与是否双边收取 | ✅ 已接入回测费率 |
-| `normalize_symbol` | 代码归一化（`hk00700`→`00700.HK`、`AAPL`→`AAPL.US`） | ⚠️ 暂无调用方 |
-| `market_limit_pct` | A 股按板块返回 5/10/20/30%，港美股恒为 `None`（无涨跌停） | ⚠️ 暂无调用方 |
+| `normalize_symbol` | 代码归一化（`hk00700`→`00700.HK`、`AAPL`→`AAPL.US`、`920344`→`920344.BJ`） | ⚠️ 暂无调用方 |
+| `market_limit_pct` | 委托 `app/price_limits.py` 返回涨跌幅上限，港美股恒为 `None`（无涨跌停） | ⚠️ 暂无调用方 |
 | `lot_size_for` / `is_trading_now` / `exchanges_for` | 最小交易单位、北京时间交易时段判断、交易所列表 | ⚠️ 暂无调用方 |
 
 此外还包含 T+N 交收、价格精度等元数据。
@@ -68,10 +68,12 @@
 > **关于"暂无调用方"**：注册表定义了完整的交易规则元数据，但目前只有
 > `market_of`、`get_market`、`ALL_MARKETS` 和印花税三项被业务代码真正读取，
 > 其余仍是为后续接入预留的脚手架。这里不写成"所有规则的单一事实来源"，
-> 因为那还不是事实 —— 涨跌幅限制等规则目前仍由各自的模块（如
-> `app/price_limits.py`）独立实现。已完成的一处收口是回测印花税：
-> `api/backtest.py::_market_default_fees` 现在委托给注册表而非重复硬编码，
-> 并有测试锁住"改注册表必须传导到回测"，防止两处口径再次分叉。
+> 因为那还不是事实。已完成的收口有两处：
+> 1. **回测印花税** —— `api/backtest.py::_market_default_fees` 委托注册表而非
+>    重复硬编码，测试锁住"改注册表必须传导到回测"；
+> 2. **涨跌幅上限** —— 反向收口，`market_limit_pct` 委托 `app/price_limits.py`
+>    （它才是指标流水线/回测/API 共用的单一事实源），删掉了注册表里那份与之
+>    矛盾的平行实现，测试逐例断言两者换算后完全一致。
 
 
 ### 3. 港美股数据同步
@@ -169,7 +171,8 @@
 - 选股页与策略回测页的市场选择现已**跟随侧边栏全局切换器**（2026-08 修复，含后端 `run_all` 尊重 `market`、策略结果缓存按市场隔离）
 - `GET /api/screener/strength` 与 `GET /api/market-recap/market-data` 后端已实现但前端尚未挂接 UI
 - `api.ts` 中 `regimeMarket()` 与概念/行业页的内联"市场不支持"提示已清理（2026-08），统一使用 `MarketNotSupportedHint` 组件
-- 市场注册表中尚未接入的几个函数存在已知不一致，接入前需先修：`market_limit_pct` 的 ST 判定在板块判定**之前**返回 5%，与 `app/price_limits.py` 中「创业板/科创板 ST 仍保持 20%」的口径矛盾；`normalize_symbol("920344")` 会把北交所代码错配成 `.SH` 后缀
+- 市场注册表的两处口径不一致已修复（2026-08）：`market_limit_pct` 改为委托 `app/price_limits.py`（全仓库涨跌停单一事实源，ST 仅压主板且含时间切换），`normalize_symbol` 补上北交所 `920/8/4` 号段判定（此前 `920344` 会被错配成 `.SH`）
+- **本 fork 落后上游约 67 个提交**（上游 `v0.2.1`，本地 `v0.1.88`），其中包含数据正确性修复（停机缺口检测、僵死 enriched 标记、回测市场环境过滤未生效等），建议同步后再做二次开发
 
 ---
 

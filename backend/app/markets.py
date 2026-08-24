@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
 
 CN_TZ = timezone(timedelta(hours=8))
@@ -110,7 +110,13 @@ def normalize_symbol(symbol: str) -> str:
     if s.endswith((".SH", ".SZ", ".BJ", ".HK", ".US")):
         return s
     if s.isdigit():
-        # 纯数字: 6/9 开头→沪，否则深（A股）
+        # 纯数字 A 股代码 → 交易所后缀。
+        # 北交所必须先判: 920xxx 与沪市 B 股 900xxx 同以 "9" 开头, 若先走
+        # 6/9 规则会把 920344 错配成 920344.SH。8xxxxx(83/87/88 新三板转板)
+        # 与 4xxxxx(430xxx) 同属北交所, 沪深两市无此号段。
+        # 号段口径与本模块 market_limit_pct 委托的 app.price_limits 保持一致。
+        if s.startswith(("920", "8", "4")):
+            return s + ".BJ"
         return s + (".SH" if s.startswith(("6", "9")) else ".SZ")
     return s + ".US"
 
@@ -148,20 +154,42 @@ def has_limit(market: str) -> bool:
     return get_market(market).has_limit
 
 
-def market_limit_pct(symbol: str, name: str | None = None) -> float | None:
-    """市场级涨跌幅。A 股按板块规则；港美股恒 None（无涨跌停）。"""
+def market_limit_pct(
+    symbol: str,
+    name: str | None = None,
+    *,
+    trade_date: date | None = None,
+) -> float | None:
+    """市场级涨跌幅上限（百分比）。港美股恒 None（无涨跌停）。
+
+    A 股规则不在此处重复实现, 而是委托 app.price_limits —— 它是全仓库
+    涨跌停口径的单一事实源(指标流水线/回测/API 都用它)。此前这里维护了一份
+    平行实现, 与 price_limits 有两处口径矛盾:
+
+    1. ST 判定放在板块判定之前无条件返回 5%, 而 price_limits 的口径是
+       「仅主板 ST 降到 5%, 创业板/科创板 ST 仍保持 20%」;
+    2. 板块前缀用 ("30", "68") 粗匹配, 而 price_limits 精确到
+       (300, 301, 688, 689)。
+
+    另外 price_limits 有 MAIN_BOARD_ST_LIMIT_CHANGE_DATE 时间切换(该日之后
+    主板 ST 不再降 5%), 这里必须透传 trade_date 才能得到正确结果。
+    trade_date 省略时按"当前规则"解释, 即取今日。
+
+    返回百分比(10.0 表示 10%), 与 price_limits 的小数口径(0.10)不同,
+    保持本函数原有的百分比约定不变。
+    """
     market = market_of(symbol)
     if not has_limit(market):
         return None
-    # A 股板块规则（与 app.price_limits 对齐）
-    code = symbol.split(".")[0]
-    if name and ("ST" in name.upper()):
-        return 5.0
-    if code.startswith(("30", "68")):
-        return 20.0
-    if code.startswith(("8", "4", "920")):
-        return 30.0
-    return 10.0
+    # 延迟导入: price_limits 依赖 numpy/polars, 而本模块是被广泛引用的轻量
+    # 元数据注册表, 遵循仓库既有的函数内导入惯例。
+    from app.price_limits import is_risk_warning_name, price_limit_pct
+
+    return price_limit_pct(
+        symbol,
+        trade_date if trade_date is not None else date.today(),
+        is_risk_warning=is_risk_warning_name(name),
+    ) * 100
 
 
 # ── 交易费用（回测撮合用）───────────────────────────────────────────

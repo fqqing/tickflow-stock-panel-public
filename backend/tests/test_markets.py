@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -162,8 +162,8 @@ def test_normalize_symbol_idempotent(symbol, expected):
 @pytest.mark.parametrize(
     ("symbol", "expected"),
     [
-        ("920344", "920344.SH"),  # pure-numeric BJ code falls into the 6/9 -> SH rule
-        ("430001", "430001.SZ"),  # pure-numeric BJ code falls into the SZ rule
+        ("920344", "920344.BJ"),  # BJ 920 段先判, 不再被 6/9 规则错配成 .SH
+        ("430001", "430001.BJ"),  # BJ 4xx 段
         ("HK", "00000.HK"),
         ("US", ".US"),
         ("SH", "SH.US"),  # bare "SH" is too short for the prefix branch
@@ -199,16 +199,37 @@ def test_market_limit_pct_a_share_boards(symbol, expected):
 @pytest.mark.parametrize(
     ("symbol", "name", "expected"),
     [
+        # 主板 ST: 仅在 price_limits 的时间切换日之前降到 5%
         ("600001.SH", "ST大王", 5.0),
-        ("300001.SZ", "ST创业", 5.0),
-        ("300001.SZ", "st公司", 5.0),  # name check is case-insensitive
+        ("600001.SH", "st小写", 5.0),  # ST 判定大小写不敏感
+        # 创业板/科创板 ST 保持板块 20% —— 修复前这里被错算成 5%
+        ("300001.SZ", "ST创业", 20.0),
+        ("300001.SZ", "st公司", 20.0),
+        ("688001.SH", "ST科创", 20.0),
+        # 北交所 ST 保持 30%
+        ("920344.BJ", "ST北证", 30.0),
     ],
 )
-def test_market_limit_pct_st_name_overrides_board(symbol, name, expected):
-    # Actual behavior: any ST name forces 5.0, even on ChiNext/STAR where
-    # app.price_limits keeps the 20% board base. See summary for the
-    # suspected inconsistency with app.price_limits.
-    assert market_limit_pct(symbol, name) == pytest.approx(expected)
+def test_market_limit_pct_st_only_reduces_main_board(symbol, name, expected):
+    """ST 只压主板, 不能覆盖创业板/科创板/北交所的板块基准。
+
+    修复前 market_limit_pct 自带平行实现, ST 判定在板块判定之前无条件返回
+    5.0; 现已委托 app.price_limits(单一事实源), 口径为「base == 主板 10%
+    且为风险警示且在切换日之前」才降 5%。
+    """
+    from app.price_limits import MAIN_BOARD_ST_LIMIT_CHANGE_DATE
+
+    before_cut = MAIN_BOARD_ST_LIMIT_CHANGE_DATE - timedelta(days=1)
+    assert market_limit_pct(symbol, name, trade_date=before_cut) == pytest.approx(expected)
+
+
+def test_market_limit_pct_main_board_st_after_rule_change():
+    """切换日当天及之后, 主板 ST 回到 10% —— 时间维度必须透传给 price_limits。"""
+    from app.price_limits import MAIN_BOARD_ST_LIMIT_CHANGE_DATE
+
+    assert market_limit_pct(
+        "600001.SH", "ST大王", trade_date=MAIN_BOARD_ST_LIMIT_CHANGE_DATE
+    ) == pytest.approx(10.0)
 
 
 @pytest.mark.parametrize(
@@ -433,3 +454,108 @@ def test_market_meta_is_frozen():
     meta = get_market(MARKET_CN)
     with pytest.raises(FrozenInstanceError):
         meta.lot_size = 200
+
+
+# ============================================================
+# market_limit_pct 委托 price_limits（单一事实源）
+# ============================================================
+class TestMarketLimitPctDelegation:
+    """market_limit_pct 曾自带一份平行实现, 与 app.price_limits 有两处口径矛盾。
+
+    现已改为委托 price_limits。这些测试锁定"委托"这一事实本身: 任何一处口径
+    分叉(ST 判定顺序、板块号段精度、时间切换)都会被捕获。
+    """
+
+    # 主板 ST 降 5% 的时间切换日之前
+    BEFORE = date(2026, 7, 1)
+    AFTER = date(2026, 8, 1)
+
+    @pytest.mark.parametrize(
+        ("symbol", "name", "expected"),
+        [
+            # 回归重点: ST 判定必须在板块判定「之后」, 且仅对主板生效。
+            # 旧实现无条件先返回 5%, 创业板/科创板 ST 被错算成 5%。
+            ("600000.SH", "ST浦发", 5.0),
+            ("300750.SZ", "ST宁德", 20.0),
+            ("688111.SH", "ST金山", 20.0),
+            ("920344.BJ", "ST北证", 30.0),
+            # 非 ST 基准
+            ("600000.SH", "浦发银行", 10.0),
+            ("300750.SZ", "宁德时代", 20.0),
+            ("688111.SH", "金山办公", 20.0),
+            ("920344.BJ", "北证股份", 30.0),
+            ("000001.SZ", "平安银行", 10.0),
+        ],
+    )
+    def test_st_only_reduces_main_board(self, symbol, name, expected):
+        assert market_limit_pct(symbol, name, trade_date=self.BEFORE) == expected
+
+    def test_main_board_st_no_longer_reduced_after_rule_change(self):
+        """price_limits 有 MAIN_BOARD_ST_LIMIT_CHANGE_DATE 时间切换, 必须透传。"""
+        assert market_limit_pct("600000.SH", "ST浦发", trade_date=self.AFTER) == 10.0
+
+    @pytest.mark.parametrize(
+        ("symbol", "name"),
+        [("600000.SH", "ST浦发"), ("300750.SZ", "ST宁德"), ("920344.BJ", "北证股份")],
+    )
+    @pytest.mark.parametrize("trade_date", [date(2026, 7, 1), date(2026, 8, 1)])
+    def test_agrees_with_price_limits_exactly(self, symbol, name, trade_date):
+        """百分比口径换算后必须与单一事实源逐个一致(本函数返回 10.0, 源返回 0.10)。"""
+        from app.price_limits import is_risk_warning_name, price_limit_pct
+
+        expected = price_limit_pct(
+            symbol, trade_date, is_risk_warning=is_risk_warning_name(name)
+        ) * 100
+        assert market_limit_pct(symbol, name, trade_date=trade_date) == expected
+
+    @pytest.mark.parametrize("symbol", ["00700.HK", "AAPL.US", "0700.HK"])
+    def test_no_limit_markets_return_none(self, symbol):
+        """港美股无涨跌停, 恒 None —— 不能因委托而误落入 A 股分支。"""
+        assert market_limit_pct(symbol, "任意名称") is None
+
+    def test_trade_date_defaults_to_today(self):
+        """省略 trade_date 时按"当前规则"解释, 不应抛异常。"""
+        assert market_limit_pct("600000.SH", "浦发银行") == 10.0
+
+
+# ============================================================
+# normalize_symbol 北交所号段
+# ============================================================
+class TestNormalizeSymbolBeijing:
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            # 回归重点: 920xxx 与沪市 B 股 900xxx 同以 "9" 开头,
+            # 旧实现先走 6/9 规则, 把北交所代码错配成 .SH
+            ("920344", "920344.BJ"),
+            ("920819", "920819.BJ"),
+            # 新三板转板号段同属北交所
+            ("830799", "830799.BJ"),
+            ("871981", "871981.BJ"),
+            ("430418", "430418.BJ"),
+            # 沪市: 60xxxx / 688xxx / 900xxx(B 股) 不受影响
+            ("600000", "600000.SH"),
+            ("688111", "688111.SH"),
+            ("900901", "900901.SH"),
+            # 深市
+            ("000001", "000001.SZ"),
+            ("300750", "300750.SZ"),
+            ("200011", "200011.SZ"),
+        ],
+    )
+    def test_pure_numeric_exchange_inference(self, code, expected):
+        assert normalize_symbol(code) == expected
+
+    @pytest.mark.parametrize("code", ["920344", "830799", "600000", "000001"])
+    def test_normalize_then_market_of_is_cn(self, code):
+        """归一化结果必须能被 market_of 正确识别为 A 股。"""
+        assert market_of(normalize_symbol(code)) == "cn"
+
+    @pytest.mark.parametrize("code", ["920344", "830799", "430418"])
+    def test_beijing_limit_pct_via_normalized_symbol(self, code):
+        """归一化 → 涨跌幅 全链路: 北交所应得 30%, 而非主板 10%。
+
+        这是两处修复的交汇点: 旧实现下 920344 会被归一化成 .SH, 再喂给
+        price_limits 就得到主板 10%, 与北交所 30% 相差三倍。
+        """
+        assert market_limit_pct(normalize_symbol(code), None) == 30.0
