@@ -166,12 +166,10 @@
 
 **待改进（欢迎 PR）**：
 
-- 选股页与策略回测页目前使用各自的局部市场状态，**不跟随侧边栏全局切换器**，需在页内单独选择市场
+- 选股页与策略回测页的市场选择现已**跟随侧边栏全局切换器**（2026-08 修复，含后端 `run_all` 尊重 `market`、策略结果缓存按市场隔离）
 - `GET /api/screener/strength` 与 `GET /api/market-recap/market-data` 后端已实现但前端尚未挂接 UI
-- `frontend/src/components/MarketNotSupported.tsx` 组件目前未被引用，概念/行业页各自内联了重复实现
-- `api.ts` 中 `regimeMarket()` 指向一个不存在的后端路由，属残留死代码（页面实际走带 `market` 参数的 `regimeHistory`）
+- `api.ts` 中 `regimeMarket()` 与概念/行业页的内联"市场不支持"提示已清理（2026-08），统一使用 `MarketNotSupportedHint` 组件
 - 市场注册表中尚未接入的几个函数存在已知不一致，接入前需先修：`market_limit_pct` 的 ST 判定在板块判定**之前**返回 5%，与 `app/price_limits.py` 中「创业板/科创板 ST 仍保持 20%」的口径矛盾；`normalize_symbol("920344")` 会把北交所代码错配成 `.SH` 后缀
-- `_limit_ladder_market` 的 `direction` 与 `limit` 形参未被使用（端点始终传 `limit=None`）
 
 ---
 
