@@ -10,6 +10,7 @@
 """
 
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -266,3 +267,83 @@ def test_strategy_cache_clear_all_markets(tmp_path):
     assert not (tmp_path / "user_data" / "strategy_cache.json").exists()
     assert not (tmp_path / "user_data" / "strategy_cache_hk.json").exists()
     assert not (tmp_path / "user_data" / "strategy_cache_us.json").exists()
+
+
+# ============================================================
+# 5. ScreenerService.latest_date 单一定义与三条路由分支
+# ============================================================
+def _latest_date_repo(*, cn=None, market=None, asset=None, duckdb=None):
+    """记录调用去向的 repo 桩。"""
+    import types as _t
+    calls: list[str] = []
+
+    class _R:
+        store = _t.SimpleNamespace(data_dir=None)
+
+        def latest_enriched_date_market(self, m):
+            calls.append(f"market:{m}")
+            return market
+
+        def enriched_latest_date(self):
+            calls.append("cn")
+            return cn
+
+        def get_enriched_latest_asset(self, asset_type):
+            calls.append(f"asset:{asset_type}")
+            return None, asset
+
+        def execute_one(self, _sql):
+            calls.append("duckdb")
+            return (duckdb,) if duckdb else None
+
+    return _R(), calls
+
+
+def test_latest_date_has_exactly_one_definition():
+    """回归: 多市场提交曾引入第二个 latest_date, 弱版本被后定义静默遮蔽。
+
+    重复定义时 Python 不报错, 但先定义的那个永久失效 —— 改错副本会得到
+    "代码已改却毫无效果"。此处锁定只允许一个定义。
+    """
+    import inspect
+
+    from app.services.screener import ScreenerService
+
+    source = inspect.getsource(ScreenerService)
+    assert source.count("def latest_date") == 1
+
+    # 生效版本必须同时具备三条分支, 否则等于退回被删掉的弱副本
+    bound = inspect.getsource(ScreenerService.latest_date)
+    assert "latest_enriched_date_market" in bound  # 港美股
+    assert "get_enriched_latest_asset" in bound    # ETF
+    assert "kline_enriched" in bound               # DuckDB 兜底
+
+
+@pytest.mark.parametrize("market", ["hk", "us"])
+def test_latest_date_routes_hk_us_to_market_dir(market):
+    from app.services.screener import ScreenerService
+
+    repo, calls = _latest_date_repo(market=date(2026, 7, 20))
+    svc = ScreenerService(repo, asset_type="stock", market=market)
+    assert svc.latest_date() == date(2026, 7, 20)
+    assert calls == [f"market:{market}"]
+
+
+def test_latest_date_routes_etf_to_asset_lookup():
+    """A 股 ETF 必须走 asset 专用取数, 不能退化成全股票口径。"""
+    from app.services.screener import ScreenerService
+
+    repo, calls = _latest_date_repo(asset=date(2026, 7, 18))
+    svc = ScreenerService(repo, asset_type="etf", market="cn")
+    assert svc.latest_date() == date(2026, 7, 18)
+    assert calls == ["asset:etf"]
+
+
+def test_latest_date_falls_back_to_duckdb_when_parquet_empty():
+    """A 股股票: parquet 无日期时回退 DuckDB, 而非直接返回 None。"""
+    from app.services.screener import ScreenerService
+
+    repo, calls = _latest_date_repo(cn=None, duckdb="2026-07-15")
+    svc = ScreenerService(repo, asset_type="stock", market="cn")
+    assert svc.latest_date() == date(2026, 7, 15)
+    assert calls == ["cn", "duckdb"]

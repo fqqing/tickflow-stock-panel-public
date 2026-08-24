@@ -41,12 +41,6 @@ class ScreenerService:
         from app.tickflow.repository import enriched_dirname
         self._enriched_dirname = enriched_dirname(asset_type, market)
 
-    def latest_date(self) -> date | None:
-        """最新 enriched 日期。港美股读市场独立目录。"""
-        if self.market in ("hk", "us"):
-            return self.repo.latest_enriched_date_market(self.market)
-        return self.repo.enriched_latest_date()
-
     @staticmethod
     def clear_history_cache() -> None:
         """清空进程级 _history_cache (TTL 缓存)。
