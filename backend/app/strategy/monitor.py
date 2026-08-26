@@ -281,33 +281,53 @@ def _is_signal_field(field: str) -> bool:
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
-def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) -> pl.DataFrame:
-    """根据 conditions + logic 构建过滤后的命中 DataFrame。
+# 逐条件命中标记列前缀 —— 仅存在于评估中间态, 不落盘也不出现在事件里。
+_COND_FLAG_PREFIX = "__cond_hit_"
 
-    conditions: [{"field","op","value"?}] — op=truth 为布尔信号, 否则阈值比较
-    logic: "and" | "or"
-    返回命中行 (含 symbol/name/close/change_pct + 各信号列)
-    """
+
+def _build_condition_exprs(df: pl.DataFrame, conditions: list[dict]) -> list[pl.Expr] | None:
+    """把 conditions 逐条编译为布尔表达式; 字段缺失或算子非法时返回 None。"""
     cols = set(df.columns)
     parts: list[pl.Expr] = []
     for c in conditions:
         field = c["field"]
         if field not in cols:
-            return df.head(0)  # 字段缺失,无法判定 → 空结果
+            return None  # 字段缺失,无法判定 → 空结果
         op = c["op"]
         if op == "truth":
             parts.append(pl.col(field).fill_null(False))
         elif op in _OP_BUILDERS:
             parts.append(_OP_BUILDERS[op](pl.col(field), c["value"]))
         else:
-            return df.head(0)
-    if not parts:
+            return None
+    return parts or None
+
+
+def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) -> pl.DataFrame:
+    """根据 conditions + logic 构建过滤后的命中 DataFrame。
+
+    conditions: [{"field","op","value"?}] — op=truth 为布尔信号, 否则阈值比较
+    logic: "and" | "or"
+    返回命中行 (含 symbol/name/close/change_pct + 各信号列), 并附带逐条件
+    命中标记列 `__cond_hit_{i}`。
+
+    ★ 为什么要逐条标记: OR 逻辑下 any_horizontal 把 N 个条件塌缩成单个布尔,
+      「命中的是哪一条」在过滤那一刻就丢失了, 推送文案只能把所有条件全列出来。
+      逐条标记让调用方精确归因, 且覆盖阈值类条件 (不只是 op=truth 的布尔信号)。
+    """
+    parts = _build_condition_exprs(df, conditions)
+    if parts is None:
         return df.head(0)
+    # mask 仍由原始表达式合成 —— 保持既有匹配语义 (含 null 的处理) 完全不变
     if logic == "or":
         mask = pl.any_horizontal(parts)
     else:
         mask = pl.all_horizontal(parts)
-    return df.filter(mask)
+    flags = [
+        p.fill_null(False).alias(f"{_COND_FLAG_PREFIX}{i}")
+        for i, p in enumerate(parts)
+    ]
+    return df.with_columns(flags).filter(mask)
 
 
 class MonitorRuleEngine:
@@ -832,20 +852,21 @@ class MonitorRuleEngine:
             return []
 
         # 2. 根据 type 构建命中集
-        #    元组格式: (event_type, symbol, name, price, pct, signals)
-        hit_rows: list[tuple[str, str, Any, Any, Any, list[str]]] = []
+        #    元组格式: (event_type, symbol, name, price, pct, signals, matched_conditions)
+        hit_rows: list[tuple[str, str, Any, Any, Any, list[str], list[dict]]] = []
 
         rtype = rule.get("type", "signal")
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
-            hit_rows = self._match_strategy(scoped, rule)
+            # 策略事件靠选股池 diff 判定, 没有条件归因 → matched 补空
+            hit_rows = [(*r, []) for r in self._match_strategy(scoped, rule)]
         elif rtype == "ladder":
             # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
             return self._evaluate_ladder(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
-            for sym, name, price, pct, hit_sigs in self._match_conditions(scoped, rule):
-                hit_rows.append((rtype, sym, name, price, pct, hit_sigs))
+            for sym, name, price, pct, hit_sigs, matched in self._match_conditions(scoped, rule):
+                hit_rows.append((rtype, sym, name, price, pct, hit_sigs, matched))
 
         if not hit_rows:
             return []
@@ -856,7 +877,7 @@ class MonitorRuleEngine:
         source = rtype
 
         events: list[dict] = []
-        for ev_type, sym, name, price, pct, hit_sigs in hit_rows:
+        for ev_type, sym, name, price, pct, hit_sigs, matched in hit_rows:
             # cooldown 键包含事件类型, 同股不同策略事件互不压制。
             is_batch = sym == "_batch"
             key_symbol = f"_{ev_type}_batch" if is_batch else sym
@@ -872,10 +893,17 @@ class MonitorRuleEngine:
                 message = name  # name 字段即批量消息
             else:
                 resolved_name = name if name else self._name_map.get(sym)
+                # ★ 文案只讲真正命中的条件: OR 规则下把全部条件列出来会让用户
+                #   无法判断到底触发了哪一条。matched 为空 (策略类事件/异常兜底)
+                #   时回退到规则全量条件, 保持旧行为。
+                if rule.get("type") == "strategy":
+                    msg_conditions = None
+                else:
+                    msg_conditions = matched or list(rule.get("conditions", []))
                 message = rule.get("message", "") or self._default_message(
                     rule, ev_type=ev_type, sym=sym, name=resolved_name,
                     pct=pct, price=price,
-                    conditions=list(rule.get("conditions", [])) if rule.get("type") != "strategy" else None,
+                    conditions=msg_conditions,
                 )
 
             ev = {
@@ -895,6 +923,9 @@ class MonitorRuleEngine:
                 # 触发条件快照 (signal/price/market 类型): 用于触发记录展示
                 # 「命中了什么条件」。strategy 类型靠策略选股池 diff, 不写条件。
                 "conditions": list(rule.get("conditions", [])) if rtype != "strategy" else [],
+                # 本次真正命中的条件子集 (OR 逻辑下是全部条件的真子集)。
+                # conditions 保留规则全量快照, 两者并存便于「配了什么」对比「触发了什么」。
+                "matched_conditions": matched if rtype != "strategy" else [],
                 "logic": rule.get("logic", "and") if rtype != "strategy" else "and",
             }
             events.append(ev)
@@ -1161,8 +1192,13 @@ class MonitorRuleEngine:
     @staticmethod
     def _match_conditions(
         df: pl.DataFrame, rule: dict,
-    ) -> list[tuple[str, Any, Any, Any, list[str]]]:
-        """按 conditions + logic 匹配,返回命中行 [(symbol,name,price,pct,signals)]。"""
+    ) -> list[tuple[str, Any, Any, Any, list[str], list[dict]]]:
+        """按 conditions + logic 匹配,返回命中行 [(symbol,name,price,pct,signals,matched)]。
+
+        matched: 该行真正命中的条件子集。OR 逻辑下用于回答「满足的是哪一条」,
+        并且覆盖阈值类条件 —— 旧实现只归因 op=truth 的布尔信号, 阈值条件
+        (如 涨跌幅≥5) 永远归因不到, 导致推送只能把全部条件列出来。
+        """
         conditions = rule.get("conditions", [])
         logic = rule.get("logic", "and")
         if not conditions:
@@ -1174,12 +1210,14 @@ class MonitorRuleEngine:
             name = row.get("name")
             price = row.get("close")
             pct = row.get("change_pct")
-            # 收集命中的信号列名 (仅 op=truth 且为真的)
-            hit_sigs = [
-                c["field"] for c in conditions
-                if c.get("op") == "truth" and row.get(c["field"])
+            # 逐条件标记 → 精确命中子集 (AND 逻辑下等于全部条件)
+            matched = [
+                c for i, c in enumerate(conditions)
+                if row.get(f"{_COND_FLAG_PREFIX}{i}") is True
             ]
-            results.append((sym, name, price, pct, hit_sigs))
+            # signals 保持原语义: 仅布尔信号列名 (前端信号标签用)
+            hit_sigs = [c["field"] for c in matched if c.get("op") == "truth"]
+            results.append((sym, name, price, pct, hit_sigs, matched))
         return results
 
     def _evaluate_ladder(self, scoped: pl.DataFrame, rule: dict, now: float) -> list[dict]:
