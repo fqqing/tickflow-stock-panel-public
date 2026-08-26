@@ -26,9 +26,9 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 
 ```bash
 # 后端
-cd backend && uv sync --extra backtest   # 含回测依赖
-# 老 CPU: uv sync --extra legacy-cpu
-# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
+cd backend && uv sync --extra backtest --extra dev   # 含回测 + 测试依赖 (v0.2.1 起 pytest 移入 dev 组)
+# 老 CPU: uv sync --extra legacy-cpu --extra dev
+# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest --extra dev
 uv run uvicorn app.main:app --reload --port 3018
 
 # 前端
