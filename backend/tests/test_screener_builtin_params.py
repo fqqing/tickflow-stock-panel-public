@@ -49,6 +49,11 @@ class _CapturingStrategyEngine:
         # run_all 在港美股模式下会调 list_strategies 做市场兼容过滤
         return [{"id": "builtin_strategy", "asset_types": ["stock"], "timeframes": ["1d"]}]
 
+    def get(self, strategy_id):
+        if not self.has(strategy_id):
+            raise ValueError(f"unknown strategy: {strategy_id}")
+        return types.SimpleNamespace(meta={"id": strategy_id})
+
     def run(self, strategy_id, context, *, pool=None, params=None, overrides=None):
         self.calls.append({
             "kind": "run",

@@ -264,6 +264,8 @@ def strategies(
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
     presets = []
     for meta in engine.list_strategies():
+        if meta.get("research_only"):
+            continue
         if asset_type not in meta.get("asset_types", ["stock"]):
             continue
         if timeframe not in meta.get("timeframes", ["1d"]):
@@ -318,10 +320,11 @@ def run_preset(req: PresetRequest, request: Request):
     try:
         if not engine.has(req.strategy_id):
             raise ValueError(f"unknown strategy: {req.strategy_id}")
+        meta = engine.get(req.strategy_id).meta
+        if meta.get("research_only"):
+            raise ValueError(f"unknown strategy: {req.strategy_id}")
         # 港美股跳过依赖涨跌停/连板信号的策略
-        if req.market in ("hk", "us") and not _market_compatible_strategy(
-            engine.get(req.strategy_id).meta, req.market
-        ):
+        if req.market in ("hk", "us") and not _market_compatible_strategy(meta, req.market):
             raise ValueError(
                 f"strategy {req.strategy_id} 依赖涨停/连板信号,不适用于{req.market.upper()}市场"
             )
@@ -572,7 +575,11 @@ def run_all(request: Request, body: Optional[dict] = None):
     requested_ids = body.get("strategy_ids")
     if requested_ids and isinstance(requested_ids, list):
         all_ids = [str(sid) for sid in requested_ids]
-        unknown = [sid for sid in all_ids if not engine.has(sid)]
+        unknown = [
+            sid
+            for sid in all_ids
+            if not engine.has(sid) or engine.get(sid).meta.get("research_only")
+        ]
         if unknown:
             raise HTTPException(status_code=404, detail=f"unknown strategies: {unknown}")
         # 显式指定的策略同样要做市场兼容过滤: 前端策略池可能含依赖涨跌停/连板的
@@ -588,7 +595,8 @@ def run_all(request: Request, body: Optional[dict] = None):
         all_ids = [
             meta["id"]
             for meta in engine.list_strategies()
-            if asset_type in meta.get("asset_types", ["stock"])
+            if not meta.get("research_only")
+            and asset_type in meta.get("asset_types", ["stock"])
             and timeframe in meta.get("timeframes", ["1d"])
             and _market_compatible_strategy(meta, market)
         ]
@@ -776,7 +784,9 @@ def limit_ladder(
     sealed_ready = False
     sealed_age: float | None = None
     if depth_svc:
-        sealed_map = depth_svc.get_sealed_map(as_of, is_down=is_down)
+        # 复用上方双方向计数已读取的 sealed map: 同一请求、同一 as_of、同一对象,
+        # 不再第三次读取 (内存路径含全量浅拷贝, parquet 路径含整文件读)。
+        sealed_map = down_map if is_down else up_map
         sealed_ready = bool(sealed_map) and depth_svc.is_sealed_ready(as_of)
         sealed_age = depth_svc.get_sealed_age(as_of) if sealed_ready else None
 

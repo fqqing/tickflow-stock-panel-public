@@ -11,6 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-≥3.11-blue.svg)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Markets](https://img.shields.io/badge/Markets-A股_·_港股_·_美股-e91e63.svg)](#-本-fork-新增功能多市场扩展)
+[![Data: TickFlow](https://img.shields.io/badge/Data-TickFlow-00b386.svg)](https://tickflow.org/auth/register?ref=V3KDKGXPEA)
 [![Docker Image](https://img.shields.io/badge/ghcr.io-amd64_·_arm64-2496ed?logo=docker&logoColor=white)](https://github.com/hzy1522/tickflow-stock-panel/pkgs/container/tickflow-stock-panel)
 [![CI](https://github.com/hzy1522/tickflow-stock-panel/actions/workflows/docker.yml/badge.svg)](https://github.com/hzy1522/tickflow-stock-panel/actions/workflows/docker.yml)
 
@@ -32,7 +33,7 @@
 
 以下声明沿用自上游项目，本 fork 原样尊重：
 
-> **本项目个人开源，基于 [TickFlow](https://tickflow.org) 数据源，非 TickFlow 官方项目。仅供学习研究使用，严禁商业用途。**
+> **本项目个人开源，数据源插件化，可任意接入第三方数据源。仅供学习研究使用，严禁商业用途。**
 >
 > ⚠️ 小白请绕路，本开源项目谨作为本地量化提供解决思路 Demo，不作为投资软件或看盘软件。
 >
@@ -186,10 +187,13 @@
 | 🔍 **选股引擎** | 18 个内置策略 + 自定义信号 + AI 生成 + 代码迁移，Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等，一次扫表落盘 enriched Parquet | [features.md](./docs/features.md) |
 | 🧪 **回测引擎** | 三种模式（个股/策略组合/自由信号），T+1/手续费/滑点/止损，SSE 流式进度 | [features.md](./docs/features.md) |
+| ⛏️ **因子挖掘** | 嵌套样本外搜索多因子排名组合，候选库显式发布、永不自动上线 | [mining.md](./docs/mining.md) |
+| 🌡️ **市场环境** | 情绪周期 6 阶段（连板梯队驱动）+ 概念/行业主线排名，与 5 档环境分并存 | [market-phase.md](./docs/market-phase.md) |
+| 🚨 **异动监控** | 交易所异动规则口径（3/10/30 日偏离值），盘中实时接近度与推送 | — |
 | 📡 **监控中心** | 四类监控（策略/个股信号/价格/异动），多条件 AND/OR + 语音播报 + 飞书推送 | [features.md](./docs/features.md) |
 | 📈 **个股分析** | 9 类关键价位 + AI 四维分析（技术/基本面/财务/消息面） | [features.md](./docs/features.md) |
 | 🏆 **连板梯队** | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警 | [features.md](./docs/features.md) |
-| 🧰 **数据扩展** | TickFlow 多源 + 第三方接入（接口/推送/CSV/JSON）同台分析 | [features.md](./docs/features.md) |
+| 🧰 **数据扩展** | 数据源插件化（stock-sdk 示例 + YAML 自定义源），扩展字段配成一级页面 | [custom-data-source.md](./docs/custom-data-source.md) |
 
 <details>
 <summary><b>📦 主要页面一览</b></summary>
@@ -202,6 +206,7 @@
 **🔍 选股与回测**
 - **策略** Screener — Polars 毫秒级扫描，18 个内置策略卡片 + 自定义条件
 - **回测** Backtest — 因子回测（IC/IR、分层收益、多空组合）与策略回测（净值、回撤、夏普、胜率）
+- **挖掘** Mining — 嵌套样本外因子与策略挖掘，候选入库后显式确认才发布
 
 **📈 个股与板块分析**
 - **个股分析** Stock Analysis (Beta) — 日 K + 9 类关键价位 + AI 四维分析
@@ -212,6 +217,8 @@
 
 **🔔 监控与复盘**
 - **监控中心** Monitor — 四类规则，盘中实时弹窗 + 语音播报 + 触发记录持久化
+- **异动监控** Abnormal Moves — 按交易所异动规则口径实时计算偏离值接近度，盯住异动边缘名单
+- **市场环境** Regime — 情绪周期 6 阶段 + 概念/行业主线排名（本 fork 扩展支持港美股）
 - **复盘** Review (Beta) — 盘后 AI 自动生成市场复盘，可定时执行、推送飞书、下载 Markdown
 
 **🗄️ 数据与扩展**
@@ -233,16 +240,32 @@
     <td width="50%" align="center"><b>策略 Screener</b></td>
   </tr>
   <tr>
-    <td width="50%"><img src="./screenshots/dashboard.png" alt="看板页面"></td>
-    <td width="50%"><img src="./screenshots/screener.png" alt="策略页"></td>
+    <td width="50%"><img src="./screenshots/看板.png" alt="看板页面"></td>
+    <td width="50%"><img src="./screenshots/策略.png" alt="策略页"></td>
   </tr>
   <tr>
     <td width="50%" align="center"><b>回测 Backtest</b></td>
-    <td width="50%" align="center"><b>监控中心 Monitor</b></td>
+    <td width="50%" align="center"><b>挖掘 Mining</b></td>
   </tr>
   <tr>
-    <td width="50%"><img src="./screenshots/backtest.png" alt="回测页"></td>
-    <td width="50%"><img src="./screenshots/monitor.png" alt="监控中心"></td>
+    <td width="50%"><img src="./screenshots/回测.png" alt="回测页"></td>
+    <td width="50%"><img src="./screenshots/挖掘因子.png" alt="挖掘页"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><b>监控中心 Monitor</b></td>
+    <td width="50%" align="center"><b>连板梯队 Limit Ladder</b></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="./screenshots/监控中心.png" alt="监控中心"></td>
+    <td width="50%"><img src="./screenshots/连板梯队.png" alt="连板梯队页"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><b>概念分析 Concept</b></td>
+    <td width="50%" align="center"><b>自选 Watchlist</b></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="./screenshots/概念分析.png" alt="概念分析"></td>
+    <td width="50%"><img src="./screenshots/自选.png" alt="自选页"></td>
   </tr>
 </table>
 
@@ -347,29 +370,48 @@ PORT=3018                      # 服务端口
 
 ## 🏗️ 技术栈
 
-| 层 | 选型 |
-| :--- | :--- |
-| **后端** | FastAPI · Pydantic v2 · APScheduler · sse-starlette |
-| **数据** | Polars（计算）· DuckDB（查询）· Parquet（存储） |
-| **回测** | vectorbt（全项目唯一 pandas 边界） |
-| **数据源** | [TickFlow](https://tickflow.org) 官方 SDK · 港美股指数走腾讯/东财公开免费接口 |
-| **AI**（可选） | OpenAI 兼容接口（DeepSeek / 通义 / Ollama 等） |
-| **前端** | React 18 · Vite · TypeScript · Tailwind · Tanstack Query · Lightweight Charts · ECharts · dnd-kit |
-| **部署** | Docker 两阶段构建，前端 dist 拷进后端镜像，**单容器** |
+| 层           | 选型                                                                                              |
+| :----------- | :------------------------------------------------------------------------------------------------ |
+| **后端**     | FastAPI · Pydantic v2 · APScheduler · sse-starlette                                               |
+| **数据**     | Polars(计算)· DuckDB(查询)· Parquet(存储)                                                         |
+| **回测**     | vectorbt(全项目唯一 pandas 边界)                                                                  |
+| **数据源**   | [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方 SDK · 插件化扩展(stock-sdk 示例插件 · YAML 自定义源) · 港美股指数走腾讯/东财公开免费接口 |
+| **AI**(可选) | OpenAI 兼容接口(DeepSeek / 通义 / Ollama 等)                                                      |
+| **前端**     | React 18 · Vite · TypeScript · Tailwind · Tanstack Query · Lightweight Charts · ECharts · dnd-kit |
+| **部署**     | Docker 两阶段构建,前端 dist 拷进后端镜像,**单容器**                                               |
+
+---
+
+## 🗺️ 路线图
+
+| Phase  | 内容                                                               | 状态 |
+| :----- | :----------------------------------------------------------------- | :--- |
+| 0-1    | 仓库骨架 · FastAPI 壳 · 能力探测 · K 线同步与分析页                | ✅    |
+| 2-3    | Polars enriched 流水线 · Screener · vectorbt 回测(T+1/手续费/止损) | ✅    |
+| 4-5    | 监控引擎 · 四类监控规则 · 实时 SSE 推送 · 持久化记录               | ✅    |
+| 6      | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析)                    | ✅    |
+| **v0.2** | 因子挖掘全链路 · 市场阶段与主线识别 · 异动监控 · 数据源插件化     | ✅    |
+| **v2** | Webhook 推送· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
+| **本 fork** | 多市场扩展(A股 / 港股 / 美股)                                 | ✅    |
 
 ---
 
 ## 📚 完整文档
 
-| 文档 | 内容 |
-| :--- | :--- |
-| [NOTICE](./NOTICE) | **衍生关系、上游归属与修改清单** |
-| [docs/deployment.md](./docs/deployment.md) | 部署方式（Dev / Docker / GH Actions）、老 CPU 兼容、访问密码 |
-| [docs/configuration.md](./docs/configuration.md) | 所有 `.env` 配置项详解 |
-| [docs/features.md](./docs/features.md) | 各功能模块详细说明 |
-| [docs/custom-data-source.md](./docs/custom-data-source.md) | 自定义数据源接入、YAML 配置与 mock 联调示例 |
-| [docs/strategy.md](./docs/strategy.md) | 策略体系（18 内置策略 + 三种扩展方式） |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | 项目架构、数据契约、缓存与性能要求、测试矩阵 |
+| 文档                                                                                               | 内容                                                                 |
+| :------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------- |
+| [NOTICE](./NOTICE)                                                                                 | **衍生关系、上游归属与修改清单**                                     |
+| [docs/deployment.md](./docs/deployment.md)                                                         | 部署方式(Dev / Docker / GH Actions)、老 CPU 兼容、更新代码、访问密码 |
+| [docs/configuration.md](./docs/configuration.md)                                                   | 所有 `.env` 配置项详解(数据源、AI、服务、密码、数据目录)             |
+| [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
+| [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、YAML 配置与 mock 联调示例                         |
+| [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(18 内置策略 + 三种扩展方式 + 文件结构)                      |
+| [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
+| [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
+| [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk 为参考实现)                         |
+| [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
+| [CONTRIBUTING.md](./CONTRIBUTING.md)                                                               | 项目架构、数据契约、缓存与性能要求、测试矩阵                         |
+| [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 ---
 

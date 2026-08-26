@@ -1,6 +1,6 @@
 [project]
 name = "tickflow-stock-panel-backend"
-version = "0.1.88"
+version = "0.2.1"
 description = "A 股/港股/美股 选股 + 监控 + 回测面板 — TickFlow 适配"
 # 注意: 不要设置 readme = "../README.md"。
 # 新版 hatchling 强制校验 readme 必须位于项目目录内, 指向上一级会直接构建失败:
