@@ -677,6 +677,9 @@ export interface AlertEvent {
   severity?: string
   strategy_id?: string
   conditions?: MonitorCondition[]
+  /** 本次真正命中的条件子集(OR 规则下是 conditions 的真子集)。
+   *  该字段上线前落盘的历史记录没有它 → 消费方需回退到 conditions。 */
+  matched_conditions?: MonitorCondition[]
   logic?: 'and' | 'or'
   sector_kind?: SectorKind
   sector_key?: string

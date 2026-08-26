@@ -495,32 +495,45 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                         </span>
                       </div>
                       {/* 详情行: 命中条件 (signal/price/market) + 当前价 / 或默认消息 */}
-                      {(ev.conditions && ev.conditions.length > 0) ? (
-                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]">
-                          <span className="text-muted">命中</span>
-                          {ev.conditions.map((c: MonitorCondition, ci: number) => (
-                            <span key={ci} className="inline-flex items-center gap-0.5">
-                              {ci > 0 && <span className="text-secondary">{ev.logic === 'or' ? '或' : '且'}</span>}
-                              {c.op === 'truth' ? (
-                                <span className="text-accent/80">{cnSignal(c.field)}</span>
-                              ) : (
-                                <span className="text-foreground/80 font-mono">{cnSignal(c.field)}{c.op}{c.value}</span>
-                              )}
-                            </span>
-                          ))}
-                          {ev.price != null && (
-                            <>
-                              <span className="text-muted">·</span>
-                              <span className="text-muted">现价</span>
-                              <span className="font-mono text-foreground/90">{fmtPrice(ev.price)}</span>
-                            </>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="mt-1 flex items-center gap-2">
-                          <span className="text-[11px]">{renderMessage(ev.source, ev.message)}</span>
-                        </div>
-                      )}
+                      {(() => {
+                        // ★ 优先展示真正命中的条件子集。OR 规则下全量条件里往往只有
+                        //   一条成立, 把全部条件标成「命中」会误导 (与飞书文案同源的缺陷)。
+                        //   历史记录 (matched_conditions 上线前落盘的) 没有该字段 → 回退全量。
+                        const matched = ev.matched_conditions ?? []
+                        const exact = matched.length > 0
+                        const conds: MonitorCondition[] = exact ? matched : (ev.conditions ?? [])
+                        // 命中子集内各条同时成立 → 用「且」; 回退到全量时沿用规则的逻辑词
+                        const joinWord = exact ? '且' : (ev.logic === 'or' ? '或' : '且')
+                        if (conds.length === 0) {
+                          return (
+                            <div className="mt-1 flex items-center gap-2">
+                              <span className="text-[11px]">{renderMessage(ev.source, ev.message)}</span>
+                            </div>
+                          )
+                        }
+                        return (
+                          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]">
+                            <span className="text-muted">命中</span>
+                            {conds.map((c: MonitorCondition, ci: number) => (
+                              <span key={ci} className="inline-flex items-center gap-0.5">
+                                {ci > 0 && <span className="text-secondary">{joinWord}</span>}
+                                {c.op === 'truth' ? (
+                                  <span className="text-accent/80">{cnSignal(c.field)}</span>
+                                ) : (
+                                  <span className="text-foreground/80 font-mono">{cnSignal(c.field)}{c.op}{c.value}</span>
+                                )}
+                              </span>
+                            ))}
+                            {ev.price != null && (
+                              <>
+                                <span className="text-muted">·</span>
+                                <span className="text-muted">现价</span>
+                                <span className="font-mono text-foreground/90">{fmtPrice(ev.price)}</span>
+                              </>
+                            )}
+                          </div>
+                        )
+                      })()}
                       {ev.signals && ev.signals.length > 0 && (
                         <div className="mt-1.5 flex flex-wrap gap-1">
                           {ev.signals.map((s: string, j: number) => (

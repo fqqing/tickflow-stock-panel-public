@@ -142,6 +142,45 @@ def _persist_last_fetch(fetched_at_ms: float) -> None:
         logger.debug("last_fetch_ms 持久化失败 (不影响行情): %s", e)
 
 
+# 规则事件里按需透传的可选字段 (板块/指数监控的上下文)。
+_ALERT_PASSTHROUGH_KEYS = (
+    "sector_kind", "sector_key", "sector_name",
+    "sector_source_field", "sector_value", "sector_level",
+    "window_change_pct", "coverage_ratio", "valid_count",
+    "total_count", "up_count", "down_count", "leader",
+)
+
+
+def rule_event_to_alert(ev: dict) -> dict:
+    """把监控引擎的规则事件转成 SSE 告警载荷 (兼容旧 alert schema)。
+
+    这里是显式白名单 —— 引擎新增字段若不在此登记就到不了前端。
+    从轮询循环里抽出成纯函数, 使该契约可被测试直接覆盖。
+    """
+    alert = {
+        "source": ev["source"],
+        "type": ev["type"],
+        "rule_id": ev.get("rule_id"),
+        "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
+        "symbol": ev["symbol"],
+        "name": ev["name"],
+        "message": ev["message"],
+        "price": ev["price"],
+        "change_pct": ev["change_pct"],
+        "signals": ev["signals"],
+        "severity": ev.get("severity", "info"),
+        "conditions": ev.get("conditions") or [],
+        # 本次真正命中的条件子集 (OR 规则下是真子集),
+        # 供前端区分「规则配了什么」与「实际触发了什么」。
+        "matched_conditions": ev.get("matched_conditions") or [],
+        "logic": ev.get("logic") or "and",
+    }
+    for key in _ALERT_PASSTHROUGH_KEYS:
+        if key in ev:
+            alert[key] = ev[key]
+    return alert
+
+
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
@@ -1159,30 +1198,7 @@ class QuoteService:
                             logger.warning("告警落盘失败: %s", e)
                         # 转为 SSE 推送格式 (兼容旧 alert schema)
                         for ev in rule_events:
-                            alert = {
-                                "source": ev["source"],
-                                "type": ev["type"],
-                                "rule_id": ev.get("rule_id"),
-                                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
-                                "symbol": ev["symbol"],
-                                "name": ev["name"],
-                                "message": ev["message"],
-                                "price": ev["price"],
-                                "change_pct": ev["change_pct"],
-                                "signals": ev["signals"],
-                                "severity": ev.get("severity", "info"),
-                                "conditions": ev.get("conditions") or [],
-                                "logic": ev.get("logic") or "and",
-                            }
-                            for key in (
-                                "sector_kind", "sector_key", "sector_name",
-                                "sector_source_field", "sector_value", "sector_level",
-                                "window_change_pct", "coverage_ratio", "valid_count",
-                                "total_count", "up_count", "down_count", "leader",
-                            ):
-                                if key in ev:
-                                    alert[key] = ev[key]
-                            all_alerts.append(alert)
+                            all_alerts.append(rule_event_to_alert(ev))
 
             # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
             # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存

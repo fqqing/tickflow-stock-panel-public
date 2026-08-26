@@ -190,3 +190,38 @@ def test_internal_flag_columns_never_leak_into_events() -> None:
     rule = _rule([{"field": "change_pct", "op": ">=", "value": 0.05}])
     ev = _fire(rule, _quote(change_pct=0.06))[0]
     assert not [k for k in ev if k.startswith("__cond_hit_")]
+
+
+# ---------------------------------------------------------------------------
+# SSE payload contract: the whitelist must forward the attribution
+# ---------------------------------------------------------------------------
+def test_sse_alert_payload_forwards_matched_conditions() -> None:
+    """SSE 载荷是显式白名单 —— 归因字段漏登记就到不了前端 (与文案分开的第二个漏点)。"""
+    from app.services.quote_service import rule_event_to_alert
+
+    rule = _rule([
+        {"field": "change_pct", "op": ">=", "value": 0.05},
+        {"field": "rsi_14", "op": ">=", "value": 80},
+    ])
+    ev = _fire(rule, _quote(change_pct=0.06, rsi_14=50.0))[0]
+
+    alert = rule_event_to_alert(ev)
+
+    assert [c["field"] for c in alert["matched_conditions"]] == ["change_pct"]
+    assert len(alert["conditions"]) == 2      # 全量快照仍在
+    assert alert["message"] == ev["message"]  # 飞书正文同源
+
+
+def test_sse_alert_payload_tolerates_events_without_attribution() -> None:
+    """历史/策略类事件没有该字段时不得 KeyError, 退化为空列表。"""
+    from app.services.quote_service import rule_event_to_alert
+
+    legacy = {
+        "source": "signal", "type": "signal", "symbol": "600000.SH",
+        "name": "浦发银行", "message": "旧记录", "price": 10.0,
+        "change_pct": 0.01, "signals": [],
+    }
+    alert = rule_event_to_alert(legacy)
+
+    assert alert["matched_conditions"] == []
+    assert alert["conditions"] == []
