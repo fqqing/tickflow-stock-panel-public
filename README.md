@@ -410,6 +410,7 @@ PORT=3018                      # 服务端口
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk 为参考实现)                         |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
+| [docs/upstream-merge.md](./docs/upstream-merge.md)                                                 | 合并上游操作手册（冲突解决模式 · 验证矩阵 · 常见坑）               |
 | [CONTRIBUTING.md](./CONTRIBUTING.md)                                                               | 项目架构、数据契约、缓存与性能要求、测试矩阵                         |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
