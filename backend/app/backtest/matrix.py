@@ -3625,10 +3625,14 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
     _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
 
     if config.get("exclude_st"):
+        # ST 是 A 股制度概念: 港美股无 ST, 且 "ST" 子串会误伤名字含该字母的正常
+        # 公司 (HYPEBEAST/STERLING GP 等)。仅对 A 股符号生效, 与板块过滤同语义。
         asset_mask = np.array(
             [
-                not any(token in name.upper() for token in ("ST", "*ST", "退"))
-                for name in market.names
+                (not _is_cn_symbol(symbol)) or not any(
+                    token in name.upper() for token in ("ST", "*ST", "退")
+                )
+                for symbol, name in zip(market.symbols, market.names, strict=True)
             ],
             dtype=bool,
         )
@@ -4138,7 +4142,9 @@ def _apply_bound(mask: np.ndarray, values: np.ndarray, config: dict, prefix: str
 
 def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
     # 非 A 股 symbol（含 .HK/.US 等）不参与 A 股板块过滤（多市场扩展）
-    if not symbol.split(".")[0].isdigit():
+    # 注意不能靠 isdigit() 判断: 港股代码 00700.HK 的 00700 也是纯数字,
+    # 会导致港股被误当成 A 股参与板块匹配而被全灭。按后缀显式判定。
+    if not _is_cn_symbol(symbol):
         return True
     for board in boards:
         if board == "沪主板" and symbol.startswith("60"):
@@ -4152,3 +4158,17 @@ def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
         if board == "北交所" and symbol.endswith(".BJ"):
             return True
     return False
+
+
+def _is_cn_symbol(symbol: str) -> bool:
+    """按后缀判定 A 股: .SH/.SZ/.BJ；.HK/.US 等后缀明确非 A 股。
+
+    不用 isdigit() 推断 —— 港股代码 00700.HK 的 00700 也是纯数字。
+    无后缀时按「6 位纯数字」兼容旧数据 (如 "600000")。
+    """
+    upper = symbol.upper()
+    if upper.endswith((".SH", ".SZ", ".BJ")):
+        return True
+    if upper.endswith((".HK", ".US", ".NH", ".KQ")):
+        return False
+    return symbol.isdigit() and len(symbol) == 6

@@ -2490,7 +2490,10 @@ export function StrategyBacktest() {
               )}
 
               {settingsTab === 'filter' && (
-                <ConfigSection title="基础过滤" hint="用于候选池">
+                <ConfigSection
+                  title="基础过滤"
+                  hint={market === 'cn' ? '用于候选池' : '用于候选池（A股板块 / ST 过滤仅对 A 股生效，港美股下自动隐藏）'}
+                >
                   <label className="flex items-center gap-2 text-xs text-secondary">
                     <input
                       type="checkbox"
@@ -2517,30 +2520,34 @@ export function StrategyBacktest() {
                       )
                     })}
                   </div>
-                  <label className="flex items-center gap-2 text-xs text-secondary">
-                    <input
-                      type="checkbox"
-                      checked={!!basicFilter.exclude_st}
-                      onChange={e => updateBasicFilter('exclude_st', e.target.checked)}
-                    />
-                    排除 ST / 退市
-                  </label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {BOARD_OPTIONS.map(board => {
-                      const boards = Array.isArray(basicFilter.boards) ? basicFilter.boards : []
-                      const checked = boards.includes(board)
-                      return (
-                        <button
-                          key={board}
-                          type="button"
-                          onClick={() => updateBasicFilter('boards', checked ? boards.filter((b: string) => b !== board) : [...boards, board])}
-                          className={`rounded-btn border px-2.5 py-1.5 text-[11px] transition-colors ${checked ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border bg-base text-muted hover:border-accent/40'}`}
-                        >
-                          {board}
-                        </button>
-                      )
-                    })}
-                  </div>
+                  {market === 'cn' && (
+                    <>
+                      <label className="flex items-center gap-2 text-xs text-secondary">
+                        <input
+                          type="checkbox"
+                          checked={!!basicFilter.exclude_st}
+                          onChange={e => updateBasicFilter('exclude_st', e.target.checked)}
+                        />
+                        排除 ST / 退市
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {BOARD_OPTIONS.map(board => {
+                          const boards = Array.isArray(basicFilter.boards) ? basicFilter.boards : []
+                          const checked = boards.includes(board)
+                          return (
+                            <button
+                              key={board}
+                              type="button"
+                              onClick={() => updateBasicFilter('boards', checked ? boards.filter((b: string) => b !== board) : [...boards, board])}
+                              className={`rounded-btn border px-2.5 py-1.5 text-[11px] transition-colors ${checked ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border bg-base text-muted hover:border-accent/40'}`}
+                            >
+                              {board}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )}
                 </ConfigSection>
               )}
 

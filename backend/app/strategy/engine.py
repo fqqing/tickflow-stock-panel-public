@@ -1432,7 +1432,23 @@ class StrategyEngine:
         if bf.get("turnover_max") is not None and "turnover_rate" in df.columns:
             exprs.append(pl.col("turnover_rate") <= bf["turnover_max"])
         if bf.get("exclude_st") and "name" in df.columns:
-            exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))
+            # ST 是 A 股制度概念: 港美股无 ST, 且 "ST" 子串会误伤名字含该字母的
+            # 正常公司 (HYPEBEAST/STERLING GP 等)。仅对 A 股符号施加过滤。
+            if "symbol" in df.columns and bool(
+                df["symbol"].str.contains(r"\.(HK|US)$").any()
+            ):
+                cn_only = (
+                    ~pl.col("symbol").str.ends_with(".HK")
+                    & ~pl.col("symbol").str.ends_with(".US")
+                    & ~pl.col("symbol").str.ends_with(".NH")
+                    & ~pl.col("symbol").str.ends_with(".KQ")
+                )
+                # 非 A 股符号放行; A 股符号按名字过滤 ST/*ST/退
+                exprs.append(
+                    (~pl.col("name").str.contains("(?i)ST|\\*ST|退")) | (~cn_only)
+                )
+            else:
+                exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))
         # 板块过滤（仅 A 股；数据含港美股 symbol 时跳过，避免误杀）
         boards = bf.get("boards")
         if boards and isinstance(boards, list) and len(boards) > 0:
