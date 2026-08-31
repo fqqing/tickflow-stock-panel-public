@@ -5,7 +5,7 @@ null); 历史交易日的 quote_ts 时刻 < 15:00 即盘中快照 → 坏。
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -23,10 +23,32 @@ from app.services.data_integrity import (
     within_auto_repair_window,
 )
 
-# 2026-08-19(周三) ~ 2026-08-21(周五) 是工作日; TODAY 取 2026-08-24(周一)
-TODAY = date(2026, 8, 24)
-FRIDAY = date(2026, 8, 21)
-THURSDAY = date(2026, 8, 20)
+
+# 交易日常量按系统当前日期动态推导。
+#
+# 上游把它们硬编码为 2026-08-24/21/20, 这是一颗时间炸弹: 实时门控走
+# scan_recent_integrity(data_dir) 且不传 today, 内部用系统真实日期只扫描
+# 「最近 SCAN_WINDOW_DAYS(7) 自然日内、严格早于今天的工作日」。硬编码日期
+# 一旦滑出该窗口, 写进去的坏分区不再是「最近」, 门控查不到问题 →
+# test_realtime_gate_blocks_on_snapshot_and_launches_repair 报
+# "DID NOT RAISE HTTPException" 而永久失败 (2026-08-24 后每天都失败)。
+#
+# 改为从今天回推两个最近工作日: 最坏情况(今天周一)是 3/4 天前, 同时满足
+# SCAN_WINDOW_DAYS(7) 与 AUTO_REPAIR_MAX_LAG_DAYS(5), 使测试在任何日期自洽。
+# 名字沿用 FRIDAY/THURSDAY 以缩小与上游的差异, 语义是「上一交易日 / 再前一日」。
+def _recent_weekdays(anchor: date, count: int) -> list[date]:
+    """从 anchor 往前找 count 个工作日 (严格早于 anchor), 由近及远。"""
+    days: list[date] = []
+    cursor = anchor
+    while len(days) < count:
+        cursor -= timedelta(days=1)
+        if cursor.weekday() < 5:
+            days.append(cursor)
+    return days
+
+
+TODAY = datetime.now(CN_TZ).date()
+FRIDAY, THURSDAY = _recent_weekdays(TODAY, 2)
 
 
 def _ts_ms(day: date, t: time) -> int:
@@ -198,9 +220,10 @@ def test_branch4_start_without_stale_day_uses_latest():
 
 def test_timezone_conversion_is_cn():
     # quote_ts 是毫秒 Unix 时间戳, 必须按 UTC+8 折算 — 15:00 边界用例
-    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 15:00
+    # 时刻由 FRIDAY 派生 (北京 15:00 / 11:58), 不写死具体日期
+    ts = _ts_ms(FRIDAY, time(15, 0))          # 北京 15:00 → 收盘线, 非快照
     assert _is_snapshot(FRIDAY, ts) is False
-    ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 11:58
+    ts_morning = _ts_ms(FRIDAY, time(11, 58))  # 北京 11:58 → 盘中快照
     assert _is_snapshot(FRIDAY, ts_morning) is True
 
 
@@ -220,7 +243,7 @@ def test_describe_and_issue_dataclass():
     issues = [IntegrityIssue(day=FRIDAY, table="kline_daily", kind="snapshot")]
     from app.services.data_integrity import describe_issues
 
-    assert "2026-08-21" in describe_issues(issues)
+    assert FRIDAY.isoformat() in describe_issues(issues)
     assert "盘中快照" in describe_issues(issues)
 
 
