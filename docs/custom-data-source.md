@@ -274,7 +274,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   change_pct = 涨跌幅 (小数, 0.0366 = 3.66%)
   change_amount = 涨跌额
   amplitude = 振幅
-  turnover_rate = 换手率 (小数, 0.05 = 5%; 若上游返回 5 表示 5%, 配置 transforms: turnover_rate: "value / 100")
+  turnover_rate = 换手率 (百分数, 5 = 5%; 若上游返回小数 0.05, 配置 transforms: turnover_rate: "value * 100")
 
 分钟K (minute):
   symbol = 股票代码

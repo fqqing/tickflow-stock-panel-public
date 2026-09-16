@@ -613,6 +613,59 @@ class QuoteService:
                 self._fetch_full_market_quotes()
             return self._fetched_at > before
 
+    def _collect_index_symbols(self) -> tuple[set[str], set[str], set[str]]:
+        """收集需要实时行情的指数标的。
+
+        返回 (全部指数, 核心指数, 监控规则指数):
+        - 核心 = 设置页里配置的侧边栏指数 (未配置时用 CORE_INDEX_SYMBOLS)
+        - 监控 = 启用的「指数 + 指定标的」监控规则里的标的 (两种 mode 都要拉)
+        - 全部 = 指数维表 ∪ 核心 ∪ 监控 (仅 mode=all 使用)
+        """
+        from app.services import preferences
+
+        core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
+        all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
+        monitor_index_symbols: set[str] = set()
+        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+        if engine:
+            for rule in list(engine.rules.values()):
+                if rule.get("enabled", True) and rule.get("asset_type") == "index" and rule.get("scope") == "symbols":
+                    monitor_index_symbols.update(s for s in rule.get("symbols", []) if s)
+        all_index_symbols.update(core_index_symbols)
+        all_index_symbols.update(monitor_index_symbols)
+        return all_index_symbols, core_index_symbols, monitor_index_symbols
+
+    def _fetch_plugin_index_quotes(self, provider) -> list[dict]:
+        """用第三方源补齐指数实时行情。
+
+        第三方源的「全市场快照」一般只枚举股票 (stock-sdk 的 batch.cn 就不含指数),
+        指数得按码单查。provider 未声明 supports_index_realtime 时返回空 —— 指数
+        与不支持时行为一致, 由 /api/intraday/indices 回落本地指数日线兜底。
+        """
+        if not getattr(provider, "supports_index_realtime", False):
+            return []
+
+        from app.services import preferences
+
+        if not preferences.get_realtime_pull_index():
+            return []
+        all_index_symbols, core_index_symbols, monitor_index_symbols = self._collect_index_symbols()
+        # mode=all 拉全量指数维表; mode=core 只拉核心指数 + 监控规则标的
+        symbols = (
+            all_index_symbols
+            if preferences.get_realtime_index_mode() == "all"
+            else core_index_symbols | monitor_index_symbols
+        )
+        if not symbols:
+            return []
+        try:
+            rows = provider.get_index_realtime(sorted(symbols)) or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning("第三方源指数行情拉取失败: %s", e)
+            return []
+        logger.info("第三方源指数行情: 取到 %d/%d 只", len(rows), len(symbols))
+        return rows
+
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""
         from app.services import preferences
@@ -624,10 +677,14 @@ class QuoteService:
                 try:
                     t0 = time.perf_counter()
                     now_ts = time.perf_counter()
-                    records = custom_sources.get_provider(provider_name).get_realtime()
+                    provider = custom_sources.get_provider(provider_name)
+                    records = list(provider.get_realtime() or [])
                 except Exception as e:  # noqa: BLE001
                     logger.warning("自定义实时行情拉取失败: %s", e)
                     return
+                # 第三方源的全市场快照通常只枚举股票(stock-sdk 的 batch.cn 不含指数),
+                # 指数行情必须按码单查 —— provider 声明了该能力时在此补拉。
+                records.extend(self._fetch_plugin_index_quotes(provider))
                 self._process_full_market_records(records, t0=t0, now_ts=now_ts)
                 return
             # 自定义源未配置 realtime → 回退 TickFlow
@@ -643,17 +700,7 @@ class QuoteService:
 
         try:
             from app.services import preferences
-            all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-            core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
-            all_index_symbols.update(core_index_symbols)
-            # 指数监控规则标的并入轮询 (mode=core 时 quotes.get 显式拉取覆盖; mode=all 被 CN_Index 全覆盖)
-            monitor_index_symbols: set[str] = set()
-            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-            if engine:
-                for _r in list(engine.rules.values()):
-                    if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
-                        monitor_index_symbols.update(s for s in _r.get("symbols", []) if s)
-            all_index_symbols.update(monitor_index_symbols)
+            all_index_symbols, core_index_symbols, monitor_index_symbols = self._collect_index_symbols()
             all_etf_symbols = set()
             if self._repo:
                 etf_inst = self._repo.get_etf_instruments()

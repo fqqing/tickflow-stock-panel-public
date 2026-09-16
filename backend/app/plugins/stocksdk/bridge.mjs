@@ -5,19 +5,23 @@
  * Original implementation by @forrany (PR #57), migrated to plugin architecture.
  *
  * 协议:
- *   - stdin: 单行 JSON  { op, symbols?, adjust?, period?, start?, end?, concurrency? }
+ *   - stdin: 单行 JSON  { op, symbols?, adjust?, period?, start?, end?, concurrency?, boards? }
  *   - stdout: 单行 JSON
  *       daily/adj/minute: { ok:true, op, rows: { [appSymbol]: Row[] } }
- *       realtime/instruments: { ok:true, op, rows: Row[] }
+ *       realtime/instruments/indexQuotes/industries: { ok:true, op, rows: Row[] }
  *       ping: { ok:true, op:'ping', version }
  *       失败:  { ok:false, error }
+ *       部分失败: { ok:true, op, rows, errors: { [key]: msg } }  (key 为 symbol 或内部标记)
+ *       附带元数据: { ok:true, op, rows, meta: {...} }           (如 industries 的板块完整率)
  *
  * op:
  *   daily        —— 日K(adjust 默认 none), 每个 symbol 一组 bars
  *   adj          —— 除权因子: 取 hfq 与 none 收盘价, ex_factor = close_hfq / close_none
  *   minute       —— 分钟K(period 默认 5)
- *   realtime     —— 全 A 股实时快照(batch.cn)
+ *   realtime     —— 全 A 股实时快照(batch.cn; **不含指数**)
+ *   indexQuotes  —— 指定指数实时快照(quotes.cn, 需带 sh/sz 前缀)
  *   instruments  —— 全 A 股标的维表(batch.cn 提取元数据)
+ *   industries   —— 东财行业板块成分股长表(board.industry.list + constituents)
  *   ping         —— 探活
  *
  * 说明: daily/adj/minute 的入参 symbols 是「app 符号」(如 600519.SH)。stock-sdk 能容错解析，
@@ -115,6 +119,36 @@ function guessSuffix(code) {
   return ''
 }
 
+/**
+ * app 符号(600519.SH / 000001.SH) → stock-sdk 代码(sh600519 / sh000001)。
+ * quotes.cn 查指数必须带交易所前缀: 裸 '000001' 会被解析成平安银行(sz000001),
+ * 拿到的是股票而不是上证指数。
+ */
+function fromAppSymbol(sym) {
+  const m = String(sym || '').match(/^(\d{1,6})\.(SH|SZ|BJ)$/i)
+  if (!m) return String(sym || '')
+  return m[2].toLowerCase() + m[1]
+}
+
+/**
+ * 给上游接口用的代码。与 fromAppSymbol 的区别: 裸代码(无交易所后缀)也会补前缀。
+ *
+ * ⚠️ `kline.cn`(日K) 会自己补交易所前缀, 所以裸代码 `600519` 或 app 格式
+ * `600519.SH` 都能拿到数据; 但 `kline.cnMinute`(分钟) **不会** —— 传裸代码或
+ * app 格式一律返回空数组。这正是「日K正常、分时图只有坐标轴没有线」的根因,
+ * 故分钟路径必须显式给出 sh/sz/bj。
+ */
+function toUpstreamCode(sym) {
+  const s = String(sym || '').trim()
+  const m = s.match(/^(\d{1,6})\.(SH|SZ|BJ)$/i)
+  if (m) return m[2].toLowerCase() + m[1]
+  if (/^\d{1,6}$/.test(s)) {
+    const suffix = guessSuffix(s)
+    return suffix ? suffix.toLowerCase() + s : s
+  }
+  return s
+}
+
 /** stock-sdk 的 adjust 取值是 '' | 'qfq' | 'hfq'（无 'none'）。这里做兼容映射。 */
 function normAdjust(v) {
   if (v === 'hfq') return 'hfq'
@@ -125,17 +159,66 @@ function normAdjust(v) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * 桥接内累计的按 symbol 错误(每进程只跑一个 op, 无需按 op 区分)。
+ * main() 会把它作为 payload.errors 一并输出, 让上游异常可见, 而不是被 mapPool
+ * catch 掉之后"看起来只是这只票没数据"。
+ */
+const runtimeErrors = {}
+
+/**
+ * 桥接内累计的运行元数据(每进程只跑一个 op), 随 payload.meta 输出。
+ * 目前供 industries 回报板块完整率 —— 调用方需要它来判断"这份快照够不够完整到
+ * 可以覆盖旧表", 否则部分板块失败会产出一张看着完整、实则缺口的数据。
+ */
+const runtimeMeta = {}
+
+/**
+ * 包一层 fetchWithRetry: 失败时记账并返回空数组, 保证调用方总能拿到数组。
+ * 必要性: mapPool 会把 worker 抛出的异常吞进 results[i](变成 {__error} 对象),
+ * 若调用方在 await 之后才写 out[sym], 则该 key 永远不会被写入 —— 结果是
+ * rows={} + Python 侧 source="none", 与"确实没数据"完全无法区分。
+ */
+async function fetchSafe(sym, fn, opts) {
+  try {
+    return await fetchWithRetry(fn, opts)
+  } catch (e) {
+    runtimeErrors[sym] = String((e && e.message) || e)
+    return []
+  }
+}
+
+/**
  * 上游(东财)偶发冷启动/限流时对活跃标的返回空数组(非报错)。对已知应有数据的请求，
  * 空结果重试若干次以提升鲁棒性；真正无数据(退市/停牌/区间无交易)时多花几次调用可接受。
+ *
+ * `backoff` 为每次重试的等待倍数(默认 1 = 固定间隔, 与原行为一致)。
+ * 实测: 分钟接口存在十几秒级的间歇性空返回(单发成功率约 1/5), 固定 300ms 的密集重试
+ * 会整段落在抽风窗口内; 退避后可跨过窗口。
+ *
+ * 抛错同样重试: 上游抖动有两种面孔 —— 返回空数组, 或直接抛
+ * `SdkError: fetch failed`(连接层失败)。只重试前者的话, 一次连接抖动就会被当作
+ * "确实没有数据", 且异常逃逸后 mapPool 会吞掉它(见 opMinute 注释), 表现为静默无数据。
+ * 全部尝试都抛错时向上抛最后一个错误, 让 bridge.py 侧以告警形式可见。
  */
-async function fetchWithRetry(fn, { retries = 2, delayMs = 300 } = {}) {
+async function fetchWithRetry(fn, { retries = 2, delayMs = 300, backoff = 1 } = {}) {
   let last = []
+  let lastErr = null
+  let wait = delayMs
   for (let i = 0; i <= retries; i++) {
-    const r = await fn()
-    if (Array.isArray(r) && r.length > 0) return r
-    last = Array.isArray(r) ? r : []
-    if (i < retries) await sleep(delayMs)
+    try {
+      const r = await fn()
+      if (Array.isArray(r) && r.length > 0) return r
+      last = Array.isArray(r) ? r : []
+      lastErr = null
+    } catch (e) {
+      lastErr = e
+    }
+    if (i < retries) {
+      await sleep(wait)
+      wait = Math.max(1, Math.round(wait * backoff))
+    }
   }
+  if (lastErr) throw lastErr
   return last
 }
 
@@ -143,7 +226,8 @@ async function fetchDaily(sdk, sym, { adjust, period = 'daily', start, end }) {
   const opts = { period, adjust: normAdjust(adjust) }
   if (start) opts.startDate = start
   if (end) opts.endDate = end
-  return fetchWithRetry(() => sdk.kline.cn(sym, opts))
+  // cn() 会自行补交易所前缀, 裸代码与 app 格式都能取到。失败记账后返回 []。
+  return fetchSafe(sym, () => sdk.kline.cn(sym, opts))
 }
 
 async function opDaily(sdk, job) {
@@ -189,7 +273,15 @@ async function opMinute(sdk, job) {
     const opts = { period: String(period) }
     if (start) opts.startDate = start
     if (end) opts.endDate = end
-    const bars = await fetchWithRetry(() => sdk.kline.cnMinute(sym, opts))
+    // 必须用 toUpstreamCode: cnMinute 不会像 kline.cn 那样自动补交易所前缀。
+    // out 的 key 仍用原始 sym, 保证 Python 侧落盘的 symbol 列是 app 格式。
+    // 退避重试: 该接口间歇性抽风(空数组 或 fetch failed), 固定短间隔跨不过窗口。
+    // fetchSafe 保证即便全部重试失败也会写入 out[sym] = [], 不产生"缺 key"的静默态。
+    const bars = await fetchSafe(
+      sym,
+      () => sdk.kline.cnMinute(toUpstreamCode(sym), opts),
+      { retries: 4, delayMs: 400, backoff: 2 },
+    )
     out[sym] = Array.isArray(bars) ? bars : []
     return out[sym]
   })
@@ -218,6 +310,43 @@ async function opRealtime(sdk, job) {
   return rows
 }
 
+/**
+ * 指数实时快照。batch.cn(全 A 股)不含指数, 指数只能按码单查 quotes.cn。
+ * 返回行形状与 opRealtime 一致, 便于 Python 侧复用同一套归一化。
+ */
+async function opIndexQuotes(sdk, job) {
+  const { symbols = [], chunkSize = 60 } = job
+  if (!symbols.length) return []
+  const codes = symbols.map(fromAppSymbol)
+  const rows = []
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize)
+    const all = await fetchWithRetry(() => sdk.quotes.cn(chunk), { retries: 1 })
+    for (const q of all || []) {
+      if (!q || !q.code) continue
+      // 用「本次请求的 app 符号」回填 symbol: 指数代码跨市场可能重号(如 sh000001/sz000001),
+      // 按 code 数字段在本次 chunk 内匹配, 保证 key 就是调用方传入的符号。
+      const want = chunk.find((c) => c.slice(2) === String(q.code))
+      const symbol = want
+        ? `${want.slice(2)}.${want.slice(0, 2).toUpperCase()}`
+        : toAppSymbol(q.code, q.marketId)
+      rows.push({
+        symbol,
+        name: q.name,
+        last_price: q.price,
+        prev_close: q.prevClose,
+        open: q.open,
+        high: q.high,
+        low: q.low,
+        volume: q.volume,
+        amount: q.amount,
+        change_pct: q.changePercent,
+      })
+    }
+  }
+  return rows
+}
+
 async function opInstruments(sdk, job) {
   const { concurrency = 8 } = job
   const all = await sdk.batch.cn({ concurrency })
@@ -241,6 +370,62 @@ async function opInstruments(sdk, job) {
       },
     })
   }
+  return rows
+}
+
+/**
+ * 行业分类摄取: 行业板块列表 + 逐板块成分股, 反推「个股 → 行业板块」长表。
+ *
+ * 用途: Alpha191 等行业中性化需要每个标的的行业归属。
+ * ⚠️ 这是**东财行业板块(BK 编码)** 分类, 不是申万 —— 两者层级与命名均不同,
+ *    若后续要做申万口径的中性化需另找数据源。
+ * ⚠️ 东财行业板块本身分层(一级/二级/三级), 同一只票会命中多个板块。这里**如实
+ *    存下全部 (symbol, board_code) 关系**、不做事后裁剪, 由消费方决定取哪一层 ——
+ *    在摄取环节丢掉层级信息是不可逆的。
+ *
+ * 全量约 500 个板块 → 逐板块一次请求, 上游抖动下整轮可能耗时数分钟, 故重试给得较足。
+ * 结果里通过 meta 回报板块完整率, 让调用方能拒绝"缺了板块的快照"。
+ */
+async function opIndustries(sdk, job) {
+  const { concurrency = 6, boards = null } = job
+  const all = await fetchSafe(
+    '__industry_boards__',
+    () => sdk.board.industry.list(),
+    { retries: 5, delayMs: 800, backoff: 2 },
+  )
+  const wanted = boards && boards.length ? all.filter((b) => boards.includes(b.code)) : all
+  const rows = []
+  let ok = 0
+  await mapPool(wanted, concurrency, async (b) => {
+    const members = await fetchSafe(
+      b.code,
+      () => sdk.board.industry.constituents(b.code),
+      { retries: 3, delayMs: 400, backoff: 2 },
+    )
+    // 空成分也算失败: 东财行业板块不该为空, 计成失败是保守方向(宁可拒绝覆盖)。
+    if (members.length) ok += 1
+    for (const m of members) {
+      if (!m || !m.code) continue
+      const code = String(m.code)
+      rows.push({
+        board_code: b.code,
+        board_name: b.name,
+        // 成分股 code 是 6 位数字且无 marketId, 按号段猜交易所前缀。
+        symbol: toAppSymbol(code, undefined),
+        code,
+        name: m.name ?? null,
+        board_change_pct: b.changePercent ?? null,
+        price: m.price ?? null,
+        change_pct: m.changePercent ?? null,
+        turnover_rate: m.turnoverRate ?? null,
+        pe: m.pe ?? null,
+        pb: m.pb ?? null,
+      })
+    }
+  })
+  runtimeMeta.boards_total = all.length
+  runtimeMeta.boards_requested = wanted.length
+  runtimeMeta.boards_ok = ok
   return rows
 }
 
@@ -276,14 +461,25 @@ async function main() {
       case 'realtime':
         rows = await opRealtime(sdk, job)
         break
+      case 'indexQuotes':
+        rows = await opIndexQuotes(sdk, job)
+        break
       case 'instruments':
         rows = await opInstruments(sdk, job)
+        break
+      case 'industries':
+        rows = await opIndustries(sdk, job)
         break
       default:
         process.stdout.write(JSON.stringify({ ok: false, error: `unknown op: ${op}` }))
         return
     }
-    process.stdout.write(JSON.stringify({ ok: true, op, rows }))
+    const failed = Object.keys(runtimeErrors)
+    const extra = {}
+    // errors / meta 仅在非空时输出, 保持旧形状对既有调用方完全兼容。
+    if (failed.length) extra.errors = runtimeErrors
+    if (Object.keys(runtimeMeta).length) extra.meta = runtimeMeta
+    process.stdout.write(JSON.stringify({ ok: true, op, rows, ...extra }))
   } catch (e) {
     process.stdout.write(JSON.stringify({ ok: false, op, error: String((e && e.stack) || e) }))
   }

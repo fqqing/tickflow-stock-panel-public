@@ -130,6 +130,9 @@ export function StockIntradayChart({
           onPriceDoubleClick={onPriceDoubleClick}
           currentPrice={currentPrice}
           priceLines={priceLines}
+          // 指数的成交额/成交量不同量纲(额是成分股合计、量是手), amount/(volume*100)
+          // 算不出指数点位, 均线会跑到几十的位置把 Y 轴压扁 → 指数不画均线 (与指数页一致)
+          showAvgLine={!isIndex}
         />
       )}
     </div>

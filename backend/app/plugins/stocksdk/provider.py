@@ -30,6 +30,55 @@ _DATASETS = ("daily", "adj_factor", "minute", "realtime")
 _BATCH = 40
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 
+# 科创板(688/689)在 batch.cn 快照里成交量以「股」返回, 其余板块以「手」返回(实测)。
+_STAR_PREFIXES = ("688", "689")
+
+
+def _normalize_realtime_rows(rows: list[dict]) -> list[dict]:
+    """把 stock-sdk 全市场快照的字段量纲归一到项目内部 schema。
+
+    batch.cn(FullQuote) 与项目内部(以及本插件的 daily/minute、tickflow 各接口、自定义源
+    文档 docs/custom-data-source.md)口径不一致, 必须在此换算, 否则涨幅/换手率/量比/成交额
+    全部按错量级展示:
+
+    | 字段          | 快照原始       | 内部口径 | 换算   |
+    | ------------- | -------------- | -------- | ------ |
+    | changePercent | 百分数 3.66    | 小数 0.0366 | /100 |
+    | amount        | 万元           | 元       | *10000 |
+    | volume        | 手(科创板为股) | 手       | /100 (仅 688/689) |
+
+    注: daily/minute(走 kline 接口)本身就是「手 + 元」, 与内部一致, 无需换算。
+    """
+    out: list[dict] = []
+    for row in rows:
+        r = dict(row)
+        code = str(r.get("symbol") or "").split(".")[0]
+
+        pct = r.get("change_pct")
+        if pct is not None:
+            try:
+                r["change_pct"] = float(pct) / 100.0
+            except (TypeError, ValueError):
+                r["change_pct"] = None
+
+        amount = r.get("amount")
+        if amount is not None:
+            try:
+                r["amount"] = float(amount) * 10000.0
+            except (TypeError, ValueError):
+                r["amount"] = None
+
+        if code.startswith(_STAR_PREFIXES):
+            volume = r.get("volume")
+            if volume is not None:
+                try:
+                    r["volume"] = float(volume) / 100.0
+                except (TypeError, ValueError):
+                    r["volume"] = None
+
+        out.append(r)
+    return out
+
 
 @dataclass
 class _StockSDKConfig:
@@ -203,7 +252,25 @@ class StockSDKProvider:
         except bridge.StockSDKBridgeError as e:
             logger.warning("stock-sdk realtime 拉取失败: %s", e)
             return []
-        return result.get("rows") or []
+        return _normalize_realtime_rows(result.get("rows") or [])
+
+    # ---- realtime (指数快照) ----
+    # batch.cn 是全 A 股枚举, **不含指数**; 指数必须按码单查 quotes.cn。
+    # QuoteService 的第三方源分支靠这个标记决定是否补拉指数行情。
+    supports_index_realtime = True
+
+    def get_index_realtime(self, symbols: list[str]) -> list[dict]:
+        """按给定指数符号拉实时快照(返回行与 get_realtime 同 schema)。"""
+        syms = [s for s in (symbols or []) if s]
+        if not syms:
+            return []
+        logger.info("stock-sdk 指数快照拉取开始(%d symbols)", len(syms))
+        try:
+            result = bridge.run_job({"op": "indexQuotes", "symbols": syms}, timeout=90)
+        except bridge.StockSDKBridgeError as e:
+            logger.warning("stock-sdk 指数快照拉取失败: %s", e)
+            return []
+        return _normalize_realtime_rows(result.get("rows") or [])
 
     # ---- instruments (标的维表) ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
@@ -220,6 +287,40 @@ class StockSDKProvider:
             logger.warning("stock-sdk instruments 拉取失败: %s", e)
             return []
         return result.get("rows") or []
+
+    # ---- industries (行业分类) ----
+    def fetch_industry_members(self, boards: list[str] | None = None) -> dict:
+        """抓「个股 -> 行业板块」长表, 返回 ``{"rows", "meta", "errors"}``。
+
+        **刻意不用 get_ 前缀的"只返回行"惯例**: 与 ``get_instruments`` 不同, 行业快照
+        必须能判断"板块完整率"才敢覆盖旧表 —— 部分板块抓失败会产出一张看起来完整、
+        实则缺口的表, 且带当天 ``as_of``, 事后无法分辨。故把 meta/errors 一并交给调用方
+        自行决定闸门(见 ``industry_sync.INDUSTRY_MIN_COVERAGE``)。
+
+        ⚠️ 口径是**东财行业板块(BK 编码)**, 不是申万分类; 板块本身分层
+        (一级/二级/三级), 同一只票会命中多个板块 —— 如实返回全部关系, 不裁剪。
+        全量约 500 个板块需逐板块一次请求, 上游抖动下整轮可能数分钟, 故超时给到
+        900s(retries/backoff 由桥接内部的退避重试承担)。
+        """
+        job: dict = {"op": "industries"}
+        if boards:
+            job["boards"] = boards
+        try:
+            result = bridge.run_job(job, timeout=900)
+        except bridge.StockSDKBridgeError as e:
+            logger.warning("stock-sdk industries 拉取失败: %s", e)
+            return {"rows": [], "meta": {}, "errors": {"__bridge__": str(e)}}
+        errors = result.get("errors") or {}
+        if errors:
+            logger.warning(
+                "stock-sdk industries 有 %d 项失败, 样例: %s",
+                len(errors), list(errors.items())[:3],
+            )
+        return {
+            "rows": result.get("rows") or [],
+            "meta": result.get("meta") or {},
+            "errors": errors,
+        }
 
     # ---- 测试(设置页试拉) ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
