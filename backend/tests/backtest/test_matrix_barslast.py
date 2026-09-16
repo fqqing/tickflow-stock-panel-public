@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
+import pytest
 
 from app.backtest.matrix import (
     MarketDataMatrix,
@@ -67,6 +68,93 @@ def test_valid_barslast_treats_nan_condition_rows_as_absent():
     assert np.isnan(actual[1])
     assert actual[2] == 0.0
     assert actual[3] == 1.0
+
+
+def test_valid_barslastcount_counts_consecutive_hits_from_one():
+    from app.backtest.matrix import valid_barslastcount
+
+    condition = np.zeros((8, 1), dtype=bool)
+    condition[[1, 2, 4, 5, 6], 0] = True
+    mask = np.ones((8, 1), dtype=bool)
+
+    actual = valid_barslastcount(condition, mask)[:, 0]
+    np.testing.assert_array_equal(actual, [0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 3.0, 0.0])
+
+
+def test_valid_barslastcount_skips_suspended_rows_without_breaking_run():
+    """停牌行不是一个观测: 既不计入连续数, 也不打断连续。"""
+    from app.backtest.matrix import valid_barslastcount
+
+    condition = np.ones((6, 1), dtype=bool)
+    mask = np.zeros((6, 1), dtype=bool)
+    mask[[0, 1, 4, 5], 0] = True  # row 2/3 为停牌
+
+    actual = valid_barslastcount(condition, mask)[:, 0]
+    np.testing.assert_array_equal(actual[[0, 1, 4, 5]], [1.0, 2.0, 3.0, 4.0])
+    assert np.isnan(actual[2:4]).all()
+
+
+def test_valid_barslastcount_treats_nan_condition_rows_as_absent():
+    from app.backtest.matrix import valid_barslastcount
+
+    condition = np.array([[1.0], [np.nan], [1.0]], dtype=np.float32)
+    mask = np.ones((3, 1), dtype=bool)
+
+    actual = valid_barslastcount(condition, mask)[:, 0]
+    assert actual[0] == 1.0
+    assert np.isnan(actual[1])
+    # NaN 行被跳过, 连续计数不断档
+    assert actual[2] == 2.0
+
+
+def test_valid_shift_at_uses_effective_bar_offsets():
+    """变长 REF: 偏移以有效 bar 计, 停牌行不占位置。"""
+    from app.backtest.matrix import valid_shift_at
+
+    values = np.array([[10.0], [11.0], [12.0], [13.0], [14.0], [15.0]])
+    mask = np.zeros((6, 1), dtype=bool)
+    mask[[0, 1, 4, 5], 0] = True  # 有效 bar 序列 = row [0, 1, 4, 5] (位置 0..3)
+    # 偏移量按 row 给出; row 2/3 是停牌行, 其偏移被忽略
+    periods = np.array([[0.0], [1.0], [np.nan], [np.nan], [1.0], [2.0]])
+
+    actual = valid_shift_at(values, periods, mask)[:, 0]
+    assert actual[0] == 10.0  # 位置 0 回看 0 -> 自己
+    assert actual[1] == 10.0  # 位置 1 回看 1 -> 位置 0
+    assert actual[4] == 11.0  # 位置 2 回看 1 -> 位置 1 (停牌行不占位置)
+    assert actual[5] == 11.0  # 位置 3 回看 2 -> 位置 1
+    assert np.isnan(actual[2:4]).all()
+
+
+def test_valid_shift_at_rejects_negative_and_oversized_offsets():
+    from app.backtest.matrix import valid_shift_at
+
+    values = np.array([[1.0], [2.0], [3.0], [4.0]])
+    mask = np.ones((4, 1), dtype=bool)
+    periods = np.array([[-1.0], [np.nan], [99.0], [2.0]])
+
+    actual = valid_shift_at(values, periods, mask)[:, 0]
+    assert np.isnan(actual[:3]).all()
+    assert actual[3] == 2.0
+
+
+def test_valid_shift_at_scalar_matches_valid_shift():
+    from app.backtest.matrix import valid_shift, valid_shift_at
+
+    values = np.arange(10, dtype=np.float32).reshape(10, 1)
+    mask = np.ones((10, 1), dtype=bool)
+
+    np.testing.assert_array_equal(
+        valid_shift_at(values, 3, mask),
+        valid_shift(values, 3, mask),
+    )
+
+
+def test_valid_shift_at_rejects_mismatched_period_shape():
+    from app.backtest.matrix import valid_shift_at
+
+    values = np.arange(6, dtype=np.float32).reshape(6, 1)
+    with pytest.raises(ValueError, match="periods shape"):
+        valid_shift_at(values, np.zeros((3, 1), dtype=np.float32))
 
 
 # --------------------------------------------------------------------------

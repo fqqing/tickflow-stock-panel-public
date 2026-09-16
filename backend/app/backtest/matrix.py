@@ -3054,6 +3054,146 @@ def valid_barslast(
     )
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _valid_barslastcount_kernel(
+    condition: np.ndarray,
+    valid: np.ndarray,
+    offsets: np.ndarray,
+    rows: np.ndarray,
+) -> np.ndarray:
+    out = np.full(condition.shape, np.nan, dtype=np.float32)
+    for asset_id in prange(condition.shape[1]):
+        start = int(offsets[asset_id])
+        stop = int(offsets[asset_id + 1])
+        run = 0
+        for position in range(start, stop):
+            row = int(rows[position])
+            if not valid[row, asset_id]:
+                # 停牌行不计入连续数, 但也不打断 —— 该行本身没有观测
+                continue
+            run = run + 1 if condition[row, asset_id] else 0
+            out[row, asset_id] = np.float32(run)
+    return out
+
+
+def valid_barslastcount(
+    condition: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``BARSLASTCOUNT`` —— 条件连续成立的有效 bar 数 (当前成立计入, 首次成立记 1)。
+
+    与 :func:`valid_barslast` 同一口径: 计数单位是**有效 bar**, 停牌等缺失行
+    既不计入也不打断连续计数 (它根本不是一个观测)。条件不成立的 bar 归零。
+
+    非布尔输入 (如指标数组) 时 NaN 行视为缺失, 避免 ``NaN != 0`` 被当成成立。
+    """
+    raw = np.asarray(condition)
+    signal = np.asarray(raw, dtype=bool)
+    valid = (
+        np.ones(signal.shape, dtype=bool)
+        if valid_mask is None
+        else np.asarray(valid_mask, dtype=bool)
+    )
+    if signal.shape != valid.shape:
+        raise ValueError("valid_barslastcount mask shape does not match condition")
+    if raw.dtype != np.bool_:
+        valid = valid & np.isfinite(raw)
+    index = _resolve_valid_bar_index(signal, valid, bar_index)
+
+    return _cached_matrix_operation(
+        "valid_barslastcount",
+        (signal, valid, index.offsets, index.rows),
+        {},
+        lambda: run_numba_parallel(
+            lambda: _valid_barslastcount_kernel(
+                signal,
+                valid,
+                index.offsets,
+                index.rows,
+            )
+        ),
+    )
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _valid_shift_at_kernel(
+    source: np.ndarray,
+    periods: np.ndarray,
+    valid: np.ndarray,
+    offsets: np.ndarray,
+    rows: np.ndarray,
+) -> np.ndarray:
+    out = np.full(source.shape, np.nan, dtype=np.float32)
+    for asset_id in prange(source.shape[1]):
+        start = int(offsets[asset_id])
+        stop = int(offsets[asset_id + 1])
+        for position in range(start, stop):
+            row = int(rows[position])
+            if not valid[row, asset_id] or not np.isfinite(source[row, asset_id]):
+                continue
+            step = periods[row, asset_id]
+            if not np.isfinite(step):
+                continue
+            offset = int(step)
+            if offset < 0 or np.float32(offset) != step or position - offset < start:
+                continue
+            source_row = int(rows[position - offset])
+            if not np.isfinite(source[source_row, asset_id]):
+                continue
+            out[row, asset_id] = source[source_row, asset_id]
+    return out
+
+
+def valid_shift_at(
+    values: np.ndarray,
+    periods: np.ndarray | int,
+    valid_mask: np.ndarray | None = None,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``REF(X, N)`` 的变长版本 —— ``N`` 逐 bar 可变 (取自另一条指标序列)。
+
+    通达信公式里 ``REF`` 的偏移量常常本身是个指标 (例如趋势擒龙的
+    ``REF(HIGH, A3)``: A3 = BARSLAST(A2) 每根 bar 不同), 固定偏移的
+    :func:`valid_shift` 表达不了。计数单位同为**有效 bar**, 与
+    :func:`valid_barslast` / :func:`valid_barslastcount` 保持一致。
+
+    负偏移、非整数偏移、越界、``N`` 为 NaN 一律输出 ``NaN`` —— 既不引入未来
+    数据, 也不拿越界值凑数; 下游数值比较自然为 ``False``。
+    """
+    source = np.asarray(values, dtype=np.float32)
+    if np.ndim(periods) == 0:
+        return valid_shift(source, int(periods), valid_mask, bar_index=bar_index)
+    offsets = np.asarray(periods, dtype=np.float32)
+    if offsets.shape != source.shape:
+        raise ValueError("valid_shift_at periods shape does not match values")
+    valid = (
+        np.isfinite(source)
+        if valid_mask is None
+        else np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
+    )
+    if valid.shape != source.shape:
+        raise ValueError("valid_shift_at mask shape does not match values")
+    index = _resolve_valid_bar_index(source, valid, bar_index)
+
+    return _cached_matrix_operation(
+        "valid_shift_at",
+        (source, offsets, valid, index.offsets, index.rows),
+        {},
+        lambda: run_numba_parallel(
+            lambda: _valid_shift_at_kernel(
+                source,
+                offsets,
+                valid,
+                index.offsets,
+                index.rows,
+            )
+        ),
+    )
+
+
 def rolling_min(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
     return _cached_matrix_operation(
