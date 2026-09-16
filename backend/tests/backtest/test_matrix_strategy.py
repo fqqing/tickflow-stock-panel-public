@@ -24,9 +24,11 @@ from app.backtest.matrix import (
     make_signal_matrix,
     matrix_feature,
     slice_signal_matrix,
+    supports_matrix_feature,
     validate_signal_matrix,
 )
 from app.backtest.strategy import build_matrix_cache_profile
+from app.factors import gtja191
 from app.indicators.pipeline import (
     compute_indicators,
     compute_limit_signals,
@@ -126,7 +128,17 @@ def test_research_factor_catalog_matches_matrix_features():
     )
     market = attach_matrix_fundamental_fields(market, None, fundamental_names)
 
-    for name in sorted(factor_names):
+    # 因子目录里有两类因子, 只有第一类由回测矩阵承接:
+    #   1. 矩阵内置算子 (价量特征/均线偏离/rsi/momentum) 与面板自带字段;
+    #   2. 公式因子 (GTJA Alpha191), 走 app.factors 的声明式管线 —— 一份公式由
+    #      NumPy (回测) 与 Polars (策略/盘中) 两个后端各自解释, 不经过
+    #      matrix_feature。它们与矩阵路径的一致性由 test_factors_dual_backend.py
+    #      逐元素校验, 这里只确认划分本身没有意外扩张。
+    matrix_owned = sorted(name for name in factor_names if supports_matrix_feature(market, name))
+    declarative_only = sorted(factor_names - set(matrix_owned))
+    assert set(declarative_only) == {definition.id for definition in gtja191.SKELETON_FACTORS}
+
+    for name in matrix_owned:
         expected_values = expected.sort(["date", "symbol"])[name].to_numpy().reshape(market.shape)
         np.testing.assert_allclose(
             matrix_feature(market, name),

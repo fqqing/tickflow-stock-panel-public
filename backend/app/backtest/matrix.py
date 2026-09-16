@@ -3753,10 +3753,9 @@ _MATRIX_COMPUTED_FEATURES = frozenset({
 })
 
 
-def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
-    if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
-        return market.field(name)
-    supported = (
+def _is_named_matrix_feature(name: str) -> bool:
+    """按名字判断是否为回测矩阵内置算子 (不含面板自带字段)。"""
+    return (
         name in _MATRIX_COMPUTED_FEATURES
         or (name.startswith("ma") and name.endswith("_bias") and name[2:-5].isdigit())
         or (name.startswith("ema") and name.endswith("_bias") and name[3:-5].isdigit())
@@ -3765,7 +3764,25 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         or (name.startswith("rsi_") and name[4:].isdigit())
         or (name.startswith("momentum_") and name.endswith("d"))
     )
-    if not supported:
+
+
+def supports_matrix_feature(market: MarketDataMatrix, name: str) -> bool:
+    """判断 :func:`matrix_feature` 能否算出 ``name``。
+
+    回测矩阵只内置固定的价量算子 (``_MATRIX_COMPUTED_FEATURES`` 与 ma/ema/rsi/
+    momentum 命名族) 加上面板自带字段。因子目录 ``FACTOR_COLUMNS`` 里的公式因子
+    (如 GTJA Alpha191) 不在这里求值 —— 它们走 :mod:`app.factors` 的声明式管线,
+    由 NumPy (回测) 与 Polars (策略/盘中) 两个后端各自解释同一份公式定义。
+    """
+    if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
+        return True
+    return _is_named_matrix_feature(name)
+
+
+def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
+    if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
+        return market.field(name)
+    if not _is_named_matrix_feature(name):
         raise ValueError(f"unsupported matrix feature: {name}")
     with _activate_valid_bar_index(market.valid_bars):
         return _cached_matrix_operation(

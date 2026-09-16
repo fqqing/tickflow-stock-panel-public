@@ -1,14 +1,35 @@
 """策略评分字段解析。"""
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection, Mapping
 from typing import Any
 
 import polars as pl
 
+from app.factors import gtja191, ops_pl
+
+logger = logging.getLogger(__name__)
+
 SCORING_DIRECTION_HIGH = "high"
 SCORING_DIRECTION_LOW = "low"
 SCORING_DIRECTIONS = frozenset({SCORING_DIRECTION_HIGH, SCORING_DIRECTION_LOW})
+
+#: 声明式公式因子注册表 (GTJA Alpha191)。依赖与预热天数由表达式树自动推导,
+#: 新增因子只要写进 ``app/factors/gtja191.py`` 就会自动接上评分与回测两条路径。
+GTJA_FACTOR_DEFS: dict[str, Any] = dict(gtja191.SKELETON_BY_ID)
+
+
+def gtja_plan(name: str) -> ops_pl.Plan | None:
+    """公式化因子 → Polars 编译计划; 非公式因子返回 ``None``。
+
+    返回 :class:`~app.factors.ops_pl.Plan` 而不是 ``pl.Expr``, 因为这类因子
+    常常需要「先做时序变换、再按日排名」, 必须靠中间列拆开嵌套 ``.over()``
+    (详见 ``ops_pl`` 模块顶部)。
+    """
+    definition = GTJA_FACTOR_DEFS.get(str(name))
+    return ops_pl.evaluate(definition.expr) if definition is not None else None
+
 
 VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
     **{
@@ -45,6 +66,11 @@ VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
     "vol_trend_5_60": frozenset({"volume"}),
     "limit_up_count_20d": frozenset({"consecutive_limit_ups"}),
     "limit_up_count_60d": frozenset({"consecutive_limit_ups"}),
+    # Alpha191 公式因子: 依赖由表达式树推导 (例如 gtja013 依赖 high/low/amount/volume)
+    **{
+        factor_id: definition.dependency_fields
+        for factor_id, definition in GTJA_FACTOR_DEFS.items()
+    },
 }
 
 _ROLLING_SCORING_WARMUP: dict[str, int] = {
@@ -60,6 +86,11 @@ _ROLLING_SCORING_WARMUP: dict[str, int] = {
     "vol_trend_5_60": 60,
     "limit_up_count_20d": 21,
     "limit_up_count_60d": 61,
+    # Alpha191 公式因子: 预热天数按嵌套窗口累加 (见 ir.FactorDef.warmup)
+    **{
+        factor_id: definition.warmup
+        for factor_id, definition in GTJA_FACTOR_DEFS.items()
+    },
 }
 
 
@@ -112,6 +143,17 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         return pl.col(name)
     dependencies = VIRTUAL_SCORING_DEPENDENCIES.get(name)
     if dependencies is None or not dependencies.issubset(available):
+        return None
+    if name in GTJA_FACTOR_DEFS:
+        # 多阶段公式因子: 单个 pl.Expr 表达不了嵌套 .over(), 必须先由
+        # materialize_scoring_columns 落成真实列。走到这里说明调用方漏了物化,
+        # 直接返回 None 会让评分静默丢因子, 所以至少留下告警。
+        logger.warning(
+            "公式因子 %s 尚未物化, 已从评分中跳过; "
+            "请先调用 materialize_scoring_columns(panel, {%r})",
+            name,
+            name,
+        )
         return None
     if name.startswith("ma") and name.endswith("_bias"):
         period = name.removeprefix("ma").removesuffix("_bias")
@@ -233,13 +275,36 @@ def materialize_scoring_columns(
     frame: pl.DataFrame,
     names: Collection[str],
 ) -> pl.DataFrame:
-    expressions = [
-        expression.alias(name)
-        for name in names
-        if name not in frame.columns
-        and (expression := scoring_value_expr(frame.columns, str(name))) is not None
-    ]
-    return frame.with_columns(expressions) if expressions else frame
+    """把缺失的评分字段落成真实列。
+
+    两类字段走不同路径:
+    - 单表达式虚拟字段 (``ma5_bias`` / ``vwap_bias`` ...) 用 ``with_columns`` 一次算完;
+    - Alpha191 公式因子要先编译成 :class:`~app.factors.ops_pl.Plan` 再逐阶段物化,
+      因为它们的嵌套 ``.over()`` 没法塞进单个表达式 (见 ``ops_pl`` 模块顶部)。
+    """
+    pending = [str(name) for name in names if str(name) not in frame.columns]
+    if not pending:
+        return frame
+
+    work = frame
+    expressions: list[pl.Expr] = []
+    plans: list[tuple[str, ops_pl.Plan]] = []
+    for name in pending:
+        plan = gtja_plan(name)
+        if plan is not None:
+            plans.append((name, plan))
+            continue
+        expression = scoring_value_expr(work.columns, name)
+        if expression is not None:
+            expressions.append(expression.alias(name))
+    if expressions:
+        work = work.with_columns(expressions)
+    if plans:
+        # NaN 只归一化一次; Plan.apply 会丢弃自己的中间列, 不污染调用方的表。
+        work = ops_pl.normalize_missing(work)
+        for name, plan in plans:
+            work = plan.apply(work, alias=name, normalize=False)
+    return work
 
 
 def _ratio(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:

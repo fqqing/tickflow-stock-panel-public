@@ -23,6 +23,7 @@ from app.backtest.fundamentals import (
     attach_fundamental_factors,
     load_fundamental_snapshot,
 )
+from app.factors import gtja191
 from app.strategy.scoring import (
     VIRTUAL_SCORING_DEPENDENCIES as DERIVED_FACTOR_DEPENDENCIES,
 )
@@ -106,6 +107,19 @@ FACTOR_COLUMNS: list[dict] = [
     {"id": "revenue_yoy_latest", "label": "营收增速(最新公告)", "group": "财务", "desc": "最新已公告营业收入同比(%)"},
     {"id": "net_income_yoy_latest", "label": "净利增速(最新公告)", "group": "财务", "desc": "最新已公告归母净利润同比(%)"},
     {"id": "debt_ratio_latest", "label": "资产负债率(最新公告)", "group": "财务", "desc": "最新已公告资产负债率(%)"},
+
+    # ── GTJA Alpha191 公式因子 ──
+    # 声明式定义在 app/factors/gtja191.py, 一份公式由 NumPy (回测) 与 Polars
+    # (策略评分/盘中) 两个后端各自求值; 依赖与预热天数自动推导, 无需在这里维护。
+    *[
+        {
+            "id": definition.id,
+            "label": definition.label,
+            "group": definition.group,
+            "desc": definition.desc,
+        }
+        for definition in gtja191.SKELETON_FACTORS
+    ],
 ]
 
 FACTOR_WARMUP_DAYS = 120

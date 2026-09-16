@@ -29,6 +29,11 @@ FACTOR_DEFAULT_DAYS = 180
 STRATEGY_DEFAULT_DAYS = 365 * 3
 BACKTEST_MAX_SERVER_DAYS = 186
 FACTOR_MAX_SYMBOLS = 1000
+# 单次批量筛选允许的因子个数上限。这是纯粹的安全护栏 (防止畸形请求), 必须显著大于
+# FACTOR_COLUMNS 的长度, 否则目录扩容后会静默拒绝合法请求 —— 目录本身才是允许集合的
+# 唯一事实来源 (真正的白名单校验在 factor_batch 里按 FACTOR_COLUMNS 做)。
+# 当前目录 72 个 (含 GTJA Alpha191 骨架 11 个), 规划补齐至约 150 个。
+FACTOR_MAX_NAMES = 512
 BACKTEST_SERVER_GUARD_MESSAGE = (
     "当前服务器内存约 1.8GB，回测区间最多支持 6 个月；"
     "更长周期容易触发 OOM，建议在 8GB 以上内存环境或本机运行。"
@@ -185,7 +190,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
 
 
 class FactorBatchRequest(BaseModel):
-    factor_names: list[str] = Field(..., min_length=1, max_length=64)
+    factor_names: list[str] = Field(..., min_length=1, max_length=FACTOR_MAX_NAMES)
     symbols: list[str] | None = None
     start: date | None = None
     end: date | None = None
