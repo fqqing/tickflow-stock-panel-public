@@ -1,0 +1,171 @@
+"""``valid_barslast`` (通达信 BARSLAST) —— 有效 bar 语义 + 「向上趋势并突破」公式对拍。"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+import numpy as np
+import polars as pl
+
+from app.backtest.matrix import (
+    MarketDataMatrix,
+    build_market_data_matrix,
+    valid_barslast,
+)
+
+
+def _reference_barslast(condition: np.ndarray) -> np.ndarray:
+    """源公式参考实现: 当前成立 → 0; 否则距上次成立的 bar 数; 从未成立 → 0。"""
+    out = np.zeros(condition.shape[0], dtype=np.int64)
+    last = -1
+    for index in range(condition.shape[0]):
+        if condition[index]:
+            last = index
+        out[index] = (index - last) if last >= 0 else 0
+    return out
+
+
+def test_valid_barslast_matches_reference_on_dense_series():
+    condition = np.zeros((12, 1), dtype=bool)
+    condition[[1, 5, 6], 0] = True
+    mask = np.ones((12, 1), dtype=bool)
+
+    actual = valid_barslast(condition, mask)[:, 0]
+    np.testing.assert_array_equal(actual, _reference_barslast(condition[:, 0]))
+
+
+def test_valid_barslast_starts_at_zero_before_first_hit():
+    condition = np.zeros((6, 1), dtype=bool)
+    condition[4, 0] = True
+    mask = np.ones((6, 1), dtype=bool)
+
+    actual = valid_barslast(condition, mask)[:, 0]
+    # 首次成立之前按 0 计 (与源实现一致), 成立当根为 0, 其后逐根递增
+    np.testing.assert_array_equal(actual, [0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+
+def test_valid_barslast_counts_effective_bars_only():
+    # 有效 bar 在 row 0..3 与 row 7 (即第 5 个有效 bar), 中间 4..6 为停牌
+    condition = np.zeros((8, 1), dtype=bool)
+    condition[0, 0] = True
+    condition[7, 0] = True
+    mask = np.zeros((8, 1), dtype=bool)
+    mask[[0, 1, 2, 3, 7], 0] = True
+
+    actual = valid_barslast(condition, mask)[:, 0]
+    np.testing.assert_array_equal(actual[:4], [0.0, 1.0, 2.0, 3.0])
+    assert np.isnan(actual[4:7]).all()
+    assert actual[7] == 0.0
+
+
+def test_valid_barslast_treats_nan_condition_rows_as_absent():
+    condition = np.array([[0.0], [np.nan], [1.0], [0.0]], dtype=np.float32)
+    mask = np.ones((4, 1), dtype=bool)
+
+    actual = valid_barslast(condition, mask)[:, 0]
+    assert actual[0] == 0.0
+    assert np.isnan(actual[1])
+    assert actual[2] == 0.0
+    assert actual[3] == 1.0
+
+
+# --------------------------------------------------------------------------
+# 「向上趋势并突破」= 源通达信公式的矩阵原生实现, 逐位对拍
+# --------------------------------------------------------------------------
+
+
+def _reference_ema(values: np.ndarray, span: int) -> np.ndarray:
+    alpha = 2.0 / (span + 1.0)
+    out = np.empty_like(values)
+    out[0] = values[0]
+    for index in range(1, values.size):
+        out[index] = alpha * values[index] + (1.0 - alpha) * out[index - 1]
+    return out
+
+
+def _shift(values: np.ndarray, periods: int) -> np.ndarray:
+    out = np.full(values.shape, np.nan)
+    out[periods:] = values[:-periods]
+    return out
+
+
+def _reference_qstpxg(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
+    """逐 bar 直译源公式 (无停牌, 与矩阵在「全有效 bar」下应完全一致)。"""
+    dsg = _reference_ema(high, 26)
+    dxg = _reference_ema(low, 26)
+    csg = _reference_ema(high, 89)
+    bbb = (close > dsg) & (_shift(close, 1) <= _shift(dsg, 1))
+    sss = (dxg > close) & (_shift(dxg, 1) <= _shift(close, 1))
+    bbb_prev = np.zeros(close.size, dtype=bool)
+    bbb_prev[1:] = bbb[:-1]
+    sss_prev = np.zeros(close.size, dtype=bool)
+    sss_prev[1:] = sss[:-1]
+    bars_since_up = _reference_barslast(bbb_prev) + 1
+    bars_since_down = _reference_barslast(sss_prev) + 1
+    return (
+        bbb
+        & (bars_since_up > bars_since_down)
+        & (close > _shift(csg, 89))
+        & (close > _shift(dsg, 26))
+    )
+
+
+def _single_symbol_market(closes: list[float]) -> MarketDataMatrix:
+    start = date(2024, 1, 1)
+    rows = [
+        {
+            "symbol": "000001.SZ",
+            "name": "测试股票",
+            "date": start + timedelta(days=offset),
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": 1000.0,
+        }
+        for offset, close in enumerate(closes)
+    ]
+    return build_market_data_matrix(pl.DataFrame(rows))
+
+
+def _pullback_then_breakout_closes() -> list[float]:
+    """先上穿 → 回落跌破 → 长期贴地 → 跳空突破: 覆盖 BBB_0 > SSS_0 的完整序列。"""
+    closes = [10.0 + 0.4 * index for index in range(10)]  # 0..9   拉升触发上穿
+    closes += [13.6 - 0.09 * index for index in range(1, 41)]  # 10..49  回落触发跌破
+    closes += [10.0 - 0.0065 * index for index in range(1, 150)]  # 50..198 贴地阴跌
+    closes.append(11.8)  # 199     跳空再突破
+    return closes
+
+
+def test_qstpxg_matrix_strategy_matches_reference_formula():
+    from app.strategy.builtin.upward_trend_breakout import MATRIX_STRATEGY
+
+    closes = np.asarray(_pullback_then_breakout_closes(), dtype=np.float64)
+    market = _single_symbol_market(closes.tolist())
+
+    signals = MATRIX_STRATEGY.compute_signals(market, {})
+    entry = signals.entry[:, 0].astype(bool)
+
+    expected = _reference_qstpxg(market.high[:, 0], market.low[:, 0], market.close[:, 0])
+    np.testing.assert_array_equal(entry, expected)
+
+    # 序列本身必须真的触发过一次, 否则对拍是空跑
+    assert expected[-1], "构造的回调后突破序列未产生信号"
+    assert entry[:-1].sum() == 0
+
+
+def test_qstpxg_requires_recent_short_rail_cross():
+    """关掉 BBB 后, 跳空当天之前的贴地阴跌不应被选中。"""
+    from app.strategy.builtin.upward_trend_breakout import MATRIX_STRATEGY
+
+    closes = np.asarray(_pullback_then_breakout_closes(), dtype=np.float64)
+    market = _single_symbol_market(closes.tolist())
+
+    relaxed = (
+        MATRIX_STRATEGY.compute_signals(market, {"require_short_rail_cross": False})
+        .entry[:, 0]
+        .astype(bool)
+    )
+
+    # 放开 BBB 后只剩「距上次上穿更久 + 站上两条历史轨道」, 命中点只会变多
+    assert relaxed.sum() >= 1

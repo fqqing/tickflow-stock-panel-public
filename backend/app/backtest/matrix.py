@@ -2979,6 +2979,81 @@ def valid_shift(
     )
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _valid_barslast_kernel(
+    condition: np.ndarray,
+    valid: np.ndarray,
+    offsets: np.ndarray,
+    rows: np.ndarray,
+) -> np.ndarray:
+    out = np.full(condition.shape, np.nan, dtype=np.float32)
+    for asset_id in prange(condition.shape[1]):
+        start = int(offsets[asset_id])
+        stop = int(offsets[asset_id + 1])
+        last_position = -1
+        for position in range(start, stop):
+            row = int(rows[position])
+            if not valid[row, asset_id]:
+                continue
+            if condition[row, asset_id]:
+                last_position = position
+                out[row, asset_id] = np.float32(0.0)
+            elif last_position >= 0:
+                out[row, asset_id] = np.float32(position - last_position)
+            else:
+                out[row, asset_id] = np.float32(0.0)
+    return out
+
+
+def valid_barslast(
+    condition: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``BARSLAST`` —— 距上次条件成立经过的有效 bar 数 (当前成立记 0)。
+
+    语义对齐通达信/同花顺 ``BARSLAST``, 但计数单位是**有效 bar** (自动跳过停牌
+    等缺失行), 与 :func:`valid_shift` 保持同一口径:
+
+    - 当前 bar 条件成立 → ``0``
+    - 否则 → 距上次成立的有效 bar 步数
+    - 尚未成立过 (含从未成立) → ``0``
+
+    最后一条与源公式参考实现一致 —— 未成立时按 0 计, 由调用方 ``+1`` 区分,
+    所以 ``valid_barslast(cond) + 1`` 与通达信逐 bar 结果逐位一致。
+
+    尾随的无效行输出 ``NaN``, 下游数值比较自然为 ``False``。
+    """
+    raw = np.asarray(condition)
+    signal = np.asarray(raw, dtype=bool)
+    valid = (
+        np.ones(signal.shape, dtype=bool)
+        if valid_mask is None
+        else np.asarray(valid_mask, dtype=bool)
+    )
+    if signal.shape != valid.shape:
+        raise ValueError("valid_barslast mask shape does not match condition")
+    if raw.dtype != np.bool_:
+        # 非布尔输入 (如指标数组): NaN 行不参与计数, 避免 NaN 被强制转成 True
+        valid = valid & np.isfinite(raw)
+    index = _resolve_valid_bar_index(signal, valid, bar_index)
+
+    return _cached_matrix_operation(
+        "valid_barslast",
+        (signal, valid, index.offsets, index.rows),
+        {},
+        lambda: run_numba_parallel(
+            lambda: _valid_barslast_kernel(
+                signal,
+                valid,
+                index.offsets,
+                index.rows,
+            )
+        ),
+    )
+
+
 def rolling_min(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
     return _cached_matrix_operation(
