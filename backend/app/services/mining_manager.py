@@ -203,8 +203,10 @@ class MiningJobManager:
             if cancel_event.is_set():
                 self._finish_cancelled_locked(run_id)
                 return False
-            self._store.transition_status(run_id, "running")
+            # 先写事件再翻状态: 调用方 (轮询/流式) 一旦观察到新状态, 就必须能读到
+            # 与之对应的事件, 否则会出现 "已 cancelled 但事件表里没有 cancelled"。
             self._store.append_event(run_id, "running", {"status": "running"})
+            self._store.transition_status(run_id, "running")
             return True
 
     def _record_progress(
@@ -235,8 +237,8 @@ class MiningJobManager:
                 self._finish_cancelled_locked(run_id)
                 return
             self._store.write_summary(run_id, result)
-            self._store.transition_status(run_id, status)
             self._store.append_event(run_id, status, {"status": status})
+            self._store.transition_status(run_id, status)
 
     def _finish_cancelled(self, run_id: str) -> None:
         with self._lock:
@@ -246,8 +248,9 @@ class MiningJobManager:
         manifest = self._store.get(run_id)
         if manifest is None or manifest["status"] in TERMINAL_RUN_STATUSES:
             return
-        self._store.transition_status(run_id, "cancelled")
+        # 事件先于状态 (理由同 _mark_running)。
         self._store.append_event(run_id, "cancelled", {"status": "cancelled"})
+        self._store.transition_status(run_id, "cancelled")
 
     def _finish_failed(self, run_id: str, exc: Exception) -> None:
         message = str(exc)[:2000]
@@ -255,9 +258,10 @@ class MiningJobManager:
             manifest = self._store.get(run_id)
             if manifest is None or manifest["status"] in TERMINAL_RUN_STATUSES:
                 return
-            self._store.transition_status(run_id, "failed", error=message)
+            # 事件先于状态 (理由同 _mark_running)。
             self._store.append_event(
                 run_id,
                 "error",
                 {"status": "failed", "message": message},
             )
+            self._store.transition_status(run_id, "failed", error=message)
