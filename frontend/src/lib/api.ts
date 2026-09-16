@@ -236,6 +236,28 @@ export interface KlineRow {
   td_a3?: number | null
   /** 资金动能值，来自 indicators=capital_momentum；数据不足 52 根时为 null */
   cm_value?: number | null
+  /** 主图定量结构：短轨道 EMA(HIGH/LOW,25)，来自 indicators=structure */
+  st_dsg?: number | null
+  st_dxg?: number | null
+  /** 主图定量结构：长轨道 EMA(HIGH/LOW,89) */
+  st_csg?: number | null
+  st_cxg?: number | null
+  /** 主图定量结构交叉图标：0 无 / 4 收盘上穿短上轨 / 5 收盘跌破短下轨 */
+  st_icon?: number | null
+  /** 下跌九转标注数字（0 表示当日无标注，否则 6~9），画在 LOW 下方 */
+  st_dn?: number | null
+  /** 上涨九转标注数字，画在 HIGH 上方 */
+  st_up?: number | null
+  /** MACD 定量结构：DIFF/DEA/柱，来自 indicators=macd_structure */
+  ms_diff?: number | null
+  ms_dea?: number | null
+  ms_hist?: number | null
+  /** 底部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失；ms_by 为标注纵坐标 */
+  ms_btext?: number | null
+  ms_by?: number | null
+  /** 顶部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失；ms_ty 为标注纵坐标 */
+  ms_ttext?: number | null
+  ms_ty?: number | null
   [key: string]: any
 }
 

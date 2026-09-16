@@ -19,8 +19,11 @@ const SUB_INFO_H = 16
 const SUB_GAP = 4
 const MAX_DAYS = 2000
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
-/** 解密公式派生指标: 趋势擒龙（蛟龙出海）+ 资金动能, 由后端按需计算 */
-const CUSTOM_INDICATORS = 'trend_dragon,capital_momentum'
+/**
+ * 解密公式派生指标：蛟龙出海 + 资金动能 + 主图定量结构 + MACD 定量结构，
+ * 由后端按需计算（公式预热依赖长历史，前端只负责展示）
+ */
+const CUSTOM_INDICATORS = 'trend_dragon,capital_momentum,structure,macd_structure'
 
 function normalizeVolumeCompare(config: VolumeCompareConfig): VolumeCompareConfig {
   return {
@@ -90,6 +93,20 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       td_signal: r.td_signal === true,
       td_a3: r.td_a3 != null ? Number(r.td_a3) : null,
       cm_value: r.cm_value != null ? Number(r.cm_value) : null,
+      st_dsg: r.st_dsg != null ? Number(r.st_dsg) : null,
+      st_dxg: r.st_dxg != null ? Number(r.st_dxg) : null,
+      st_csg: r.st_csg != null ? Number(r.st_csg) : null,
+      st_cxg: r.st_cxg != null ? Number(r.st_cxg) : null,
+      st_icon: Number(r.st_icon ?? 0),
+      st_dn: Number(r.st_dn ?? 0),
+      st_up: Number(r.st_up ?? 0),
+      ms_diff: r.ms_diff != null ? Number(r.ms_diff) : null,
+      ms_dea: r.ms_dea != null ? Number(r.ms_dea) : null,
+      ms_hist: r.ms_hist != null ? Number(r.ms_hist) : null,
+      ms_btext: Number(r.ms_btext ?? 0),
+      ms_by: r.ms_by != null ? Number(r.ms_by) : null,
+      ms_ttext: Number(r.ms_ttext ?? 0),
+      ms_ty: r.ms_ty != null ? Number(r.ms_ty) : null,
     }))
 }
 

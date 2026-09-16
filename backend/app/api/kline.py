@@ -343,7 +343,10 @@ def get_daily(
     ext_columns: Optional[str] = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
     indicators: Optional[str] = Query(
         None,
-        description="逗号分隔的派生指标: trend_dragon,capital_momentum (解密公式, 按需计算)",
+        description=(
+            "逗号分隔的派生指标: trend_dragon,capital_momentum,structure,macd_structure "
+            "(解密公式, 按需计算)"
+        ),
     ),
 ):
     """读取本地 enriched 表中某只股票的日 K。
@@ -352,8 +355,9 @@ def get_daily(
     - Free 用户: 若 enriched 表里没有该股票, 实时拉取 + 本地算 enriched 返回
     - ext_columns: 可选，动态 LEFT JOIN 扩展数据表，结果平铺到 stock_info.ext 下
       (key 为 "{config_id}__{field_name}")，供日K信息条等场景展示自定义字段
-    - indicators: 可选，为每根 K 线附加解密公式结果 (趋势擒龙/资金动能)，
-      在实时蜡烛注入之后计算，保证与图上最后一根 K 线一致
+    - indicators: 可选, 为每根 K 线附加解密公式结果 (蛟龙出海/资金动能/
+      主图定量结构/MACD 定量结构), 在实时蜡烛注入之后计算, 保证与图上最后一根
+      K 线一致
     """
     import polars as pl
 
@@ -474,10 +478,19 @@ _BENCHMARK_INDEX_BY_EXCHANGE = {
 _DEFAULT_BENCHMARK_INDEX = "000001.SH"
 
 # 已实现的指标 key; 未知 key 静默忽略, 便于前端渐进接入
-_SUPPORTED_INDICATORS = frozenset({"trend_dragon", "capital_momentum"})
+_SUPPORTED_INDICATORS = frozenset(
+    {"trend_dragon", "capital_momentum", "structure", "macd_structure"}
+)
 
-# 指标预热天数: 52 日均量/BARSLAST 链/MA10 都需要前置窗口, 多取一段再回填
-_INDICATOR_WARMUP_DAYS = 180
+# 指标预热天数: 每个指标依赖的前置窗口差异很大, 按所选指标取最大值一次性取数
+# - trend_dragon / capital_momentum: MA10 与 52 日均值 / BARSLAST 链
+# - structure / macd_structure: EMA89 与跨峰 REF 链, 需要更长的历史才收敛
+_INDICATOR_WARMUP_DAYS = {
+    "trend_dragon": 180,
+    "capital_momentum": 180,
+    "structure": 540,
+    "macd_structure": 540,
+}
 
 
 def _date_key(value: object) -> str:
@@ -493,6 +506,12 @@ def _as_float(value: object) -> float:
     except (TypeError, ValueError):
         return math.nan
     return numeric if math.isfinite(numeric) else math.nan
+
+
+def _finite_or_none(value: object, digits: int = 4) -> float | None:
+    """把数值收敛成 JSON 友好的 float; NaN/inf 统一输出 None。"""
+    numeric = _as_float(value)
+    return round(numeric, digits) if math.isfinite(numeric) else None
 
 
 def _benchmark_index_symbol(symbol: str) -> str:
@@ -514,10 +533,16 @@ def _attach_indicators(
 
     - trend_dragon: ``td_signal`` (bool) / ``td_a3`` (int|null)
     - capital_momentum: ``cm_value`` (float|null, 与源脚本同口径, 已乘 10)
+    - structure: ``st_dsg``/``st_dxg``/``st_csg``/``st_cxg`` 双轨线,
+      ``st_icon`` (0 无 / 4 上穿短上轨 / 5 跌破短下轨),
+      ``st_dn``/``st_up`` (九转标注数字, 0 表示当日无标注, 否则 6~9)
+    - macd_structure: ``ms_diff``/``ms_dea``/``ms_hist`` 三条 MACD 序列, 加
+      ``ms_btext``/``ms_by`` (底部) 与 ``ms_ttext``/``ms_ty`` (顶部) 结构标注
+      (1 结构形成 / 2 钝化 / 3 钝化消失)
 
-    两个指标都有前置窗口依赖 (MA10 / 52 日均值 / BARSLAST 链), 因此计算时
-    额外向前多取 ``_INDICATOR_WARMUP_DAYS`` 天历史, 算完再按日期回填到
-    请求区间 —— 否则用户把区间缩到一两个月时, 前段数值会整体失真。
+    这些指标都有前置窗口依赖 (MA10 / 52 日均值 / EMA89 / BARSLAST 跨峰链), 因此
+    计算时按所选指标额外向前多取 ``_INDICATOR_WARMUP_DAYS`` 天历史, 算完再
+    按日期回填到请求区间 —— 否则用户把区间缩到一两个月时, 前段数值会整体失真。
     资金动能沿用源脚本口径: 先取个股与指数都有数据的交易日, 再滚动 52 根;
     不足 52 根时该段为 null。
     """
@@ -530,12 +555,16 @@ def _attach_indicators(
 
     from app.indicators.formula_signals import (
         CAPITAL_MOMENTUM_WINDOW,
+        MACD_SLOW_SPAN,
+        STRUCTURE_LONG_SPAN,
         capital_momentum,
+        macd_quant_structure,
+        quant_structure_main,
         trend_dragon,
     )
 
     today_key = cn_today().isoformat()
-    warmup_start = start - timedelta(days=_INDICATOR_WARMUP_DAYS)
+    warmup_start = start - timedelta(days=max(_INDICATOR_WARMUP_DAYS[key] for key in keys))
 
     # 逐日 OHLC: 先用仓库里的长历史打底, 再用请求区间内的行覆盖 (含今日实时蜡烛)
     history: dict[str, dict] = {}
@@ -551,23 +580,52 @@ def _attach_indicators(
     for row in rows:
         history[_date_key(row.get("date"))] = row
 
-    if "trend_dragon" in keys:
-        ordered = sorted(history.items())
-        if len(ordered) >= 20:
-            signal, a3 = trend_dragon(
-                np.array([_as_float(r.get("open")) for _, r in ordered], dtype=np.float64),
-                np.array([_as_float(r.get("high")) for _, r in ordered], dtype=np.float64),
-                np.array([_as_float(r.get("low")) for _, r in ordered], dtype=np.float64),
-                np.array([_as_float(r.get("close")) for _, r in ordered], dtype=np.float64),
-            )
-            by_date = {
-                day: (bool(hit), int(bars) if bars >= 0 else None)
-                for (day, _), hit, bars in zip(ordered, signal, a3, strict=False)
-            }
-            for row in rows:
-                hit, bars = by_date.get(_date_key(row.get("date")), (False, None))
-                row["td_signal"] = hit
-                row["td_a3"] = bars
+    ordered = sorted(history.items())
+    days = [day for day, _ in ordered]
+    index_of = {day: i for i, day in enumerate(days)}
+    open_series = np.array([_as_float(r.get("open")) for _, r in ordered], dtype=np.float64)
+    high_series = np.array([_as_float(r.get("high")) for _, r in ordered], dtype=np.float64)
+    low_series = np.array([_as_float(r.get("low")) for _, r in ordered], dtype=np.float64)
+    close_series = np.array([_as_float(r.get("close")) for _, r in ordered], dtype=np.float64)
+
+    if "trend_dragon" in keys and len(ordered) >= 20:
+        signal, a3 = trend_dragon(open_series, high_series, low_series, close_series)
+        by_date = {
+            day: (bool(hit), int(bars) if bars >= 0 else None)
+            for day, hit, bars in zip(days, signal, a3, strict=False)
+        }
+        for row in rows:
+            hit, bars = by_date.get(_date_key(row.get("date")), (False, None))
+            row["td_signal"] = hit
+            row["td_a3"] = bars
+
+    if "structure" in keys and len(ordered) > STRUCTURE_LONG_SPAN:
+        structure = quant_structure_main(high_series, low_series, close_series)
+        for row in rows:
+            position = index_of.get(_date_key(row.get("date")))
+            if position is None:
+                continue
+            row["st_dsg"] = _finite_or_none(structure["dsg"][position])
+            row["st_dxg"] = _finite_or_none(structure["dxg"][position])
+            row["st_csg"] = _finite_or_none(structure["csg"][position])
+            row["st_cxg"] = _finite_or_none(structure["cxg"][position])
+            row["st_icon"] = int(structure["icon"][position])
+            row["st_dn"] = int(structure["dn_digit"][position])
+            row["st_up"] = int(structure["up_digit"][position])
+
+    if "macd_structure" in keys and len(ordered) > MACD_SLOW_SPAN:
+        quant = macd_quant_structure(close_series)
+        for row in rows:
+            position = index_of.get(_date_key(row.get("date")))
+            if position is None:
+                continue
+            row["ms_diff"] = _finite_or_none(quant["diff"][position])
+            row["ms_dea"] = _finite_or_none(quant["dea"][position])
+            row["ms_hist"] = _finite_or_none(quant["macd"][position])
+            row["ms_btext"] = int(quant["bottom_text"][position])
+            row["ms_by"] = _finite_or_none(quant["bottom_y"][position])
+            row["ms_ttext"] = int(quant["top_text"][position])
+            row["ms_ty"] = _finite_or_none(quant["top_y"][position])
 
     if "capital_momentum" in keys:
         index_symbol = _benchmark_index_symbol(symbol)
@@ -589,18 +647,13 @@ def _attach_indicators(
         # 否则最后一根 K 线的资金动能会凭空缺失 (盘中图看起来"断了")。
         _inject_live_index_close(request, index_map, index_symbol, rows, today_key)
 
-        stock_close = (
-            {day: _as_float(record.get("close")) for day, record in history.items()}
-            if history
-            else {_date_key(row.get("date")): _as_float(row.get("close")) for row in rows}
-        )
-
+        close_by_date = dict(zip(days, close_series, strict=False))
         # 双方都有数据的交易日 (inner join), 与源脚本一致
-        common = sorted(day for day in stock_close if day in index_map)
+        common = sorted(day for day in close_by_date if day in index_map)
         momentum_by_date: dict[str, float] = {}
         if len(common) >= CAPITAL_MOMENTUM_WINDOW:
             momentum = capital_momentum(
-                np.array([stock_close[day] for day in common], dtype=np.float64),
+                np.array([close_by_date[day] for day in common], dtype=np.float64),
                 np.array([index_map[day] for day in common], dtype=np.float64),
             )
             momentum_by_date = dict(zip(common, momentum, strict=False))

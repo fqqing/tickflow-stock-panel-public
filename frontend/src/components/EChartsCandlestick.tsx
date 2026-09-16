@@ -31,6 +31,27 @@ export interface OHLC {
   td_a3?: number | null
   /** 资金动能（(RS/RS_MA52-1)*10），数据不足 52 根时为 null */
   cm_value?: number | null
+  /** 主图定量结构：短轨道 EMA(HIGH/LOW,25) 与长轨道 EMA(HIGH/LOW,89) */
+  st_dsg?: number | null
+  st_dxg?: number | null
+  st_csg?: number | null
+  st_cxg?: number | null
+  /** 主图定量结构：0 无 / 4 收盘上穿短上轨 / 5 收盘跌破短下轨 */
+  st_icon?: number | null
+  /** 下跌九转标注数字（0 无标注，否则 6~9），画在 LOW 下方 */
+  st_dn?: number | null
+  /** 上涨九转标注数字（0 无标注，否则 6~9），画在 HIGH 上方 */
+  st_up?: number | null
+  /** MACD 定量结构：DIFF / DEA / 柱 */
+  ms_diff?: number | null
+  ms_dea?: number | null
+  ms_hist?: number | null
+  /** 底部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失，纵坐标为 ms_by */
+  ms_btext?: number | null
+  ms_by?: number | null
+  /** 顶部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失，纵坐标为 ms_ty */
+  ms_ttext?: number | null
+  ms_ty?: number | null
 }
 
 export interface ChartMarker {
@@ -305,6 +326,101 @@ export const SUB_CHARTS: SubChartDef[] = [
     },
   },
   {
+    key: 'macd_struct',
+    label: 'MACD定量结构',
+    height: 88,
+    buildSeries: (data) => {
+      // 结构标注用 1px 的透明散点承载, 文字通过 label 画在 DIFF 的缩放位置
+      const markSeries = (
+        name: string,
+        textKey: 'ms_btext' | 'ms_ttext',
+        yKey: 'ms_by' | 'ms_ty',
+        position: 'bottom' | 'top',
+      ) => ({
+        name,
+        type: 'scatter',
+        symbol: 'rect',
+        symbolSize: 1,
+        itemStyle: { color: 'transparent' },
+        animation: false,
+        silent: true,
+        z: 8,
+        label: {
+          show: true,
+          position,
+          distance: 2,
+          fontSize: 10,
+          fontWeight: 'bold' as const,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (params: any) => params.data?.mark ?? '',
+        },
+        data: data.flatMap(d => {
+          const text = Number(d[textKey] ?? 0)
+          const y = d[yKey]
+          if (!text || y == null) return []
+          return [{
+            value: [d.date, Number(y)],
+            mark: STRUCTURE_MARK_LABELS[text] ?? '',
+            label: { color: STRUCTURE_MARK_COLORS[text] ?? CT().text },
+          }]
+        }),
+      })
+      return [
+        {
+          name: 'DIF',
+          type: 'line',
+          data: data.map(d => (d.ms_diff != null ? Number(d.ms_diff) : '-')),
+          smooth: true, symbol: 'none', animation: false,
+          lineStyle: { width: 1, color: '#FACC15' },
+          itemStyle: { color: '#FACC15' },
+        },
+        {
+          name: 'DEA',
+          type: 'line',
+          data: data.map(d => (d.ms_dea != null ? Number(d.ms_dea) : '-')),
+          smooth: true, symbol: 'none', animation: false,
+          lineStyle: { width: 1, color: '#8B5CF6' },
+          itemStyle: { color: '#8B5CF6' },
+        },
+        {
+          name: 'MACD',
+          type: 'bar',
+          data: data.map(d => {
+            const v = d.ms_hist
+            if (v == null) return '-'
+            return {
+              value: Number(v),
+              itemStyle: { color: Number(v) >= 0 ? 'rgba(240,68,56,0.6)' : 'rgba(18,183,106,0.6)' },
+            }
+          }),
+          barWidth: '40%',
+          animation: false,
+        },
+        markSeries('底部结构', 'ms_btext', 'ms_by', 'bottom'),
+        markSeries('顶部结构', 'ms_ttext', 'ms_ty', 'top'),
+      ]
+    },
+    buildInfo: (d) => {
+      if (!d) return []
+      const markText = (value?: number | null) => {
+        const code = Number(value ?? 0)
+        return code ? (STRUCTURE_MARK_LABELS[code] ?? '—') : '—'
+      }
+      const markColor = (value?: number | null) => STRUCTURE_MARK_COLORS[Number(value ?? 0)] ?? '#8E8E96'
+      return [
+        { label: 'DIF', color: '#FACC15', value: d.ms_diff != null ? Number(d.ms_diff).toFixed(3) : '—' },
+        { label: 'DEA', color: '#8B5CF6', value: d.ms_dea != null ? Number(d.ms_dea).toFixed(3) : '—' },
+        {
+          label: 'MACD',
+          color: d.ms_hist != null && Number(d.ms_hist) >= 0 ? '#C74040' : '#2D9B65',
+          value: d.ms_hist != null ? Number(d.ms_hist).toFixed(3) : '—',
+        },
+        { label: '底结构', color: markColor(d.ms_btext), value: markText(d.ms_btext) },
+        { label: '顶结构', color: markColor(d.ms_ttext), value: markText(d.ms_ttext) },
+      ]
+    },
+  },
+  {
     key: 'rsi',
     label: 'RSI',
     height: 72,
@@ -392,6 +508,7 @@ export const INDICATORS = SUB_CHARTS.filter(s => s.key !== 'vol')
 export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },
   { key: 'tdragon', label: '蛟龙出海' },
+  { key: 'structure', label: '主图定量结构' },
 ]
 
 interface Props {
@@ -446,10 +563,63 @@ const MOMENTUM_THRESHOLDS = [
 const DRAGON_LINE_COLOR = '#F04438'
 const DRAGON_SIGNAL_COLOR = '#FACC15'
 
+/**
+ * 主图定量结构: 短轨道 EMA(HIGH/LOW,25) 用红/绿, 长轨道 EMA(HIGH/LOW,89) 用洋红/蓝,
+ * 与通达信原公式的 COLORRED / COLORGREEN / COLORMAGENTA / COLORBLUE 一致。
+ */
+const STRUCTURE_SHORT_UP = '#F04438'
+const STRUCTURE_SHORT_DOWN = '#12B76A'
+const STRUCTURE_LONG_UP = '#C026D3'
+const STRUCTURE_LONG_DOWN = '#2563EB'
+/** 轨道带填充 (DRAWBAND): 收盘在带上轨之上 / 在带内 / 在下轨之下 */
+const STRUCTURE_BAND_FILL: Record<string, string> = {
+  up: 'rgba(240,68,56,0.10)',
+  flat: 'rgba(148,163,184,0.10)',
+  down: 'rgba(18,183,106,0.10)',
+}
+/** 九转数字: 下跌九转标红(低位买点), 上涨九转标绿(高位卖点), 同原公式 DRAWTEXT 配色。 */
+const STRUCTURE_DN_COLOR = '#F04438'
+const STRUCTURE_UP_COLOR = '#12B76A'
+/** 结构标注文案与配色: 1 结构形成 / 2 钝化 / 3 钝化消失 */
+const STRUCTURE_MARK_LABELS: Record<number, string> = {
+  1: '结构形成',
+  2: '钝化',
+  3: '消失',
+}
+const STRUCTURE_MARK_COLORS: Record<number, string> = {
+  1: '#F04438',
+  2: '#F59E0B',
+  3: '#8E8E96',
+}
+
 /** 子图上方信息栏高度 (px) */
 const INFO_BAR_H = 16
 /** 子图之间的间距 (px) */
 const SUB_GAP_PX = 4
+
+/** 主图定量结构的信息栏片段 (双轨数值 + 交叉图标 + 九转数字)。 */
+function structureInfoParts(d: OHLC | null, active: boolean): string[] {
+  if (!d || !active) return []
+  const parts: string[] = []
+  const pushTrack = (label: string, value: number | null | undefined, color: string) => {
+    if (value == null) return
+    parts.push(`<span style="color:${color}">${label}:${Number(value).toFixed(2)}</span>`)
+  }
+  pushTrack('短上轨', d.st_dsg, STRUCTURE_SHORT_UP)
+  pushTrack('短下轨', d.st_dxg, STRUCTURE_SHORT_DOWN)
+  pushTrack('长上轨', d.st_csg, STRUCTURE_LONG_UP)
+  pushTrack('长下轨', d.st_cxg, STRUCTURE_LONG_DOWN)
+  if (d.st_icon) {
+    const breakout = Number(d.st_icon) === 4
+    parts.push(
+      `<span style="color:${breakout ? STRUCTURE_SHORT_UP : STRUCTURE_SHORT_DOWN}">` +
+        `${breakout ? 'BBB 上穿' : 'SSS 下破'}</span>`,
+    )
+  }
+  if (d.st_dn) parts.push(`<span style="color:${STRUCTURE_DN_COLOR}">低九:${d.st_dn}</span>`)
+  if (d.st_up) parts.push(`<span style="color:${STRUCTURE_UP_COLOR}">高九:${d.st_up}</span>`)
+  return parts
+}
 
 function buildSubInfoGraphics(
   data: OHLC[],
@@ -827,6 +997,133 @@ function buildOption(
     })
   }
 
+  // ===== 主图定量结构 (EMA25/89 双轨 + 交叉图标 + 九转数字) =====
+  const showStructure = activeIndicators.includes('structure') && data.some(d => d.st_dsg != null)
+  if (showStructure) {
+    // DRAWBAND: 逐 bar 画矩形填充上下轨之间, 填充色随收盘价相对轨道的位置变化
+    const bandSeries = (
+      name: string,
+      upperKey: 'st_dsg' | 'st_csg',
+      lowerKey: 'st_dxg' | 'st_cxg',
+    ) => ({
+      name,
+      type: 'custom',
+      silent: true,
+      animation: false,
+      z: 1,
+      renderItem: (_params: any, api: any) => {
+        const index = api.value(0)
+        const upper = api.coord([index, api.value(1)])
+        const lower = api.coord([index, api.value(2)])
+        const half = Math.max((api.size([1, 0])[0] || 6) / 2, 1)
+        return {
+          type: 'rect',
+          shape: {
+            x: upper[0] - half,
+            y: Math.min(upper[1], lower[1]),
+            width: half * 2,
+            height: Math.max(Math.abs(upper[1] - lower[1]), 0.5),
+          },
+          style: { fill: api.value(3) },
+        }
+      },
+      data: data.flatMap((d, index) => {
+        const upper = d[upperKey]
+        const lower = d[lowerKey]
+        if (upper == null || lower == null) return []
+        const close = Number(d.close)
+        const state = close > Number(upper) ? 'up' : close < Number(lower) ? 'down' : 'flat'
+        return [[index, Number(upper), Number(lower), STRUCTURE_BAND_FILL[state]]]
+      }),
+    })
+
+    // 变色双轨: 原公式用 IF(C > X, X, DRAWNULL) + IF(C < X, X, DRAWNULL) 两条互补线
+    const trackLine = (
+      name: string,
+      key: 'st_dsg' | 'st_dxg' | 'st_csg' | 'st_cxg',
+      color: string,
+      above: boolean,
+      width: number,
+    ) => ({
+      name,
+      type: 'line',
+      symbol: 'none',
+      animation: false,
+      silent: true,
+      connectNulls: false,
+      data: data.map(d => {
+        const value = d[key]
+        if (value == null) return '-'
+        return (Number(d.close) > Number(value)) === above ? Number(value) : '-'
+      }),
+      lineStyle: { width, color },
+      itemStyle: { color },
+      z: 6,
+    })
+
+    series.push(bandSeries('短轨道带', 'st_dsg', 'st_dxg'))
+    series.push(bandSeries('长轨道带', 'st_csg', 'st_cxg'))
+    series.push(trackLine('短上轨', 'st_dsg', STRUCTURE_SHORT_UP, true, 1.6))
+    series.push(trackLine('短上轨(跌)', 'st_dsg', STRUCTURE_SHORT_DOWN, false, 1.2))
+    series.push(trackLine('短下轨', 'st_dxg', STRUCTURE_SHORT_UP, true, 1.6))
+    series.push(trackLine('短下轨(跌)', 'st_dxg', STRUCTURE_SHORT_DOWN, false, 1.2))
+    series.push(trackLine('长上轨', 'st_csg', STRUCTURE_LONG_UP, true, 1.4))
+    series.push(trackLine('长上轨(跌)', 'st_csg', STRUCTURE_LONG_DOWN, false, 1.1))
+    series.push(trackLine('长下轨', 'st_cxg', STRUCTURE_LONG_UP, true, 1.4))
+    series.push(trackLine('长下轨(跌)', 'st_cxg', STRUCTURE_LONG_DOWN, false, 1.1))
+
+    // BBB/SSS 交叉图标: 4 底部向上箭头 (画在 LOW 下方) / 5 顶部向下箭头 (画在 HIGH 上方)
+    const iconSeries = (name: string, icon: number, color: string, above: boolean) => ({
+      name,
+      type: 'scatter',
+      silent: true,
+      animation: false,
+      z: 9,
+      symbol: 'arrow',
+      symbolSize: compact ? 8 : 12,
+      symbolRotate: above ? 180 : 0,
+      symbolOffset: above ? [0, '-60%'] : [0, '60%'],
+      itemStyle: { color },
+      label: { show: false },
+      data: data.flatMap(d =>
+        Number(d.st_icon ?? 0) === icon
+          ? [[d.date, above ? Number(d.high) : Number(d.low)]]
+          : []
+      ),
+    })
+    series.push(iconSeries('结构上穿', 4, STRUCTURE_SHORT_UP, false))
+    series.push(iconSeries('结构下破', 5, STRUCTURE_SHORT_DOWN, true))
+
+    // 九转数字: 下跌九转 6~9 标 LOW 下方 (红), 上涨九转 6~9 标 HIGH 上方 (绿)
+    const digitSeries = (name: string, color: string, above: boolean) => ({
+      name,
+      type: 'scatter',
+      silent: true,
+      animation: false,
+      z: 9,
+      symbol: 'rect',
+      symbolSize: 1,
+      itemStyle: { color: 'transparent' },
+      label: {
+        show: true,
+        position: above ? 'top' : 'bottom',
+        distance: 2,
+        color,
+        fontSize: 10,
+        fontWeight: 'bold' as const,
+        fontFamily: 'JetBrains Mono, monospace',
+        formatter: (params: any) => params.data?.mark ?? '',
+      },
+      data: data.flatMap(d => {
+        const digit = above ? Number(d.st_up ?? 0) : Number(d.st_dn ?? 0)
+        if (!digit) return []
+        return [{ value: [d.date, above ? Number(d.high) : Number(d.low)], mark: String(digit) }]
+      }),
+    })
+    series.push(digitSeries('下跌九转', STRUCTURE_DN_COLOR, false))
+    series.push(digitSeries('上涨九转', STRUCTURE_UP_COLOR, true))
+  }
+
   // ===== 子图区域 =====
   let curTop = topPad + candleAvail + candleBottomPad
 
@@ -1063,7 +1360,8 @@ export function EChartsCandlestick({
         dragonParts.push(`<span style="color:${DRAGON_LINE_COLOR}">生命线:${Number(d.ma10).toFixed(2)}</span>`)
       }
     }
-    if (showMA || dragonParts.length > 0) {
+    const structureParts = structureInfoParts(d, activeIndicators.includes('structure'))
+    if (showMA || dragonParts.length > 0 || structureParts.length > 0) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
       if (showMA) {
         if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
@@ -1075,6 +1373,7 @@ export function EChartsCandlestick({
         }
       }
       html += dragonParts.join('')
+      html += structureParts.join('')
       html += `</div>`
     }
 
@@ -1324,7 +1623,8 @@ export function EChartsCandlestick({
         dragonParts0.push(`<span style="color:${DRAGON_LINE_COLOR}">生命线:${Number(d.ma10).toFixed(2)}</span>`)
       }
     }
-    if (showMA || dragonParts0.length > 0) {
+    const structureParts0 = structureInfoParts(d, activeIndicators.includes('structure'))
+    if (showMA || dragonParts0.length > 0 || structureParts0.length > 0) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
       if (showMA) {
         if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
@@ -1336,6 +1636,7 @@ export function EChartsCandlestick({
         }
       }
       html += dragonParts0.join('')
+      html += structureParts0.join('')
       html += `</div>`
     }
     return html
