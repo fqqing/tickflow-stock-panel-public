@@ -19,6 +19,8 @@ const SUB_INFO_H = 16
 const SUB_GAP = 4
 const MAX_DAYS = 2000
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
+/** 解密公式派生指标: 趋势擒龙（蛟龙出海）+ 资金动能, 由后端按需计算 */
+const CUSTOM_INDICATORS = 'trend_dragon,capital_momentum'
 
 function normalizeVolumeCompare(config: VolumeCompareConfig): VolumeCompareConfig {
   return {
@@ -85,6 +87,9 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       kdj_j: r.kdj_j != null ? Number(r.kdj_j) : null,
       boll_upper: r.boll_upper != null ? Number(r.boll_upper) : null,
       boll_lower: r.boll_lower != null ? Number(r.boll_lower) : null,
+      td_signal: r.td_signal === true,
+      td_a3: r.td_a3 != null ? Number(r.td_a3) : null,
+      cm_value: r.cm_value != null ? Number(r.cm_value) : null,
     }))
 }
 
@@ -148,7 +153,7 @@ export function StockDailyKChart({
   // extColumns 纳入 query key：勾选/取消扩展字段时需重新请求（带 ext_columns 参数）
   const kline = useQuery({
     queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns),
+    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns, CUSTOM_INDICATORS),
     enabled: !!symbol,
     placeholderData: (prev) => prev,
   })

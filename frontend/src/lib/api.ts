@@ -230,6 +230,12 @@ export interface KlineRow {
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
+  /** 趋势擒龙（蛟龙出海）信号日标记，来自 indicators=trend_dragon */
+  td_signal?: boolean | null
+  /** 趋势擒龙的 A3（上次「9 连阳」距今 bar 数），null 表示尚未出现 */
+  td_a3?: number | null
+  /** 资金动能值，来自 indicators=capital_momentum；数据不足 52 根时为 null */
+  cm_value?: number | null
   [key: string]: any
 }
 
@@ -1894,7 +1900,13 @@ export const api = {
   redetectCapabilities: () =>
     request<CapabilitiesResponse>('/api/capabilities/redetect', { method: 'POST' }),
 
-  klineDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }, extColumns?: string) =>
+  klineDaily: (
+    symbol: string,
+    days = 120,
+    dateRange?: { start: string; end: string },
+    extColumns?: string,
+    indicators?: string,
+  ) =>
     request<{
       symbol: string
       name?: string
@@ -1905,7 +1917,8 @@ export const api = {
       (dateRange
         ? `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&start_date=${dateRange.start}&end_date=${dateRange.end}`
         : `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`)
-      + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : ''),
+      + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : '')
+      + (indicators ? `&indicators=${encodeURIComponent(indicators)}` : ''),
     ),
   klineDailyBatch: (symbols: string[], days = 12) =>
     request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {

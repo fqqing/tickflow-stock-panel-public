@@ -25,6 +25,12 @@ export interface OHLC {
   kdj_j?: number | null
   boll_upper?: number | null
   boll_lower?: number | null
+  /** 趋势擒龙（蛟龙出海）信号日 */
+  td_signal?: boolean | null
+  /** 趋势擒龙的 A3（上次「9 连阳」距今 bar 数） */
+  td_a3?: number | null
+  /** 资金动能（(RS/RS_MA52-1)*10），数据不足 52 根时为 null */
+  cm_value?: number | null
 }
 
 export interface ChartMarker {
@@ -230,6 +236,75 @@ export const SUB_CHARTS: SubChartDef[] = [
     },
   },
   {
+    key: 'momentum',
+    label: '资金动能',
+    height: 72,
+    buildSeries: (data) => {
+      const values = data.map(d => (d.cm_value != null ? Number(d.cm_value) : null))
+      const positive = values.map(v => (v != null && v > 0 ? v : null))
+      const negative = values.map(v => (v != null && v < 0 ? v : null))
+      const momentumLine = (
+        name: string,
+        series: (number | null)[],
+        color: string,
+        fill: string,
+        withThresholds: boolean,
+      ) => ({
+        name,
+        type: 'line',
+        data: series,
+        symbol: 'none',
+        animation: false,
+        connectNulls: false,
+        silent: true,
+        lineStyle: { width: 1, color },
+        itemStyle: { color },
+        // origin: 0 → 面积在 0 轴与曲线之间填充（红上绿下，同同花顺口径）
+        areaStyle: { color: fill, origin: 0 },
+        // 阈值线只画一次, 否则两条 series 会各叠一份虚线
+        markLine: withThresholds
+          ? {
+              silent: true,
+              symbol: 'none',
+              label: {
+                show: true,
+                position: 'insideEndTop',
+                fontSize: 9,
+                fontFamily: 'JetBrains Mono, monospace',
+                formatter: (params: any) => params.name,
+              },
+              data: MOMENTUM_THRESHOLDS.map(t => ({
+                yAxis: t.value,
+                name: t.label,
+                lineStyle: { color: t.color, type: 'dashed' as const, width: 1, opacity: 0.8 },
+                label: { color: t.color },
+              })),
+            }
+          : undefined,
+      })
+      return [
+        momentumLine('资金动能', positive, '#F04438', 'rgba(240,68,56,0.45)', true),
+        momentumLine('资金动能(负)', negative, '#12B76A', 'rgba(18,183,106,0.45)', false),
+      ]
+    },
+    buildInfo: (d) => {
+      if (!d || d.cm_value == null) {
+        return [{ label: '资金动能', color: '#8E8E96', value: '—' }]
+      }
+      const value = Number(d.cm_value)
+      const status = value >= 1.5 ? '极强' : value >= 0.5 ? '强' : value > 0 ? '偏强' : '弱'
+      return [
+        {
+          label: '资金动能',
+          color: value >= 0 ? '#C74040' : '#2D9B65',
+          value: `${value.toFixed(2)} ${status}`,
+        },
+        { label: '强', color: '#FACC15', value: '0.50' },
+        { label: '极强', color: '#8B5CF6', value: '1.50' },
+      ]
+    },
+  },
+  {
     key: 'rsi',
     label: 'RSI',
     height: 72,
@@ -316,6 +391,7 @@ export const INDICATORS = SUB_CHARTS.filter(s => s.key !== 'vol')
 /** 主图叠加指标 (画在 K 线上方, 不占副图空间) */
 export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },
+  { key: 'tdragon', label: '蛟龙出海' },
 ]
 
 interface Props {
@@ -359,6 +435,16 @@ const CT = () => chartTheme(getTheme())
 
 /** 可见蜡烛超过此数量时，涨停/炸板标签切换为小圆点。 */
 const COMPACT_THRESHOLD = 60
+
+/** 资金动能强弱阈值 (同同花顺口径: 0.5 强 / 1.5 极强)。 */
+const MOMENTUM_THRESHOLDS = [
+  { value: 0.5, label: '强', color: '#FACC15' },
+  { value: 1.5, label: '极强', color: '#8B5CF6' },
+]
+
+/** 蛟龙出海: 生命线(MA10)与信号箭头用色。 */
+const DRAGON_LINE_COLOR = '#F04438'
+const DRAGON_SIGNAL_COLOR = '#FACC15'
 
 /** 子图上方信息栏高度 (px) */
 const INFO_BAR_H = 16
@@ -525,6 +611,26 @@ function buildOption(
           },
         })
       }
+    }
+  }
+
+  // 蛟龙出海（趋势擒龙）: 信号日箭头画在 low 下方, 点击可定位到该日
+  const showDragon = activeIndicators.includes('tdragon')
+  if (showDragon) {
+    for (const d of data) {
+      if (!d.td_signal) continue
+      markPointData.push({
+        name: d.date,
+        coord: [d.date, d.low],
+        symbol: 'arrow',
+        symbolSize: compact ? 9 : 14,
+        symbolRotate: 0,
+        symbolOffset: [0, compact ? '45%' : '70%'],
+        itemStyle: { color: DRAGON_SIGNAL_COLOR, cursor: 'pointer' },
+        label: { show: false },
+        z: 99,
+        zlevel: 10,
+      })
     }
   }
 
@@ -705,6 +811,20 @@ function buildOption(
     })
     series.push(bollLine('boll_upper', '#E879F9', 'BOLL上'))
     series.push(bollLine('boll_lower', '#E879F9', 'BOLL下'))
+  }
+
+  // 蛟龙出海: 生命线 (MA10) — 与常规 MA10 并存, 但更醒目
+  if (showDragon) {
+    series.push({
+      name: '生命线',
+      type: 'line',
+      data: data.map(d => (d.ma10 != null ? Number(d.ma10) : '-')),
+      smooth: true, symbol: 'none', animation: false,
+      silent: true,
+      lineStyle: { width: 1.6, color: DRAGON_LINE_COLOR },
+      itemStyle: { color: DRAGON_LINE_COLOR },
+      z: 5,
+    })
   }
 
   // ===== 子图区域 =====
@@ -932,16 +1052,29 @@ export function EChartsCandlestick({
     }
     html += `</div>`
 
-    // 第二行: MA + BOLL
-    if (showMA) {
-      html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+    // 第二行: MA + BOLL + 蛟龙出海 (信号 / 生命线 / 距 9 连阳天数)
+    const dragonParts: string[] = []
+    if (activeIndicators.includes('tdragon')) {
+      dragonParts.push(`<span style="color:${DRAGON_SIGNAL_COLOR}">蛟龙出海:${d.td_signal ? '信号' : '—'}</span>`)
+      if (d.td_a3 != null) {
+        dragonParts.push(`<span style="color:${CT().text}">距9连阳:${d.td_a3}</span>`)
       }
+      if (d.ma10 != null) {
+        dragonParts.push(`<span style="color:${DRAGON_LINE_COLOR}">生命线:${Number(d.ma10).toFixed(2)}</span>`)
+      }
+    }
+    if (showMA || dragonParts.length > 0) {
+      html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
+      if (showMA) {
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.boll_upper != null && activeIndicators.includes('boll')) {
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        }
+      }
+      html += dragonParts.join('')
       html += `</div>`
     }
 
@@ -1181,15 +1314,28 @@ export function EChartsCandlestick({
       html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
     }
     html += `</div>`
-    if (showMA) {
-      html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+    const dragonParts0: string[] = []
+    if (activeIndicators.includes('tdragon')) {
+      dragonParts0.push(`<span style="color:${DRAGON_SIGNAL_COLOR}">蛟龙出海:${d.td_signal ? '信号' : '—'}</span>`)
+      if (d.td_a3 != null) {
+        dragonParts0.push(`<span style="color:${CT().text}">距9连阳:${d.td_a3}</span>`)
       }
+      if (d.ma10 != null) {
+        dragonParts0.push(`<span style="color:${DRAGON_LINE_COLOR}">生命线:${Number(d.ma10).toFixed(2)}</span>`)
+      }
+    }
+    if (showMA || dragonParts0.length > 0) {
+      html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
+      if (showMA) {
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.boll_upper != null && activeIndicators.includes('boll')) {
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        }
+      }
+      html += dragonParts0.join('')
       html += `</div>`
     }
     return html

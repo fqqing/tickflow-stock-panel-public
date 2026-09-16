@@ -1,4 +1,5 @@
 """K 线 / 同步 API。"""
+
 from __future__ import annotations
 
 import logging
@@ -23,9 +24,11 @@ router = APIRouter(prefix="/api/kline", tags=["kline"])
 def _minute_allowed(capset) -> bool:
     """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
     from app.tickflow.capabilities import Cap
+
     if capset.has(Cap.KLINE_MINUTE_BATCH):
         return True
     from app.services import preferences
+
     provider = preferences.get_minute_data_provider()
     _, fallback, error = kline_sync._resolve_minute_provider(provider)
     if error is not None:
@@ -42,6 +45,7 @@ def _name_pinyin_keys(name: str) -> tuple[str, ...]:
     股票名总量有限且不变, lru_cache 命中后单次查询 ≈ dict 查找, 全市场遍历 < 1ms。
     """
     from pypinyin import pinyin, Style
+
     if not name:
         return ()
     keys = [""]
@@ -59,17 +63,22 @@ def _init_pinyin_dict() -> None:
     """
     try:
         from pypinyin import load_phrases_dict
+
         # value 用二维 list: 每个字给一个或多个读音
-        load_phrases_dict({
-            "重庆": [["zhòng", "chóng"], ["qīng"]],
-            "长安": [["cháng", "zhǎng"], ["ān"]],
-            "长春": [["cháng", "zhǎng"], ["chūn"]],
-            "长沙": [["cháng", "zhǎng"], ["shā"]],
-            "长城": [["cháng", "zhǎng"], ["chéng"]],
-            "长江": [["cháng", "zhǎng"], ["jiāng"]],
-        })
+        load_phrases_dict(
+            {
+                "重庆": [["zhòng", "chóng"], ["qīng"]],
+                "长安": [["cháng", "zhǎng"], ["ān"]],
+                "长春": [["cháng", "zhǎng"], ["chūn"]],
+                "长沙": [["cháng", "zhǎng"], ["shā"]],
+                "长城": [["cháng", "zhǎng"], ["chéng"]],
+                "长江": [["cháng", "zhǎng"], ["jiāng"]],
+            }
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("pypinyin phrases dict load failed (polyphone coverage may degrade): %s", exc)
+        logger.warning(
+            "pypinyin phrases dict load failed (polyphone coverage may degrade): %s", exc
+        )
 
 
 _init_pinyin_dict()
@@ -105,12 +114,20 @@ def search_instruments(
         if df_t.is_empty() or "symbol" not in df_t.columns:
             continue
         # dtype 全部归一到 Utf8: 股票/ETF 两份缓存来源不同 (ETF 含 legacy 合并), 防 concat SchemaError
-        parts.append(df_t.with_columns([
-            pl.col("symbol").cast(pl.Utf8).alias("symbol"),
-            (pl.col("name").cast(pl.Utf8) if "name" in df_t.columns else pl.lit("")).alias("name"),
-            (pl.col("code").cast(pl.Utf8) if "code" in df_t.columns else pl.lit("")).alias("code"),
-            pl.lit(t).alias("asset_type"),
-        ]).select(["symbol", "name", "code", "asset_type"]))
+        parts.append(
+            df_t.with_columns(
+                [
+                    pl.col("symbol").cast(pl.Utf8).alias("symbol"),
+                    (pl.col("name").cast(pl.Utf8) if "name" in df_t.columns else pl.lit("")).alias(
+                        "name"
+                    ),
+                    (pl.col("code").cast(pl.Utf8) if "code" in df_t.columns else pl.lit("")).alias(
+                        "code"
+                    ),
+                    pl.lit(t).alias("asset_type"),
+                ]
+            ).select(["symbol", "name", "code", "asset_type"])
+        )
     if not parts:
         return {"results": []}
     df = pl.concat(parts, how="vertical")
@@ -119,10 +136,9 @@ def search_instruments(
     is_pinyin_query = keyword.isalpha() and keyword.isascii()
 
     # code/symbol 前缀优先，再 name 包含匹配
-    prefix_mask = (
-        pl.col("code").str.starts_with(keyword)
-        | pl.col("symbol").str.to_uppercase().str.starts_with(keyword)
-    )
+    prefix_mask = pl.col("code").str.starts_with(keyword) | pl.col(
+        "symbol"
+    ).str.to_uppercase().str.starts_with(keyword)
     contains_mask = (
         pl.col("code").str.contains(keyword, literal=True)
         | pl.col("symbol").str.to_uppercase().str.contains(keyword, literal=True)
@@ -158,7 +174,8 @@ def search_instruments(
                 collected.append(contain_hits)
 
         matched = (
-            pl.concat(collected, how="vertical") if len(collected) > 1
+            pl.concat(collected, how="vertical")
+            if len(collected) > 1
             else (collected[0] if collected else df.head(0))
         )
     rows = matched.select(["symbol", "name", "code", "asset_type"]).to_dicts()
@@ -182,6 +199,7 @@ def _get_stock_info(repo, symbol: str) -> dict:
     DuckDB 扫 instruments parquet。列缺失时返回空 dict, 与旧 SQL 报错路径一致。
     """
     import polars as pl
+
     try:
         df = repo.get_instruments()
         needed = ("symbol", "name", "total_shares", "float_shares")
@@ -202,6 +220,7 @@ def _get_stock_info(repo, symbol: str) -> dict:
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
     """非股票标的 (ETF / 指数) 的名称信息 — 从对应 instruments 缓存查, 无股本概念。"""
     import polars as pl
+
     try:
         df = repo.get_instruments_asset(asset_type)
         if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
@@ -229,9 +248,7 @@ def _get_price_limit_info(
         "rate": price_limit_pct(
             symbol,
             trade_date,
-            is_risk_warning=(
-                asset_type == "stock" and is_risk_warning_name(instrument_name)
-            ),
+            is_risk_warning=(asset_type == "stock" and is_risk_warning_name(instrument_name)),
         ),
         "limit_up": None,
         "limit_down": None,
@@ -324,6 +341,10 @@ def get_daily(
     start_date: Optional[str] = Query(None, description="起始日期 YYYY-MM-DD, 优先于 days"),
     end_date: Optional[str] = Query(None, description="截止日期 YYYY-MM-DD, 默认今天"),
     ext_columns: Optional[str] = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
+    indicators: Optional[str] = Query(
+        None,
+        description="逗号分隔的派生指标: trend_dragon,capital_momentum (解密公式, 按需计算)",
+    ),
 ):
     """读取本地 enriched 表中某只股票的日 K。
 
@@ -331,6 +352,8 @@ def get_daily(
     - Free 用户: 若 enriched 表里没有该股票, 实时拉取 + 本地算 enriched 返回
     - ext_columns: 可选，动态 LEFT JOIN 扩展数据表，结果平铺到 stock_info.ext 下
       (key 为 "{config_id}__{field_name}")，供日K信息条等场景展示自定义字段
+    - indicators: 可选，为每根 K 线附加解密公式结果 (趋势擒龙/资金动能)，
+      在实时蜡烛注入之后计算，保证与图上最后一根 K 线一致
     """
     import polars as pl
 
@@ -342,7 +365,11 @@ def get_daily(
         start = end - timedelta(days=days)
 
     asset_type = repo.resolve_asset_type(symbol)
-    stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
     stock_name = stock_info.get("name")
 
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
@@ -360,6 +387,7 @@ def get_daily(
         capset = getattr(request.app.state, "capabilities", None)
         try:
             from app.tickflow.capabilities import Cap
+
             if capset and capset.has(Cap.ADJ_FACTOR):
                 factors = kline_sync.fetch_adj_factor_single(symbol)
         except Exception as e:  # noqa: BLE001
@@ -368,7 +396,14 @@ def get_daily(
         rows = enriched.tail(days).to_dicts()
         # 即使 live 模式也尝试追加实时蜡烛
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
-        resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
+        resp = {
+            "symbol": symbol,
+            "name": stock_name,
+            "stock_info": stock_info,
+            "rows": rows,
+            "source": "live",
+        }
+        resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
         return _attach_ext(resp, repo, symbol, ext_columns)
 
     rows = df.to_dicts()
@@ -376,7 +411,14 @@ def get_daily(
     # 追加/覆盖今日实时蜡烛
     rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
 
-    resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "enriched"}
+    resp = {
+        "symbol": symbol,
+        "name": stock_name,
+        "stock_info": stock_info,
+        "rows": rows,
+        "source": "enriched",
+    }
+    resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
     return _attach_ext(resp, repo, symbol, ext_columns)
 
 
@@ -404,6 +446,7 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
 
     try:
         from app.api.screener import _load_ext_value_maps
+
         value_maps = _load_ext_value_maps(repo, ext_columns)
     except Exception:  # noqa: BLE001
         value_maps = {}
@@ -420,7 +463,189 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     return resp
 
 
-def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], asset_type: str = "stock") -> list[dict]:
+# ===== 解密公式派生指标 (按需计算, 不落盘) =====
+
+# 资金动能的「对应指数」口径与源脚本一致: 沪市用上证指数, 深市用深证成指
+_BENCHMARK_INDEX_BY_EXCHANGE = {
+    "SH": "000001.SH",
+    "SZ": "399001.SZ",
+    "BJ": "899050.BJ",
+}
+_DEFAULT_BENCHMARK_INDEX = "000001.SH"
+
+# 已实现的指标 key; 未知 key 静默忽略, 便于前端渐进接入
+_SUPPORTED_INDICATORS = frozenset({"trend_dragon", "capital_momentum"})
+
+# 指标预热天数: 52 日均量/BARSLAST 链/MA10 都需要前置窗口, 多取一段再回填
+_INDICATOR_WARMUP_DAYS = 180
+
+
+def _date_key(value: object) -> str:
+    """把 date/datetime/字符串统一成 YYYY-MM-DD, 用于跨表按日对齐。"""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value)[:10]
+
+
+def _as_float(value: object) -> float:
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return math.nan
+    return numeric if math.isfinite(numeric) else math.nan
+
+
+def _benchmark_index_symbol(symbol: str) -> str:
+    exchange = symbol.partition(".")[2].upper()
+    return _BENCHMARK_INDEX_BY_EXCHANGE.get(exchange, _DEFAULT_BENCHMARK_INDEX)
+
+
+def _attach_indicators(
+    request: Request,
+    repo,
+    resp: dict,
+    symbol: str,
+    indicators: Optional[str],
+    start: date,
+    end: date,
+    asset_type: str = "stock",
+) -> dict:
+    """为 rows 逐根附加解密公式结果 (原地写入并返回 resp)。
+
+    - trend_dragon: ``td_signal`` (bool) / ``td_a3`` (int|null)
+    - capital_momentum: ``cm_value`` (float|null, 与源脚本同口径, 已乘 10)
+
+    两个指标都有前置窗口依赖 (MA10 / 52 日均值 / BARSLAST 链), 因此计算时
+    额外向前多取 ``_INDICATOR_WARMUP_DAYS`` 天历史, 算完再按日期回填到
+    请求区间 —— 否则用户把区间缩到一两个月时, 前段数值会整体失真。
+    资金动能沿用源脚本口径: 先取个股与指数都有数据的交易日, 再滚动 52 根;
+    不足 52 根时该段为 null。
+    """
+    keys = {k.strip() for k in (indicators or "").split(",") if k.strip()} & _SUPPORTED_INDICATORS
+    rows = resp.get("rows") or []
+    if not keys or not rows:
+        return resp
+
+    import numpy as np
+
+    from app.indicators.formula_signals import (
+        CAPITAL_MOMENTUM_WINDOW,
+        capital_momentum,
+        trend_dragon,
+    )
+
+    today_key = cn_today().isoformat()
+    warmup_start = start - timedelta(days=_INDICATOR_WARMUP_DAYS)
+
+    # 逐日 OHLC: 先用仓库里的长历史打底, 再用请求区间内的行覆盖 (含今日实时蜡烛)
+    history: dict[str, dict] = {}
+    try:
+        hist_df = repo.get_daily_asset(
+            asset_type, symbol, warmup_start, end, columns=["date", "open", "high", "low", "close"]
+        )
+        for record in hist_df.iter_rows(named=True):
+            history[_date_key(record.get("date"))] = record
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("指标预热取历史 %s 失败: %s", symbol, exc)
+
+    for row in rows:
+        history[_date_key(row.get("date"))] = row
+
+    if "trend_dragon" in keys:
+        ordered = sorted(history.items())
+        if len(ordered) >= 20:
+            signal, a3 = trend_dragon(
+                np.array([_as_float(r.get("open")) for _, r in ordered], dtype=np.float64),
+                np.array([_as_float(r.get("high")) for _, r in ordered], dtype=np.float64),
+                np.array([_as_float(r.get("low")) for _, r in ordered], dtype=np.float64),
+                np.array([_as_float(r.get("close")) for _, r in ordered], dtype=np.float64),
+            )
+            by_date = {
+                day: (bool(hit), int(bars) if bars >= 0 else None)
+                for (day, _), hit, bars in zip(ordered, signal, a3, strict=False)
+            }
+            for row in rows:
+                hit, bars = by_date.get(_date_key(row.get("date")), (False, None))
+                row["td_signal"] = hit
+                row["td_a3"] = bars
+
+    if "capital_momentum" in keys:
+        index_symbol = _benchmark_index_symbol(symbol)
+        index_map: dict[str, float] = {}
+        try:
+            index_df = repo.get_daily_asset(
+                "index", index_symbol, warmup_start, end, columns=["date", "close"]
+            )
+            if not index_df.is_empty():
+                index_map = {
+                    _date_key(d): float(c)
+                    for d, c in index_df.select(["date", "close"]).iter_rows()
+                    if c is not None and math.isfinite(float(c)) and float(c) > 0
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("资金动能取指数 %s 失败: %s", index_symbol, exc)
+
+        # 指数 parquet 通常落后一个交易日; 若个股已有今日蜡烛, 用实时指数补上,
+        # 否则最后一根 K 线的资金动能会凭空缺失 (盘中图看起来"断了")。
+        _inject_live_index_close(request, index_map, index_symbol, rows, today_key)
+
+        stock_close = (
+            {day: _as_float(record.get("close")) for day, record in history.items()}
+            if history
+            else {_date_key(row.get("date")): _as_float(row.get("close")) for row in rows}
+        )
+
+        # 双方都有数据的交易日 (inner join), 与源脚本一致
+        common = sorted(day for day in stock_close if day in index_map)
+        momentum_by_date: dict[str, float] = {}
+        if len(common) >= CAPITAL_MOMENTUM_WINDOW:
+            momentum = capital_momentum(
+                np.array([stock_close[day] for day in common], dtype=np.float64),
+                np.array([index_map[day] for day in common], dtype=np.float64),
+            )
+            momentum_by_date = dict(zip(common, momentum, strict=False))
+
+        for row in rows:
+            value = momentum_by_date.get(_date_key(row.get("date")), math.nan)
+            row["cm_value"] = round(float(value), 4) if math.isfinite(float(value)) else None
+
+    return resp
+
+
+def _inject_live_index_close(
+    request: Request,
+    index_map: dict[str, float],
+    index_symbol: str,
+    rows: list[dict],
+    today_key: str,
+) -> None:
+    """若个股末根 K 线是今天且指数序列缺今天, 用实时指数价补齐 (原地更新 index_map)。
+
+    只在指数确实落后时补; 指数 parquet 已有今天数据时不动, 保证口径优先级:
+    落盘数据 > 实时快照。
+    """
+    if today_key in index_map:
+        return
+    if not any(_date_key(row.get("date")) == today_key for row in rows):
+        return
+    quote_service = getattr(request.app.state, "quote_service", None)
+    if quote_service is None:
+        return
+    try:
+        quotes = quote_service.get_index_quotes([index_symbol])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取实时指数 %s 失败: %s", index_symbol, exc)
+        return
+    if quotes.is_empty() or "last_price" not in quotes.columns:
+        return
+    price = _as_float(quotes["last_price"][0])
+    if math.isfinite(price) and price > 0:
+        index_map[today_key] = price
+
+
+def _maybe_inject_live_candle(
+    request: Request, symbol: str, rows: list[dict], asset_type: str = "stock"
+) -> list[dict]:
     """如果有当日实时 enriched 数据, 用实时数据生成今日蜡烛并追加/覆盖。
 
     stock 走 QuoteService 的股票实时缓存; etf 走 ETF enriched 缓存 (开启实时 ETF
@@ -444,6 +669,7 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
 
     # 查找该 symbol 的实时 enriched 行
     import polars as pl
+
     try:
         q = df_today.filter(pl.col("symbol") == symbol).to_dicts()
         if not q:
@@ -476,12 +702,26 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
         "is_live": True,
     }
     # 补上 enriched 的技术指标字段
-    for key in ("ma5", "ma10", "ma20", "ma30", "ma60",
-                "macd_dif", "macd_dea", "macd_hist",
-                "kdj_k", "kdj_d", "kdj_j",
-                "boll_upper", "boll_lower",
-                "rsi_6", "rsi_14", "rsi_24",
-                "atr_14", "vol_ratio_5d"):
+    for key in (
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma30",
+        "ma60",
+        "macd_dif",
+        "macd_dea",
+        "macd_hist",
+        "kdj_k",
+        "kdj_d",
+        "kdj_j",
+        "boll_upper",
+        "boll_lower",
+        "rsi_6",
+        "rsi_14",
+        "rsi_24",
+        "atr_14",
+        "vol_ratio_5d",
+    ):
         if key in q and q[key] is not None:
             live_row[key] = q[key]
 
@@ -501,6 +741,7 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
 
 class DailyBatchRequest:
     """批量日K请求。"""
+
     symbols: list[str]
     days: int = 12
 
@@ -748,9 +989,7 @@ def get_minute_range(
     previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
     row_columns = [
         column
-        for column in (
-            "datetime", "open", "high", "low", "close", "volume", "amount"
-        )
+        for column in ("datetime", "open", "high", "low", "close", "volume", "amount")
         if column in minute.columns
     ]
     sessions = []
@@ -762,11 +1001,13 @@ def get_minute_range(
             .to_dicts()
         )
         if rows:
-            sessions.append({
-                "date": trade_date.isoformat(),
-                "prev_close": previous_closes.get(trade_date),
-                "rows": rows,
-            })
+            sessions.append(
+                {
+                    "date": trade_date.isoformat(),
+                    "prev_close": previous_closes.get(trade_date),
+                    "rows": rows,
+                }
+            )
 
     return {
         **base_response,
@@ -788,7 +1029,11 @@ def get_minute(
     """
     repo = request.app.state.repo
     asset_type = repo.resolve_asset_type(symbol)
-    stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
     stock_name = stock_info.get("name")
 
     if trade_date is None:
@@ -815,24 +1060,42 @@ def get_minute(
         trade_date = cn_today()
         df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
         price_limit = _get_price_limit_info(
-            repo, symbol, trade_date, asset_type, stock_name,
+            repo,
+            symbol,
+            trade_date,
+            asset_type,
+            stock_name,
         )
         prev_close = _get_previous_closes(
-            repo, symbol, [trade_date], asset_type,
+            repo,
+            symbol,
+            [trade_date],
+            asset_type,
         ).get(trade_date)
         return {
-            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
+            "symbol": symbol,
+            "name": stock_name,
+            "stock_info": stock_info,
+            "date": str(trade_date),
+            "rows": df.to_dicts(),
+            "source": "live",
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
         }
 
     prev_close = _get_previous_closes(
-        repo, symbol, [trade_date], asset_type,
+        repo,
+        symbol,
+        [trade_date],
+        asset_type,
     ).get(trade_date)
     price_limit = _get_price_limit_info(
-        repo, symbol, trade_date, asset_type, stock_name,
+        repo,
+        symbol,
+        trade_date,
+        asset_type,
+        stock_name,
     )
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
@@ -857,8 +1120,12 @@ def get_minute(
 
     if is_complete:
         return {
-            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
+            "symbol": symbol,
+            "name": stock_name,
+            "stock_info": stock_info,
+            "date": str(trade_date),
+            "rows": df.to_dicts(),
+            "source": "local",
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
@@ -867,8 +1134,11 @@ def get_minute(
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
     live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
     return {
-        "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-        "date": str(trade_date), "rows": live_df.to_dicts(),
+        "symbol": symbol,
+        "name": stock_name,
+        "stock_info": stock_info,
+        "date": str(trade_date),
+        "rows": live_df.to_dicts(),
         "source": "live" if not live_df.is_empty() else "none",
         "asset_type": asset_type,
         "price_limit": price_limit,
@@ -905,6 +1175,7 @@ def sync_batch(
 def refresh_views(request: Request):
     """刷新所有 DuckDB 视图(解决视图状态不一致问题)。"""
     from app.jobs.daily_pipeline import _refresh_views
+
     repo = request.app.state.repo
     _refresh_views(repo)
     return {"status": "ok"}
@@ -918,7 +1189,12 @@ async def sync_minute(request: Request):
     """
     import asyncio
 
-    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+    from app.services.pipeline_jobs import (
+        JobCancelledError,
+        job_store,
+        release_run_slot,
+        try_acquire_run_slot,
+    )
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
@@ -963,6 +1239,7 @@ async def sync_minute(request: Request):
             if inst_path.exists():
                 try:
                     import polars as pl
+
                     inst = pl.read_parquet(inst_path, columns=["symbol"])
                     universe = sorted(set(universe) | set(inst["symbol"].to_list()))
                 except Exception:  # noqa: BLE001
@@ -983,7 +1260,10 @@ async def sync_minute(request: Request):
 
             def _run():
                 return kline_sync.sync_and_persist_minute(
-                    universe, repo, capset, days=days,
+                    universe,
+                    repo,
+                    capset,
+                    days=days,
                     extend_backward=extend_backward,
                     on_chunk_done=_on_chunk,
                 )
@@ -992,6 +1272,7 @@ async def sync_minute(request: Request):
 
             # 刷新视图
             from app.jobs.daily_pipeline import _refresh_single_view
+
             _refresh_single_view(repo, "kline_minute")
 
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
@@ -1038,7 +1319,10 @@ async def sync_minute_single(request: Request, body: dict):
     # 指数分钟K无本地存储, 落库会污染股票分钟表 kline_minute;
     # 指数分钟数据走 /api/index/minute 实时读取, 此端点显式拒绝。
     if repo.resolve_asset_type(symbol) == "index":
-        raise HTTPException(status_code=400, detail="指数分钟K不支持落库同步 (指数分钟数据走 /api/index/minute 实时读取)")
+        raise HTTPException(
+            status_code=400,
+            detail="指数分钟K不支持落库同步 (指数分钟数据走 /api/index/minute 实时读取)",
+        )
 
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
@@ -1047,12 +1331,15 @@ async def sync_minute_single(request: Request, body: dict):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
+        return kline_sync.sync_and_persist_minute(
+            [symbol], repo, capset, days=days, force_full_days=True
+        )
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 
     # 刷新视图
     from app.jobs.daily_pipeline import _refresh_single_view
+
     _refresh_single_view(repo, "kline_minute")
 
     return {"status": "ok", "symbol": symbol, "rows": written}
@@ -1087,9 +1374,11 @@ async def clear_minute(request: Request):
 
     # 刷新视图 (重建空视图)
     from app.jobs.daily_pipeline import _refresh_single_view
+
     _refresh_single_view(repo, "kline_minute")
 
     from app.api.data import invalidate_storage_cache
+
     invalidate_storage_cache()
 
     logger.info("minute K cleared: %d rows removed", removed)
@@ -1105,6 +1394,7 @@ async def extend_history(request: Request):
     """
     import asyncio
     import traceback as _tb
+
     try:
         body = await request.json()
         value = body.get("value")
@@ -1118,11 +1408,17 @@ async def extend_history(request: Request):
         capset = request.app.state.capabilities
 
         from app.tickflow.capabilities import Cap
+
         if not capset.has(Cap.KLINE_DAILY_BATCH):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import (
+            JobCancelledError,
+            job_store,
+            release_run_slot,
+            try_acquire_run_slot,
+        )
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1135,10 +1431,10 @@ async def extend_history(request: Request):
                 return
             loop = asyncio.get_event_loop()
 
-            def progress(stage: str, pct: int, msg: str,
-                         stage_pct: int | None = None, skip_log: bool = False) -> None:
-                job_store.progress(job_id, stage, pct, msg,
-                                   stage_pct=stage_pct, skip_log=skip_log)
+            def progress(
+                stage: str, pct: int, msg: str, stage_pct: int | None = None, skip_log: bool = False
+            ) -> None:
+                job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
             try:
                 job_store.start(job_id)
@@ -1183,6 +1479,7 @@ async def repair_daily(request: Request):
     import asyncio
     import traceback as _tb
     from datetime import date as _date
+
     try:
         body = await request.json()
         raw = body.get("start_date")
@@ -1200,11 +1497,17 @@ async def repair_daily(request: Request):
         capset = request.app.state.capabilities
 
         from app.tickflow.capabilities import Cap
+
         if not capset.has(Cap.KLINE_DAILY_BATCH):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.repair_daily import run_repair_daily
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import (
+            JobCancelledError,
+            job_store,
+            release_run_slot,
+            try_acquire_run_slot,
+        )
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1218,10 +1521,10 @@ async def repair_daily(request: Request):
             loop = asyncio.get_event_loop()
             qs = getattr(request.app.state, "quote_service", None)
 
-            def progress(stage: str, pct: int, msg: str,
-                         stage_pct: int | None = None, skip_log: bool = False) -> None:
-                job_store.progress(job_id, stage, pct, msg,
-                                   stage_pct=stage_pct, skip_log=skip_log)
+            def progress(
+                stage: str, pct: int, msg: str, stage_pct: int | None = None, skip_log: bool = False
+            ) -> None:
+                job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
             def _run() -> dict:
                 # 修正运行期间暂停实时行情, 防止覆写同一批 parquet 竞态
@@ -1264,10 +1567,16 @@ async def rebuild_enriched(request: Request):
     返回 job_id,可轮询 /api/pipeline/jobs 查看进度。
     """
     import asyncio
+
     try:
         repo = request.app.state.repo
 
-        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import (
+            JobCancelledError,
+            job_store,
+            release_run_slot,
+            try_acquire_run_slot,
+        )
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1280,10 +1589,10 @@ async def rebuild_enriched(request: Request):
                 return
             loop = asyncio.get_event_loop()
 
-            def progress(stage: str, pct: int, msg: str,
-                         stage_pct: int | None = None, skip_log: bool = False) -> None:
-                job_store.progress(job_id, stage, pct, msg,
-                                   stage_pct=stage_pct, skip_log=skip_log)
+            def progress(
+                stage: str, pct: int, msg: str, stage_pct: int | None = None, skip_log: bool = False
+            ) -> None:
+                job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
 
             try:
                 job_store.start(job_id)
@@ -1292,9 +1601,13 @@ async def rebuild_enriched(request: Request):
 
                 def _batch_progress(cur: int, tot: int) -> None:
                     pct = 10 + int(85 * cur / tot)
-                    progress("rebuild_enriched", pct,
-                             f"计算指标 批次 {cur}/{tot}",
-                             stage_pct=int(100 * cur / tot), skip_log=True)
+                    progress(
+                        "rebuild_enriched",
+                        pct,
+                        f"计算指标 批次 {cur}/{tot}",
+                        stage_pct=int(100 * cur / tot),
+                        skip_log=True,
+                    )
 
                 written = await loop.run_in_executor(
                     _long_task_executor,
@@ -1302,7 +1615,9 @@ async def rebuild_enriched(request: Request):
                 )
 
                 enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-                enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+                enriched_days = (
+                    len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+                )
 
                 # 刷新视图
                 d = repo.store.data_dir.as_posix()
@@ -1318,10 +1633,13 @@ async def rebuild_enriched(request: Request):
                         pass
 
                 progress("rebuild_enriched", 100, f"完成,覆盖 {enriched_days} 天")
-                job_store.succeed(job_id, {
-                    "enriched_days": enriched_days,
-                    "enriched_rows": written,
-                })
+                job_store.succeed(
+                    job_id,
+                    {
+                        "enriched_days": enriched_days,
+                        "enriched_rows": written,
+                    },
+                )
                 invalidate_storage_cache()
             except JobCancelledError:
                 # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
@@ -1337,10 +1655,12 @@ async def rebuild_enriched(request: Request):
         return {"status": "started", "job_id": job_id}
     except Exception as e:
         import traceback as _tb
+
         logger.error("rebuild_enriched error: %s\n%s", e, _tb.format_exc())
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
 import concurrent.futures as _cf
+
 _long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")
