@@ -3395,6 +3395,142 @@ def valid_rolling_max(
     )
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _valid_rolling_at_kernel(
+    source: np.ndarray,
+    windows: np.ndarray,
+    valid: np.ndarray,
+    offsets: np.ndarray,
+    rows: np.ndarray,
+    operation: int,
+) -> np.ndarray:
+    out = np.full(source.shape, np.nan, dtype=np.float32)
+    for asset_id in prange(source.shape[1]):
+        start = int(offsets[asset_id])
+        stop = int(offsets[asset_id + 1])
+        for position in range(start, stop):
+            row = int(rows[position])
+            if not valid[row, asset_id]:
+                continue
+            width_value = windows[row, asset_id]
+            if not np.isfinite(width_value):
+                continue
+            width = int(width_value)
+            if width <= 0 or np.float32(width) != width_value:
+                continue
+            first = position - width + 1
+            if first < start:
+                continue
+            result = source[int(rows[position]), asset_id]
+            for offset in range(1, width):
+                candidate = source[int(rows[position - offset]), asset_id]
+                if operation == _VALID_REDUCE_MIN:
+                    if candidate < result:
+                        result = candidate
+                elif candidate > result:
+                    result = candidate
+            out[row, asset_id] = result
+    return out
+
+
+def _valid_rolling_reduce_at(
+    values: np.ndarray,
+    windows: np.ndarray,
+    valid_mask: np.ndarray,
+    operation: int,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    source = np.asarray(values, dtype=np.float32)
+    widths = np.asarray(windows, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool)
+    if source.ndim != 2 or valid.shape != source.shape:
+        raise ValueError("valid rolling inputs must be matching 2D arrays")
+    if widths.shape != source.shape:
+        raise ValueError("valid rolling_at windows must match values")
+    index = _resolve_valid_bar_index(source, valid, bar_index)
+    return run_numba_parallel(
+        lambda: _valid_rolling_at_kernel(
+            source,
+            widths,
+            valid,
+            index.offsets,
+            index.rows,
+            int(operation),
+        )
+    )
+
+
+def valid_rolling_min_at(
+    values: np.ndarray,
+    windows: np.ndarray | int,
+    valid_mask: np.ndarray,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``LLV(X, N)`` 的变长版本 —— ``N`` 逐 bar 可变 (取自另一条指标序列)。
+
+    通达信公式里 ``LLV`` 的窗口经常本身是个指标 (例如底部结构的
+    ``LLV(CLOSE, N1 + 1)``: N1 = BARSLAST(死叉), 死叉当天窗口为 1 并逐日变宽),
+    固定窗口的 :func:`valid_rolling_min` 表达不了。窗口单位同为**有效 bar**。
+
+    窗口 <= 0、非整数、NaN、或历史有效 bar 不足窗口宽度一律输出 ``NaN`` ——
+    既不引入未来数据, 也不拿残缺窗口凑数。
+
+    ``windows`` 为标量时退化成 :func:`valid_rolling_min` (固定窗口)。
+    """
+    source = np.asarray(values, dtype=np.float32)
+    widths = np.asarray(windows, dtype=np.float32)
+    if widths.ndim == 0:
+        return valid_rolling_min(source, valid_mask, int(widths), bar_index=bar_index)
+    if widths.shape != source.shape:
+        raise ValueError("valid rolling_at windows shape does not match values")
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
+    index = _resolve_valid_bar_index(source, valid, bar_index)
+    return _cached_matrix_operation(
+        "valid_rolling_min_at",
+        (source, widths, valid, index.offsets, index.rows),
+        {},
+        lambda: _valid_rolling_reduce_at(
+            source,
+            widths,
+            valid,
+            _VALID_REDUCE_MIN,
+            bar_index=index,
+        ),
+    )
+
+
+def valid_rolling_max_at(
+    values: np.ndarray,
+    windows: np.ndarray | int,
+    valid_mask: np.ndarray,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``HHV(X, N)`` 的变长版本, 语义与 :func:`valid_rolling_min_at` 完全对称。"""
+    source = np.asarray(values, dtype=np.float32)
+    widths = np.asarray(windows, dtype=np.float32)
+    if widths.ndim == 0:
+        return valid_rolling_max(source, valid_mask, int(widths), bar_index=bar_index)
+    if widths.shape != source.shape:
+        raise ValueError("valid rolling_at windows shape does not match values")
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
+    index = _resolve_valid_bar_index(source, valid, bar_index)
+    return _cached_matrix_operation(
+        "valid_rolling_max_at",
+        (source, widths, valid, index.offsets, index.rows),
+        {},
+        lambda: _valid_rolling_reduce_at(
+            source,
+            widths,
+            valid,
+            _VALID_REDUCE_MAX,
+            bar_index=index,
+        ),
+    )
+
+
 def valid_rolling_mean(
     values: np.ndarray,
     valid_mask: np.ndarray,

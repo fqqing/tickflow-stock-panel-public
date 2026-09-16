@@ -157,6 +157,87 @@ def test_valid_shift_at_rejects_mismatched_period_shape():
         valid_shift_at(values, np.zeros((3, 1), dtype=np.float32))
 
 
+def test_valid_rolling_min_at_uses_effective_bar_windows():
+    """变长 LLV: 窗口宽度以有效 bar 计, 停牌行不占位置。"""
+    from app.backtest.matrix import valid_rolling_min_at
+
+    values = np.array([[10.0], [8.0], [6.0], [12.0], [9.0], [7.0]])
+    mask = np.zeros((6, 1), dtype=bool)
+    mask[[0, 1, 4, 5], 0] = True  # 有效 bar = row [0, 1, 4, 5], 取值 10/8/9/7
+    # row 2/3 是停牌行, 其窗口被忽略
+    windows = np.array([[2.0], [2.0], [np.nan], [np.nan], [1.0], [3.0]])
+
+    actual = valid_rolling_min_at(values, windows, mask)[:, 0]
+    assert np.isnan(actual[0]), "位置 0 只有 1 根有效 bar, 窗口 2 应判无效"
+    assert actual[1] == 8.0  # 位置 1 窗口 2 -> min(10, 8)
+    assert actual[4] == 9.0  # 位置 2 窗口 1 -> 自身
+    assert actual[5] == 7.0  # 位置 3 窗口 3 -> min(8, 9, 7), 停牌行不占位置
+    assert np.isnan(actual[2:4]).all()
+
+
+def test_valid_rolling_max_at_mirrors_min_variant():
+    from app.backtest.matrix import valid_rolling_max_at
+
+    values = np.array([[10.0], [8.0], [6.0], [12.0], [9.0], [7.0]])
+    mask = np.zeros((6, 1), dtype=bool)
+    mask[[0, 1, 4, 5], 0] = True
+    windows = np.array([[2.0], [2.0], [np.nan], [np.nan], [1.0], [3.0]])
+
+    actual = valid_rolling_max_at(values, windows, mask)[:, 0]
+    assert actual[1] == 10.0  # min(10, 8) 的镜像 -> max(10, 8)
+    assert actual[4] == 9.0
+    assert actual[5] == 9.0  # max(8, 9, 7)
+
+
+def test_valid_rolling_at_rejects_invalid_windows():
+    """窗口 <= 0 / 非整数 / NaN / 超过历史长度一律输出 NaN, 不拿残窗凑数。"""
+    from app.backtest.matrix import valid_rolling_max_at, valid_rolling_min_at
+
+    values = np.arange(1, 7, dtype=np.float32).reshape(6, 1)
+    mask = np.ones((6, 1), dtype=bool)
+    windows = np.array([[0.0], [-2.0], [np.nan], [2.5], [99.0], [2.0]])
+
+    actual = valid_rolling_min_at(values, windows, mask)[:, 0]
+    assert np.isnan(actual[:5]).all()
+    assert actual[5] == 5.0  # 窗口 2 -> min(5, 6)
+
+    mirrored = valid_rolling_max_at(values, windows, mask)[:, 0]
+    assert np.isnan(mirrored[:5]).all()
+    assert mirrored[5] == 6.0
+
+
+def test_valid_rolling_at_scalar_window_matches_fixed_variant():
+    from app.backtest.matrix import (
+        valid_rolling_max,
+        valid_rolling_max_at,
+        valid_rolling_min,
+        valid_rolling_min_at,
+    )
+
+    values = np.arange(10, dtype=np.float32).reshape(10, 1)
+    mask = np.ones((10, 1), dtype=bool)
+
+    np.testing.assert_array_equal(
+        valid_rolling_min_at(values, 3, mask),
+        valid_rolling_min(values, mask, 3),
+    )
+    np.testing.assert_array_equal(
+        valid_rolling_max_at(values, 3, mask),
+        valid_rolling_max(values, mask, 3),
+    )
+
+
+def test_valid_rolling_at_rejects_mismatched_window_shape():
+    from app.backtest.matrix import valid_rolling_max_at, valid_rolling_min_at
+
+    values = np.arange(6, dtype=np.float32).reshape(6, 1)
+    mask = np.ones((6, 1), dtype=bool)
+    with pytest.raises(ValueError, match="windows shape"):
+        valid_rolling_min_at(values, np.zeros((3, 1), dtype=np.float32), mask)
+    with pytest.raises(ValueError, match="windows shape"):
+        valid_rolling_max_at(values, np.zeros((3, 1), dtype=np.float32), mask)
+
+
 # --------------------------------------------------------------------------
 # 「向上趋势并突破」= 源通达信公式的矩阵原生实现, 逐位对拍
 # --------------------------------------------------------------------------
