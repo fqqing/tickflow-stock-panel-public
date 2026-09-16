@@ -19,9 +19,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.indicators.pipeline import run_pipeline, run_pipeline_market
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.indicators.pipeline import run_pipeline, run_pipeline_market
+from app.services import (
+    index_sync,
+    industry_sync,
+    instrument_sync,
+    kline_sync,
+    preferences as _prefs,
+)
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -201,6 +207,18 @@ def run_now(
         _refresh_instruments_view(repo)
     emit("sync_instruments", 8, f"个股维表同步完成,{inst_rows} 只标的")
     _invalidate("instruments")
+
+    # Step 0.1: 行业归属维表(行业中性化的前置依赖)。
+    # 变化慢 + 抓取贵(约 500 次请求), 故服务内部按 INDUSTRY_REFRESH_DAYS 新鲜度跳过,
+    # 通常这里是 no-op。失败**不**计入 stage_errors: 该表目前尚无消费方, 让新增的可选
+    # 环节把整条管道判为 failed 是过度的; 一旦中性化上线应改为计入。
+    try:
+        industry_rows = industry_sync.sync_industry_members(repo.store.data_dir)
+        if industry_rows > 0:
+            emit("sync_industries", 8, f"行业归属同步完成,{industry_rows} 条关系")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("行业归属同步失败(不影响管道): %s", e)
+        emit("sync_industries", 8, f"行业归属同步失败:{e}")
 
     emit("resolve_universe", 9, "解析标的池…")
     universe = _resolve_universe(capset, repo)
