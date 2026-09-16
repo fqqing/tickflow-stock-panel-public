@@ -48,7 +48,7 @@ def test_all_builtin_strategies_use_matrix_backend_only():
     engine = _engine()
     assert engine.load_errors() == []
     strategies = [engine.get(meta["id"]) for meta in engine.list_strategies()]
-    assert len(strategies) == 18
+    assert len(strategies) == 20
     assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
     assert all(strategy.matrix_strategy is not None for strategy in strategies)
     assert all(strategy.filter_fn is None for strategy in strategies)
@@ -100,7 +100,7 @@ def test_pure_technical_strategies_support_etf():
         "trend_breakout", "ma_golden_cross", "macd_golden",
         "volume_price_surge", "low_volatility_leader", "oversold_bounce",
         "boll_breakout", "bullish_alignment", "pullback_to_support",
-        "n_day_low_reversal",
+        "n_day_low_reversal", "upward_trend_breakout",
     ):
         assert "etf" in engine.get(sid).meta["asset_types"], sid
 

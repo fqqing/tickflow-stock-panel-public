@@ -16,8 +16,9 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
 
@@ -42,6 +43,7 @@ _SIGNAL_CN: dict[str, str] = {
     "signal_boll_breakdown_lower": "跌破布林下轨", "signal_volume_surge": "放量",
     "signal_limit_up": "涨停", "signal_limit_down": "跌停",
     "signal_limit_down_recovery": "跌停翘板", "signal_broken_limit_up": "炸板",
+    "signal_retest_breakout": "回调后再突破", "signal_startup_surge": "启动信号",
     **INTRADAY_SIGNAL_LABELS,
     # 行情字段
     "close": "收盘价", "open": "开盘价", "high": "最高价", "low": "最低价",
@@ -259,7 +261,7 @@ def _group_members_or_none(rule: dict) -> frozenset[str] | None:
     group_id = str(rule.get("group_id") or "")
     try:
         groups = _watchlist_groups_snapshot()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("自选分组数据读取失败, 规则 %s 本轮跳过: %s", rule.get("id"), exc)
         return None
     members = groups.get(group_id)
@@ -356,9 +358,9 @@ class MonitorRuleEngine:
         # 历史窗口加载器: (target_date, lookback_days) → 多日 enriched DataFrame。
         # 用于声明 filter_history 的策略 (如反包), 实时监控时拼历史窗口 + 今日行情跑选股。
         # 为 None 时, filter_history 策略仍会被跳过 (保持旧行为, 不破坏无历史场景)。
-        self._history_loader: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader: Callable[[_dt.date, int], pl.DataFrame] | None = None
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
-        self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader_etf: Callable[[_dt.date, int], pl.DataFrame] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
         # 本轮 evaluate() 产出的策略选股结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
@@ -740,7 +742,7 @@ class MonitorRuleEngine:
         for rule in rules:
             try:
                 events.extend(self._evaluate_sector_rule(rule, snapshots, timestamp))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("板块规则评估失败 %s: %s", rule.get("id"), exc)
         return events
 
@@ -814,7 +816,7 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(event)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("alert handler failed: %s", exc)
         return events
 
@@ -882,7 +884,7 @@ class MonitorRuleEngine:
         for rule in rules:
             try:
                 events.extend(self._evaluate_abnormal_rule(rule, rows, timestamp))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("异动规则评估失败 %s: %s", rule.get("id"), exc)
         return events
 
@@ -964,7 +966,7 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(event)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("alert handler failed: %s", exc)
         # 本轮未出现的标的 (跌出预过滤区间) 状态置 False 而非删除:
         # 删除会被当成「首轮观测」而不触发, 置 False 才能在回升穿过阈值时再次告警。
@@ -1237,7 +1239,7 @@ class MonitorRuleEngine:
                     ],
                 }
                 self._latest_strategy_result_ids.add(sid)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         score_min = rule.get("score_min")
@@ -1498,7 +1500,7 @@ class MonitorRuleEngine:
                 try:
                     s = self._strategy_engine.get(sid)
                     sname = s.meta.get("name", "") or s.meta.get("id", "")
-                except Exception:  # noqa: BLE001
+                except Exception:
                     sname = ""
             if not sname:
                 rn = rule.get("name", "")
