@@ -271,12 +271,27 @@ export interface WatchlistImportCandidate {
   already_in_watchlist: boolean
 }
 
+/** 文本/表格导入的解析布局元信息（用于「已识别第 N 列是代码」这类提示）。 */
+export interface WatchlistImportDetected {
+  delimiter: string
+  code_column: number | null
+  name_column: number | null
+  skipped_header: boolean
+  total_rows: number
+  used_rows: number
+  truncated: boolean
+  unmatched_inputs: string[]
+}
+
 export interface WatchlistImportResult {
   provider: string
   codes: string[]
   candidates: WatchlistImportCandidate[]
   matched_count: number
   unmatched_count: number
+  /** 仅文本/表格导入返回 */
+  source?: 'text' | 'file'
+  detected?: WatchlistImportDetected
 }
 
 export interface Quote {
@@ -2067,6 +2082,25 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     return request<WatchlistImportResult>('/api/watchlist/import-image', {
+      method: 'POST',
+      body: fd,
+      signal,
+      quiet,
+    })
+  },
+  /**
+   * 从粘贴文本（Excel 复制即 TSV）或 txt/csv/xlsx 文件导入自选。
+   * 与 watchlistImportImage 返回同构的候选列表，前端共用确认列表。
+   */
+  watchlistImportSource: (
+    source: { text?: string; file?: File },
+    signal?: AbortSignal,
+    quiet = false,
+  ) => {
+    const fd = new FormData()
+    if (source.text !== undefined) fd.append('text', source.text)
+    if (source.file) fd.append('file', source.file)
+    return request<WatchlistImportResult>('/api/watchlist/import-source', {
       method: 'POST',
       body: fd,
       signal,

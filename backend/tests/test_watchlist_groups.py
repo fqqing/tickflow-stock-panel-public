@@ -278,3 +278,69 @@ def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
     assert (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
     df = pl.read_parquet(path)
     assert "group_ids" in df.columns and "group_id" not in df.columns
+
+
+# ── 批量添加: 已在自选的标的并入分组 ──────────────────────────
+
+
+def test_batch_add_existing_symbol_joins_group_keeping_note(monkeypatch, tmp_path):
+    """导入「已在自选」的标的到某分组: 只并入分组, 不清空备注、不改首次添加时间。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, target = watchlist.create_group("我的分组")
+    watchlist.add("600000.SH", note="底仓")
+
+    before = next(r for r in watchlist.list_symbols() if r["symbol"] == "600000.SH")
+    assert before["group_ids"] == []
+
+    rows, added = watchlist.add_batch(["600000.SH"], group_id=target["id"])
+    after = next(r for r in rows if r["symbol"] == "600000.SH")
+
+    assert added == 0                                   # 不是净新增自选
+    assert after["group_ids"] == [target["id"]]          # 但确实并入了目标分组
+    assert after["note"] == "底仓"                        # 回归: 曾被静默清空
+    assert after["added_at"] == before["added_at"]       # 回归: 曾被重置为本次时间
+
+    # 幂等: 重复并入同一分组不产生重复标签
+    rows, _ = watchlist.add_batch(["600000.SH"], group_id=target["id"])
+    assert next(r for r in rows if r["symbol"] == "600000.SH")["group_ids"] == [target["id"]]
+
+    # 显式传入非空 note 时以新值为准
+    rows, _ = watchlist.add_batch(["600000.SH"], note="改过", group_id=target["id"])
+    assert next(r for r in rows if r["symbol"] == "600000.SH")["note"] == "改过"
+
+
+def test_batch_add_joins_existing_symbols_into_multiple_groups(monkeypatch, tmp_path):
+    """已在自选且已属其他分组的标的, 可再并入新分组(多组并存), 原分组不受影响。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    _, first = watchlist.create_group("原分组")
+    _, second = watchlist.create_group("我的分组")
+    watchlist.add("600000.SH", group_id=first["id"])
+
+    rows, added = watchlist.add_batch(["600000.SH"], group_id=second["id"])
+    got = next(r for r in rows if r["symbol"] == "600000.SH")
+    assert added == 0
+    assert got["group_ids"] == [first["id"], second["id"]]
+
+
+def test_batch_add_api_joins_existing_symbols(monkeypatch, tmp_path):
+    """API 契约: added 只计净新增, 已有标的走「并入分组」。"""
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    request = _request()
+    created = watchlist_api.create_group(
+        watchlist_api.GroupNameRequest(name="我的分组")
+    )
+    group_id = created["group"]["id"]
+    watchlist_api.add_one(watchlist_api.AddRequest(symbol="600000.SH"), request)
+
+    result = watchlist_api.add_batch(
+        watchlist_api.BatchAddRequest(
+            symbols=["600000.SH", "000001.SZ"],
+            group_id=group_id,
+        ),
+        request,
+    )
+
+    assert result["added"] == 1   # 只有 000001.SZ 是新自选
+    by_symbol = {row["symbol"]: row for row in result["symbols"]}
+    assert by_symbol["600000.SH"]["group_ids"] == [group_id]
+    assert by_symbol["000001.SZ"]["group_ids"] == [group_id]

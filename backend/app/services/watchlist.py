@@ -188,6 +188,10 @@ def add_batch(
 
     group_id 为可选的初始分组(如从某分组页添加时); 重复添加的标的保留
     既有全部分组, 仅在显式传入 group_id 且尚未属于该组时并入。
+
+    再次添加**已存在**的标的时保留其既有 note / added_at: 批量导入「已在自选」
+    的标的到某分组时, 只有分组关系发生变化, 不应清空用户备注或改写首次添加时间;
+    传入非空 note 时仍以新值为准。
     """
     with _LOCK:
         groups = _read_groups()
@@ -204,8 +208,9 @@ def add_batch(
                 gids.append(group_id)
             rows.insert(0, {
                 "symbol": symbol,
-                "added_at": datetime.utcnow().isoformat(timespec="seconds"),
-                "note": note,
+                "added_at": (existing or {}).get("added_at")
+                or datetime.utcnow().isoformat(timespec="seconds"),
+                "note": note or (existing or {}).get("note") or "",
                 "group_ids": gids,
             })
         out = pl.DataFrame(rows, schema=_ENTRY_SCHEMA) if rows else _empty_entries()

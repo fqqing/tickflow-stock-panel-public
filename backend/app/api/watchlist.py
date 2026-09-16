@@ -8,13 +8,14 @@ from datetime import date
 
 import anyio
 import polars as pl
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import watchlist
 from app.services.watchlist_ocr import import_watchlist_image
 from app.services.watchlist_ocr.provider import get_ocr_provider
+from app.services.watchlist_text_import import import_watchlist_file, import_watchlist_text
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ _IMPORT_IMAGE_TYPES = {
 }
 # OCR 独立并发上限：避免多张大图同时解码 + 多 Tesseract 子进程
 _OCR_LIMITER = anyio.CapacityLimiter(2)
+# 文本/表格解析独立并发上限：解析本身轻量，但会读主数据 parquet，限制同刻磁盘 IO
+_IMPORT_LIMITER = anyio.CapacityLimiter(4)
 
 
 class AddRequest(BaseModel):
@@ -192,6 +195,52 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
     # 响应不回传整段 raw_text（可能很长）；调试时可开 query，这里默认省略
     result.pop("raw_text", None)
     return result
+
+
+@router.post("/import-source")
+async def import_from_source(
+    request: Request,
+    text: str | None = Form(None),
+    file: UploadFile | None = File(None),
+):
+    """从粘贴文本或 txt / csv / xlsx 导入自选，返回候选列表（不自动写入自选）。
+
+    与 /import-image 产出完全一致的 candidates 结构，前端共用候选确认列表；
+    额外返回 detected 布局元信息（识别到的代码列 / 名称列 / 分隔符）供前端提示。
+    两者共用一套解析与主数据校验，因此图片、文本、表格三条入口行为一致。
+    """
+    data_dir = request.app.state.repo.store.data_dir
+    existing = {r["symbol"] for r in watchlist.list_symbols()}
+    filename = ((file.filename if file is not None else None) or "").strip()
+
+    if filename and file is not None:
+        data = await file.read()
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: import_watchlist_file(
+                    data, filename, data_dir, existing_symbols=existing
+                ),
+                limiter=_IMPORT_LIMITER,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            logger.exception("watchlist import-source (file) failed")
+            raise HTTPException(500, f"解析失败: {e}") from e
+
+    if text and text.strip():
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: import_watchlist_text(text, data_dir, existing_symbols=existing),
+                limiter=_IMPORT_LIMITER,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            logger.exception("watchlist import-source (text) failed")
+            raise HTTPException(500, f"解析失败: {e}") from e
+
+    raise HTTPException(400, "请粘贴内容或选择文件")
 
 
 @router.post("/{symbol}/top")

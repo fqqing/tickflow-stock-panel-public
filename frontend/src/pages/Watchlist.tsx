@@ -30,7 +30,6 @@ import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
 // 分时列开放排序 (StockDataTable 实例级白名单; 表头眼睛/刷新按钮已 stopPropagation)
 const INTRADAY_SORTABLE_KEYS = new Set(['intraday'])
-import { getOcrInstallHint } from '@/lib/ocrInstallHint'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
@@ -677,7 +676,6 @@ export function Watchlist() {
     setSelectedGroup(g)
   }, [searchParams])
   const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
-  const [ocrInstallHint, setOcrInstallHint] = useState('')
   const columnsLoaded = useRef(false)
 
   useEffect(() => {
@@ -688,16 +686,14 @@ export function Watchlist() {
 
   useEffect(() => {
     let cancelled = false
+    // 只用于入口按钮的提示文案：OCR 不可用时截图页会给出安装指引，
+    // 但粘贴/文件导入不依赖 OCR，故不再禁用入口。
     void api.watchlistOcrStatus().then(
       res => {
-        if (cancelled) return
-        setOcrAvailable(res.available)
-        if (!res.available) setOcrInstallHint(getOcrInstallHint())
+        if (!cancelled) setOcrAvailable(res.available)
       },
       () => {
-        if (cancelled) return
-        setOcrAvailable(false)
-        setOcrInstallHint(getOcrInstallHint())
+        if (!cancelled) setOcrAvailable(false)
       },
     )
     return () => {
@@ -1047,9 +1043,6 @@ export function Watchlist() {
     if (selectedGroup === 'ungrouped') return rowsWithGroup.filter(row => row.group_ids.length === 0)
     return rowsWithGroup.filter(row => row.group_ids.includes(selectedGroup))
   }, [groupBySymbol, rows, selectedGroup])
-  const activeGroup = activeGroupId
-    ? groups.find(group => group.id === activeGroupId)
-    : undefined
   const watchlistContentLoading = list.isLoading || (allSymbols.length > 0 && enriched.isLoading)
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
@@ -1322,16 +1315,12 @@ export function Watchlist() {
               memberPending={addGroupMember.isPending || removeGroupMember.isPending}
             />
             <button
-              onClick={() => {
-                if (ocrAvailable === false) return
-                setImportOpen(true)
-              }}
-              disabled={ocrAvailable === false}
-              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-elevated disabled:hover:text-secondary"
+              onClick={() => setImportOpen(true)}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
               title={
                 ocrAvailable === false
-                  ? ocrInstallHint || 'OCR 不可用，请先安装 Tesseract'
-                  : '从截图导入自选'
+                  ? '导入自选（截图需 OCR 引擎，粘贴与文件导入不受影响）'
+                  : '导入自选：截图 / 粘贴代码名称 / 导入表格'
               }
             >
               <ImagePlus className="h-4 w-4" />
@@ -1545,7 +1534,7 @@ export function Watchlist() {
             <EmptyState
               icon={Star}
               title="自选股为空"
-              hint="点击右上角搜索添加标的，或点击图片图标从券商自选截图批量导入。"
+              hint="点击右上角搜索添加标的，或点击图片图标导入自选（截图识别 / 粘贴代码或名称 / 导入表格文件）。"
             />
           ) : rowsInSelectedGroup.length === 0 ? (
             <EmptyState
@@ -1910,9 +1899,7 @@ export function Watchlist() {
       <WatchlistImportDialog
         open={importOpen}
         onClose={() => setImportOpen(false)}
-        groupId={activeGroupId}
-        groupName={activeGroup?.name}
-        groupColor={activeGroup?.color}
+        initialGroupId={activeGroupId}
       />
     </div>
   )
