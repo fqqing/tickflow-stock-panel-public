@@ -19,12 +19,35 @@
 「有效 bar (自动跳停牌日) + 前复权 OHLC」口径一致: REF / BARSLAST /
 BARSLASTCOUNT / HHV / MA 全部按有效 bar 计数, 停牌日不计入窗口。
 
-源脚本里另有两条基于事件研究的可选过滤, 这里只移植了乖离率那条:
+源脚本里另有两条基于事件研究的可选过滤, 这里都移植了:
 
 - ``--max-bias20`` (信号日收盘价相对 MA20 的乖离率上限) -> ``bias20_cap_pct``
-- ``--max-momentum`` (资金动能上限) **未移植**: 资金动能 = (C/INDEXC/MA52-1)*10,
-  需要给每只股票对齐一条基准指数序列, 回测矩阵里没有这一列 (面板只在个股
-  K 线接口按需算它)。要用这一条, 得先给矩阵加基准列, 属另一个改动。
+- ``--max-momentum`` (资金动能上限) -> ``use_momentum_filter`` + ``momentum_cap``
+
+资金动能口径 (源脚本 compute_capital_momentum):
+
+    A1 = C / INDEXC * 1e6            # INDEXC = 该股所属市场的基准指数收盘价
+    A2 = MA(A1, 52)                  # 52 个有效 bar
+    动能 = (A1 / A2 - 1) * 10         # 过滤: 动能 <= 上限 (事件研究推荐 0)
+
+``INDEXC`` 走矩阵计算特征 ``index_close`` (:mod:`app.backtest.benchmark`),
+按标的后缀取基准: SH -> 上证指数, SZ -> 深证成指, BJ -> 北证50。
+与源脚本的差异 (均为口径显式化, 非取舍):
+
+1. 源脚本按 ``market`` 取上证指数 / 深证成指, 北交所无对应分支; 这里按后缀映射,
+   北交所取北证50, 取不到时退上证指数。
+2. 源脚本在「个股日期 ∩ 指数日期」的交集上算 52 日均值; 这里按有效 bar 语义
+   (停牌日既不计入也不打断), 指数停牌与个股停牌口径一致。
+3. **指数当天缺数据时前向沿用最近一根**: 源脚本的 inner join 会把「最后一行」退回
+   前一天。盘中当日指数行可能尚未落盘, 严格丢空会让整个横截面被过滤光。
+   (个股 K 线副图那一侧走的是「用实时指数快照补今天」, 矩阵里没有实时快照通道;
+   当日指数行一旦落盘就会被自动用上。)
+4. **基准数据整列缺失时该票不参与过滤** (此时源脚本会因 ``momentum is None`` 把全部
+   候选剔除, 结果直接空掉)。只要该票的基准列可用, 就按源脚本严格执行 —— 动能算不出
+   来 (历史不足 52 个交集交易日) 一样剔除。
+
+过滤按**逐 bar** 施加 (每个交易日用当天的动能), 与矩阵里其它过滤一致; 源脚本只算
+最新一根再套用到扫描结果上, 两者在「今日选股」这个用法下等价。
 """
 
 import numpy as np
@@ -45,6 +68,9 @@ from app.backtest.matrix import (
     valid_rolling_max as rolling_max,
 )
 from app.backtest.matrix import (
+    valid_rolling_mean as rolling_mean,
+)
+from app.backtest.matrix import (
     valid_shift as shift,
 )
 from app.backtest.matrix import (
@@ -59,8 +85,15 @@ _NEW_HIGH_WINDOW = 5  # HHV(H, 5)
 _DEFAULT_SCAN_DAYS = 5  # 源脚本 --days 默认 5: 近 5 个交易日出现过信号即入选
 _MIN_HISTORY = 20  # 源脚本 n < 20 直接返回全 False
 
+# 资金动能: MA(A1, 52), 窗口按有效 bar 计
+_MOMENTUM_WINDOW = 52
+_DEFAULT_MOMENTUM_CAP = 0.0  # 源脚本 --max-momentum 推荐值 0
+
 # 依赖深度: A2 需要 4+9 根 -> A3 再等 5 根 -> MA10 / HHV5 各自 10 / 5 根; 60 根足够收敛
 _WARMUP_BARS = 60
+
+# 开启资金动能过滤时: 动能本身要先攒满 52 个有效 bar, 其均值再要 52 个 -> 104 根起步
+_MOMENTUM_WARMUP_BARS = 120
 
 META = {
     "id": "trend_dragon",
@@ -108,6 +141,21 @@ META = {
             "max": 50.0,
             "step": 1.0,
         },
+        {
+            "id": "use_momentum_filter",
+            "label": "启用资金动能上限",
+            "type": "bool",
+            "default": False,
+        },
+        {
+            "id": "momentum_cap",
+            "label": "资金动能上限(推荐0)",
+            "type": "float",
+            "default": _DEFAULT_MOMENTUM_CAP,
+            "min": -50.0,
+            "max": 50.0,
+            "step": 1.0,
+        },
     ],
     "scoring": {"momentum_20d": 0.4, "vol_ratio_5d": 0.3, "change_pct": 0.3},
     "order_by": "score",
@@ -127,7 +175,8 @@ class TrendDragonMatrixStrategy:
         return frozenset({"open", "high", "close"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        del params
+        if params.get("use_momentum_filter", False):
+            return max(_WARMUP_BARS, _MOMENTUM_WARMUP_BARS)
         return _WARMUP_BARS
 
     def compute_signals(
@@ -194,6 +243,15 @@ class TrendDragonMatrixStrategy:
         if bias_cap > 0:
             bias_pct = matrix_feature(market, "ma20_bias") * np.float32(100.0)
             entry &= np.isfinite(bias_pct) & (bias_pct <= np.float32(bias_cap))
+
+        if params.get("use_momentum_filter", False):
+            momentum = _capital_momentum(market, valid)
+            cap = _resolve_float(params.get("momentum_cap"), _DEFAULT_MOMENTUM_CAP)
+            # 基准数据整列缺失 (该交易所的指数读不到) 时不参与过滤, 避免把结果清空;
+            # 只要该票的基准可用, 就与源脚本一致地严格执行 (动能算不出来 -> 剔除)。
+            has_benchmark = np.isfinite(matrix_feature(market, "index_close")).any(axis=0)
+            keep = ~has_benchmark[None, :] | (np.isfinite(momentum) & (momentum <= np.float32(cap)))
+            entry &= keep
         entry &= valid
 
         ma20 = matrix_feature(market, "ma20")
@@ -209,6 +267,35 @@ class TrendDragonMatrixStrategy:
             entry_signal_ids=("signal_trend_dragon",),
             exit_signal_ids=("signal_ma20_breakdown",),
         )
+
+
+def _capital_momentum(market: MarketDataMatrix, valid: np.ndarray) -> np.ndarray:
+    """资金动能 = (A1 / MA(A1, 52) - 1) * 10, A1 = C / INDEXC * 1e6。
+
+    - ``INDEXC`` 取矩阵计算特征 ``index_close`` (按标的后缀对齐的基准指数收盘价)。
+    - 52 日均值按有效 bar 计: 个股停牌行与「指数缺值」行都不计入。
+    - 基准指数不可用 (整列 NaN) 或历史不足 52 个有效 bar 时输出 NaN,
+      由调用方决定 NaN 的语义 (本策略: 基准整列缺失 -> 放行; 否则剔除)。
+    """
+    shape = market.shape
+    momentum = np.full(shape, np.nan, dtype=np.float32)
+    index_close = matrix_feature(market, "index_close")
+    usable = np.isfinite(index_close) & (index_close > 0)
+    if not usable.any():
+        return momentum
+
+    a1 = np.full(shape, np.nan, dtype=np.float32)
+    np.divide(market.close, index_close, out=a1, where=usable)
+    a1 *= np.float32(1e6)
+
+    a1_valid = valid & usable & np.isfinite(a1)
+    average = rolling_mean(a1, a1_valid, _MOMENTUM_WINDOW)
+
+    ratio = np.full(shape, np.nan, dtype=np.float32)
+    np.divide(a1, average, out=ratio, where=np.isfinite(average) & (average != 0))
+    np.subtract(ratio, np.float32(1.0), out=ratio)
+    np.multiply(ratio, np.float32(10.0), out=momentum, where=np.isfinite(ratio))
+    return momentum
 
 
 def _resolve_scan_days(params: dict) -> int:

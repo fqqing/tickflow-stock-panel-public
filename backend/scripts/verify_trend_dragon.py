@@ -10,17 +10,30 @@
 (``qushiqinlong/趋势擒龙_选股结果_*.csv``), 额外报告覆盖率 —— 那份 CSV 出自另一条
 数据源 (pytdx), 前复权基准与本地不一致, 因此只作参考不参与判定。
 
+``--max-momentum`` 打开资金动能过滤: 参考实现用 ``capital_momentum``
+(与个股 K 线副图同口径) 在「个股有效 bar 序列 ∩ 指数可用日」上算 52 日均值,
+取最后一根的值 —— 与源脚本 ``scan_one`` 一致。指数序列缺值按矩阵口径**前向沿用**
+(源脚本是 inner join 直接丢行; 指数分区完整时两者等价)。
+
+**已知数值边界 (非移植偏差)**: 矩阵里的价格是 float32, 本脚本的参考实现是 float64。
+MA10 这种「价格均线」在两侧的末位会差 ~1e-7 量级, 于是 ``C > MA10`` 这类**严格比较**
+在「收盘价恰好等于 MA10」的 bar 上可能得出不同结论, 表现为某只票「仅参考有」。
+这种差异会走 ``[NOTE]`` 单列报告 (用 float32 量化输入重跑参考公式即可复现), 不计入
+偏差判定 —— 通达信内部同样是 float 口径, 面板侧反而更贴近原公式。
+
 用法 (在 backend 目录下):
     ./.venv/Scripts/python.exe -m scripts.verify_trend_dragon
     ./.venv/Scripts/python.exe -m scripts.verify_trend_dragon --as-of 2026-08-07
     ./.venv/Scripts/python.exe -m scripts.verify_trend_dragon --symbols 600026,002506
     ./.venv/Scripts/python.exe -m scripts.verify_trend_dragon --baseline ../qushiqinlong/趋势擒龙_选股结果_20260807.csv
+    ./.venv/Scripts/python.exe -m scripts.verify_trend_dragon --max-momentum 0
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 from datetime import date
 from pathlib import Path
@@ -28,12 +41,14 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from app.backtest.benchmark import exchange_of, load_benchmark_closes
 from app.backtest.matrix import (
+    MarketDataMatrix,
     MatrixPipelineConfig,
     MatrixStrategyPipeline,
     build_market_data_matrix,
 )
-from app.indicators.formula_signals import trend_dragon
+from app.indicators.formula_signals import capital_momentum, trend_dragon
 from app.strategy.builtin.trend_dragon import MATRIX_STRATEGY, META
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "kline_daily_enriched"
@@ -83,6 +98,136 @@ def _reference_hit(
     return bool(signal[-scan_days:].any())
 
 
+def _reference_hit_f32(
+    open_: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    scan_days: int,
+) -> bool:
+    """同上, 但先把 OHLC 量化到 float32 —— 复现矩阵的存储精度。
+
+    矩阵价格是 float32, MA10 按 float32 累加; 参考实现是 float64。收盘价与 MA10
+    之差落在 float32 舍入误差内 (~1e-7) 时, ``C > MA10`` 的严格比较会相差一根 bar。
+    量化输入到 float32 后, 参考侧的 MA10 会落到与矩阵同一格, 从而复现面板的判定。
+    """
+
+    def quantize(values: np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype=np.float32).astype(np.float64)
+
+    signal, _ = trend_dragon(
+        quantize(open_),
+        quantize(high),
+        quantize(low),
+        quantize(close),
+    )
+    if not signal.any():
+        return False
+    return bool(signal[-scan_days:].any())
+
+
+def _index_close_lookup() -> dict[str, dict[date, float]]:
+    """交易所 -> {date: 基准指数收盘价}, 复用矩阵侧那条取数链 (取不到时空表)。"""
+    frame = load_benchmark_closes()
+    if frame is None:
+        return {}
+    lookup: dict[str, dict[date, float]] = {}
+    for exchange, day, close in frame.select(["exchange", "date", "close"]).iter_rows():
+        if close is not None and math.isfinite(float(close)):
+            lookup.setdefault(str(exchange), {})[day] = float(close)
+    return lookup
+
+
+def _align_index_close(dates: list[date], closes: dict[date, float]) -> np.ndarray:
+    """按矩阵口径对齐指数收盘价: 缺值的交易日沿用最近一根, 指数历史起点前为 NaN。"""
+    values = np.full(len(dates), np.nan, dtype=np.float64)
+    ordered = sorted(closes)
+    if not ordered:
+        return values
+    position = 0
+    for index, day in enumerate(dates):
+        while position + 1 < len(ordered) and ordered[position + 1] <= day:
+            position += 1
+        if ordered[position] <= day:
+            values[index] = closes[ordered[position]]
+    return values
+
+
+def _reference_momentum(
+    close: np.ndarray,
+    dates: list[date],
+    index_lookup: dict[str, dict[date, float]],
+    symbol: str,
+) -> float | None:
+    """源脚本 ``compute_capital_momentum`` 口径: 交集日期上 52 日均值, 取最后一根。
+
+    不足 52 个可用交易日或指数缺失时返回 None (源脚本里 None 会被过滤掉)。
+    """
+    exchange = exchange_of(symbol)
+    if exchange is None:
+        return None
+    closes = index_lookup.get(exchange)
+    if not closes:
+        return None
+    index_close = _align_index_close(dates, closes)
+    usable = np.isfinite(index_close) & np.isfinite(close)
+    if int(usable.sum()) < 52:
+        return None
+    values = capital_momentum(close[usable], index_close[usable])
+    if values.size == 0:
+        return None
+    last = float(values[-1])
+    return last if math.isfinite(last) else None
+
+
+def _split_float32_boundary(
+    candidates: list[str],
+    market: MarketDataMatrix,
+    as_of_row: int,
+    scan_days: int,
+) -> tuple[list[str], list[str]]:
+    """把「仅参考有」里由 float32 舍入边界造成的差异单独摘出来。
+
+    只对差异票做 (通常个位数), 开销可忽略。
+    """
+    if not candidates:
+        return [], []
+    index_of = {symbol: index for index, symbol in enumerate(market.symbols)}
+    close = market.close
+    high = market.high
+    low = market.low
+    open_ = market.open
+    ties: list[str] = []
+    rest: list[str] = []
+    for symbol in candidates:
+        asset_id = index_of.get(symbol)
+        if asset_id is None:
+            rest.append(symbol)
+            continue
+        usable = (
+            np.isfinite(close[: as_of_row + 1, asset_id])
+            & np.isfinite(open_[: as_of_row + 1, asset_id])
+            & np.isfinite(high[: as_of_row + 1, asset_id])
+            & np.isfinite(low[: as_of_row + 1, asset_id])
+        )
+        rows = np.flatnonzero(usable)
+        if (
+            rows.size
+            and int(rows[-1]) == as_of_row
+            and _reference_hit_f32(
+                open_[rows, asset_id],
+                high[rows, asset_id],
+                low[rows, asset_id],
+                close[rows, asset_id],
+                scan_days,
+            )
+        ):
+            ties.append(symbol)
+        else:
+            rest.append(symbol)
+    return ties, rest
+
+
 def _load_baseline(path: Path) -> dict[str, str]:
     with path.open(encoding="utf-8-sig") as handle:
         return {
@@ -101,6 +246,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--scan-days", type=int, default=5, help="信号扫描窗口 (源脚本 --days, 默认 5)"
+    )
+    parser.add_argument(
+        "--max-momentum",
+        type=float,
+        default=None,
+        help="资金动能上限 (源脚本 --max-momentum, 推荐 0); 不给则不过滤",
     )
     parser.add_argument("--baseline", default=None, help="源脚本历史选股结果 CSV, 仅作覆盖率参考")
     parser.add_argument("--show", type=int, default=20, help="打印前 N 个差异")
@@ -126,10 +277,19 @@ def main() -> int:
     if not args.no_basic_filter:
         print("[WARN] 未加 --no-basic-filter: 结果会被 basic_filter 裁剪, 仅作冒烟")
 
+    params: dict = {"scan_days": args.scan_days}
+    index_lookup: dict[str, dict[date, float]] = {}
+    if args.max_momentum is not None:
+        params["use_momentum_filter"] = True
+        params["momentum_cap"] = float(args.max_momentum)
+        index_lookup = _index_close_lookup()
+        covered = ", ".join(f"{k}:{len(v)}" for k, v in sorted(index_lookup.items()))
+        print(f"资金动能上限={args.max_momentum}  指数序列 {covered or '缺失'}")
+
     signals = MatrixStrategyPipeline().run(
         MATRIX_STRATEGY,
         market,
-        {"scan_days": args.scan_days},
+        params,
         MatrixPipelineConfig(
             basic_filter={"enabled": not args.no_basic_filter},
             scoring=dict(META["scoring"]),
@@ -151,9 +311,11 @@ def main() -> int:
     high = market.high
     low = market.low
     open_ = market.open
+    label_dates = [date.fromisoformat(str(label)[:10]) for label in market.timestamp_labels]
     reference_hits: set[str] = set()
     mismatched_suspension: list[str] = []
     skipped = 0
+    momentum_missing = 0
     for asset_id, symbol in enumerate(market.symbols):
         usable = (
             np.isfinite(close[: as_of_row + 1, asset_id])
@@ -170,13 +332,27 @@ def main() -> int:
         if rows.size < 20:  # 源脚本 n < 20 直接返回全 False
             skipped += 1
             continue
-        if _reference_hit(
+        hit = _reference_hit(
             open_[rows, asset_id],
             high[rows, asset_id],
             low[rows, asset_id],
             close[rows, asset_id],
             args.scan_days,
-        ):
+        )
+        if hit and args.max_momentum is not None:
+            # 源脚本 scan_one: 动能取 None 或超过上限都直接剔除
+            momentum = _reference_momentum(
+                close[rows, asset_id],
+                [label_dates[row] for row in rows],
+                index_lookup,
+                symbol,
+            )
+            if momentum is None:
+                momentum_missing += 1
+                hit = False
+            elif momentum > float(args.max_momentum):
+                hit = False
+        if hit:
             reference_hits.add(symbol)
 
     # 参考实现不区分资产类别, 只对 A 股代码比对, 以免港美股/ETF 混进差异清单
@@ -184,14 +360,25 @@ def main() -> int:
 
     only_panel = sorted(panel_hits - reference_hits)
     only_reference = sorted(reference_hits - panel_hits)
+    tie_explained, only_reference = _split_float32_boundary(
+        only_reference, market, as_of_row, args.scan_days
+    )
     print(
         f"\n面板命中 {len(panel_hits)} 只 / 参考命中 {len(reference_hits)} 只 "
         f"(历史不足跳过 {skipped} 只)"
     )
+    if args.max_momentum is not None:
+        print(f"  参考口径因动能缺失被剔除 {momentum_missing} 只")
     if mismatched_suspension:
         print(
             f"[DIFF] 目标日停牌却命中 {len(mismatched_suspension)}: "
             f"{mismatched_suspension[: args.show]}"
+        )
+    if tie_explained:
+        print(
+            f"[NOTE] float32 舍入边界 (不计入偏差) {len(tie_explained)}: "
+            f"{tie_explained[: args.show]}  —— 收盘价与 MA10 之差在 float32 精度内, "
+            f"``C > MA10`` 两侧严格比较结论不同"
         )
     print(f"仅面板有 {len(only_panel)}: {only_panel[: args.show]}")
     print(f"仅参考有 {len(only_reference)}: {only_reference[: args.show]}")

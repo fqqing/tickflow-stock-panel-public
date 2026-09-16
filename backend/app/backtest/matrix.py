@@ -4101,6 +4101,7 @@ _MATRIX_COMPUTED_FEATURES = frozenset({
     "amihud_20d", "turnover_z_60d", "vol_price_corr_20d",
     "vwap_bias", "vol_trend_5_60",
     "limit_up_count_20d", "limit_up_count_60d",
+    "index_close",
 })
 
 
@@ -4144,7 +4145,22 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         )
 
 
+def _benchmark_index_close(market: MarketDataMatrix) -> np.ndarray:
+    """基准指数收盘价矩阵 (按标的交易所广播, 停牌/缺失日前向沿用)。
+
+    实现在 :mod:`app.backtest.benchmark`; 这里只负责把矩阵的日期轴与标的轴
+    传进去。取不到指数数据时整列为 NaN —— 消费方 (如趋势擒龙的资金动能过滤)
+    必须把 NaN 当作「不参与过滤」, 不能当作「不满足」。
+    """
+    from app.backtest.benchmark import benchmark_close_matrix
+
+    labels = tuple(str(label)[:10] for label in market.timestamp_labels)
+    return benchmark_close_matrix(labels, market.symbols)
+
+
 def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
+    if name == "index_close":
+        return _benchmark_index_close(market)
     close_valid = np.isfinite(market.close)
     if name == "prev_close":
         return valid_shift(market.close, 1, close_valid)
