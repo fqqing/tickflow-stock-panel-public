@@ -33,10 +33,19 @@ from app.enriched_generation import (
     get_enriched_generation,
 )
 from app.market_time import cn_today
-from app.parquet import scan_enriched_parquet
+from app.markets import MARKET_CN
+from app.parquet import market_symbol_filter, scan_enriched_parquet
 
 logger = logging.getLogger(__name__)
 
+# 指标预热所需的交易日数 (compute_indicators 的最长滚动窗口)。
+# get_enriched_history 的覆盖校验与 _refresh_enriched 的预计算窗口都以此为准,
+# 两者必须对得上 —— 曾经一个按 (lookback+60)x2 日历日算、一个只预计算 300 天,
+# 结果缓存必然 miss, 每次策略运行都要 10 秒级全市场重算。
+_HISTORY_WARMUP_BARS = 60
+# 预计算窗口: 需覆盖 最长 lookback(201) + warmup(60) = 261 个交易日。
+# 261 交易日 ≈ 392 日历日, 留出节假日余量取 420。
+_REFRESH_HISTORY_DAYS = 420
 
 def enriched_dirname(asset_type: str, market: str = "cn") -> str:
     """asset_type + market → enriched parquet 目录名。
@@ -701,20 +710,24 @@ class KlineRepository:
                 logger.info("enriched refresh skipped: latest parquet empty (%.2fs)", time.perf_counter() - started)
                 return
 
-            # Step 2: 读近 300 天 14 列数据 → compute → filter(latest) → 缓存
-            # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
+            # Step 2: 读近 _REFRESH_HISTORY_DAYS 天 14 列数据 → compute → filter(latest) → 缓存
+            # 420 日历天 ≈ 288 交易日, 覆盖策略最大 lookback(201) + 指标 warmup(60)。
+            # 窗口必须 >= 该需求量, 否则 get_enriched_history 的覆盖校验永远不通过,
+            # 预计算出来的缓存一次也用不上。
             try:
                 from datetime import timedelta
                 from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
-                start_full = latest - timedelta(days=300)
+                start_full = latest - timedelta(days=_REFRESH_HISTORY_DAYS)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
-                lf = (
-                    scan_enriched_parquet(self._enriched_glob)
-                    .filter(pl.col("date") >= start_full)
-                    .sort(["symbol", "date"])
-                )
+                lf = scan_enriched_parquet(self._enriched_glob).filter(pl.col("date") >= start_full)
+                # A 股目录早期写入过港美股行: 不过滤会把 71% 无关标的算进指标,
+                # 常驻内存也从实际需要的 111 万行涨到 386 万行。
+                cn_filter = market_symbol_filter(MARKET_CN)
+                if cn_filter is not None:
+                    lf = lf.filter(cn_filter)
+                lf = lf.sort(["symbol", "date"])
 
                 step = time.perf_counter()
                 logger.info("enriched refresh step start: collect history from %s", start_full)
@@ -1314,18 +1327,22 @@ class KlineRepository:
             return None
         if "date" not in cache.columns:
             return None
-        cache_max = cache["date"].max()
-        cache_min = cache["date"].min()
-        from datetime import timedelta
-        # 验证缓存覆盖完整范围 (含 warmup)。lookback_days 是交易日语义, 用 ×2 日历日
-        # 放宽确保覆盖 (节假日/周末), 与 warmup 60 一起留足余量。
-        warmup_start = target_date - timedelta(days=(lookback_days + 60) * 2)
-        if cache_min > warmup_start or cache_max < target_date:
+        if cache["date"].max() < target_date:
+            return None
+        # 覆盖校验按交易日计数: 只要缓存里 target 之前凑得齐 lookback_days 个交易日,
+        # 策略要的窗口就完整 (指标预热由 _refresh_enriched 的预计算窗口负责, 不在这里
+        # 重复要求)。旧实现用 (lookback_days + 60) x 2 个日历日估算 —— lookback=201 时
+        # 要求覆盖 522 日历日, 而本地数据总共只有 245 个交易日, 于是必然 miss:
+        # 全量日志里 "repo cache hit" 只出现过 1 次, 每次策略运行都退回全市场重算。
+        trading_dates = cache["date"].unique().sort()
+        pos = int(trading_dates.search_sorted(target_date, side="right")) - 1
+        if pos < 0 or trading_dates[pos] != target_date:
+            return None
+        if pos < lookback_days:
             return None
         # 按交易日计数裁剪: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日。
         # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口只有 ~N×5/7 个交易日,
         # 导致 filter_history 策略的滚动窗口/行号差(_gap)漏算, 与回测结果不一致。
-        trading_dates = cache["date"].unique().sort()
         if len(trading_dates) > lookback_days:
             lookback_start = trading_dates[-(lookback_days + 1)]
         else:

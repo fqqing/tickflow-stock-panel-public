@@ -125,6 +125,15 @@ def exchanges_for(market: str) -> list[str]:
     return list(get_market(market).exchanges)
 
 
+def suffixes_for(market: str) -> tuple[str, ...]:
+    """该市场的 symbol 后缀集合, 如 cn -> ('.SH', '.SZ', '.BJ')。
+
+    用于「一个目录里混了多个市场」时收窄读取: A 股 enriched 目录早期曾写入
+    港美股行, 策略加载时若不按市场过滤, 会把 3 倍无关标的算进指标。
+    """
+    return tuple(suffix for suffix, mkt in _SUFFIX_MAP.items() if mkt == market)
+
+
 # ── 交易时段（北京时间）──────────────────────────────────────────────
 def _dt_in_session(t: dt_time, session: tuple[dt_time, dt_time]) -> bool:
     start, end = session

@@ -8,20 +8,62 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 import polars as pl
 
-from app.parquet import scan_enriched_parquet
+from app.parquet import market_symbol_filter, scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
-_HISTORY_CACHE_TTL = 120.0  # 秒
+_history_cache_lock = threading.Lock()
+# 一次 miss 要 3~5 秒 (读 parquet + 全市场算指标)。原先 120 秒太短 —— 用户在
+# 几个日期之间来回看时, 每次超时都要重付这笔钱 (同一日期曾被重算 7 次)。
+# 延长到 30 分钟, 内存改由条数上限兜: 单条约 250MB (A 股 68 万行 x 全指标列)。
+_HISTORY_CACHE_TTL = 1800.0  # 秒
+_HISTORY_CACHE_MAX = 3       # 条
+
+
+def _load_history_cache(
+    cache_key: tuple[str, date, int], now: float | None = None
+) -> pl.DataFrame | None:
+    """读进程级 history 缓存; 过期条目顺手删除并视为 miss。"""
+    ts_now = time.monotonic() if now is None else now
+    with _history_cache_lock:
+        hit = _history_cache.get(cache_key)
+        if hit is None:
+            return None
+        ts, cached_df = hit
+        if ts_now - ts < _HISTORY_CACHE_TTL:
+            return cached_df
+        del _history_cache[cache_key]
+        return None
+
+
+def _store_history_cache(
+    cache_key: tuple[str, date, int], df: pl.DataFrame, now: float | None = None
+) -> None:
+    """写进程级 history 缓存, 并回收过期 / 超限条目。
+
+    TTL 拉长到 30 分钟后不能只靠过期回收内存 (来回切 10 个日期会常驻 2GB+),
+    故再加条数上限, 超限时淘汰最久未写入的一条。
+    """
+    ts_now = time.monotonic() if now is None else now
+    with _history_cache_lock:
+        _history_cache[cache_key] = (ts_now, df)
+        expired = [k for k, (ts, _) in _history_cache.items() if ts_now - ts > _HISTORY_CACHE_TTL]
+        for k in expired:
+            del _history_cache[k]
+        while len(_history_cache) > _HISTORY_CACHE_MAX:
+            oldest = min(_history_cache.items(), key=lambda kv: kv[1][0])[0]
+            del _history_cache[oldest]
 
 
 @dataclass
@@ -47,7 +89,8 @@ class ScreenerService:
 
         清除数据后调用, 避免内存里的旧历史窗口残留导致策略/看板仍命中旧数据。
         """
-        _history_cache.clear()
+        with _history_cache_lock:
+            _history_cache.clear()
 
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
@@ -182,14 +225,13 @@ class ScreenerService:
                      "amount", "raw_close", "raw_high", "raw_low"]
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter(
-                    (pl.col("date") >= start)
-                    & (pl.col("date") <= target_date)
-                )
-                .sort(["symbol", "date"])
+            lf = scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet")).filter(
+                (pl.col("date") >= start) & (pl.col("date") <= target_date)
             )
+            symbol_filter = market_symbol_filter(self.market)
+            if symbol_filter is not None:
+                lf = lf.filter(symbol_filter)
+            lf = lf.sort(["symbol", "date"])
             available = [c for c in read_cols if c in lf.schema]
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
@@ -227,6 +269,30 @@ class ScreenerService:
 
         return df_result
 
+    def _history_window_start(self, target_date: date, bars: int) -> date:
+        """按交易日计数取扫描窗口起点。
+
+        enriched 分区目录名 (date=YYYY-MM-DD) 本身就是交易日序列 —— 用它反推比
+        「日历日估算 + 上限截断」精确。旧实现把窗口硬截在 180 天, lookback=201 时
+        只够 124 个交易日, 策略声明的 200 根 bar 被静默砍掉四成 —— 实测
+        upward_trend_breakout 因此选出 46 只, 给足窗口后为 42 只。
+        目录不可读时回退到日历日估算 (交易日 x 2, 覆盖周末与长假)。
+        """
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        try:
+            dates = sorted(
+                entry.name[len("date="):]
+                for entry in enriched_dir.iterdir()
+                if entry.is_dir() and entry.name.startswith("date=")
+            )
+        except OSError:
+            dates = []
+        if dates:
+            pos = bisect_right(dates, target_date.isoformat())
+            if pos > 0:
+                return date.fromisoformat(dates[max(0, pos - bars)])
+        return target_date - timedelta(days=bars * 2)
+
     def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
         """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
 
@@ -249,16 +315,13 @@ class ScreenerService:
                             target_date, lookback_days, elapsed, len(cached))
                 return cached
 
-        # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
+        # 优先级 2: 进程级 history_cache (按 TTL 复用, 同一窗口不必反复重算)
         cache_key = (self.asset_type, target_date, lookback_days)
         now = time.monotonic()
-        ttl_cached = _history_cache.get(cache_key)
+        ttl_cached = _load_history_cache(cache_key, now)
         if ttl_cached is not None:
-            ts, cached_df = ttl_cached
-            if now - ts < _HISTORY_CACHE_TTL:
-                logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-                return cached_df
-            del _history_cache[cache_key]
+            logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
+            return ttl_cached
 
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
@@ -270,18 +333,21 @@ class ScreenerService:
         )
 
         warmup = 60
-        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
+        bars = lookback_days + warmup
+        start = self._history_window_start(target_date, bars)
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
                      "amount", "raw_close", "raw_high", "raw_low"]
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-                .sort(["symbol", "date"])
+            lf = scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet")).filter(
+                (pl.col("date") >= start) & (pl.col("date") <= target_date)
             )
+            symbol_filter = market_symbol_filter(self.market)
+            if symbol_filter is not None:
+                lf = lf.filter(symbol_filter)
+            lf = lf.sort(["symbol", "date"])
             available = [c for c in read_cols if c in lf.collect_schema().names()]
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
@@ -324,12 +390,7 @@ class ScreenerService:
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
                     target_date, lookback_days, elapsed, len(df_full))
 
-        _history_cache[cache_key] = (now, df_full)
-        if len(_history_cache) > 10:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-            for k in expired:
-                del _history_cache[k]
-
+        _store_history_cache(cache_key, df_full, now)
         return df_full
 
     def run(

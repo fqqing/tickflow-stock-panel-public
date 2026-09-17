@@ -53,3 +53,22 @@ def scan_enriched_parquet(source: Any, **kwargs: Any) -> pl.LazyFrame:
     kwargs.setdefault("schema", ENRICHED_STORAGE_SCHEMA)
     kwargs.setdefault("cast_options", pl.ScanCastOptions(integer_cast="allow-float"))
     return scan_parquet_compat(source, **kwargs)
+
+
+def market_symbol_filter(market: str) -> pl.Expr | None:
+    """按市场 symbol 后缀收窄读取范围的表达式; 市场未知时返回 None (不过滤)。
+
+    A 股 enriched 目录 (kline_daily_enriched) 早期写入过港美股行 —— 实测 180 天
+    窗口 237 万行里 71% 是 .US/.HK, 而 A 股策略只需要其中 68 万行。不过滤会把
+    3 倍无关标的算进指标 (读盘、指标、涨跌停信号全线变慢, 内存同步放大)。
+    港美股虽走独立目录, 同样过滤一次可防同类污染。
+    """
+    from app.markets import suffixes_for
+
+    suffixes = suffixes_for(market)
+    if not suffixes:
+        return None
+    expr = pl.col("symbol").str.ends_with(suffixes[0])
+    for suffix in suffixes[1:]:
+        expr = expr | pl.col("symbol").str.ends_with(suffix)
+    return expr
