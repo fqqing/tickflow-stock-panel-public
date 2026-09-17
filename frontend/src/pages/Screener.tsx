@@ -359,6 +359,12 @@ export function Screener() {
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
 
+  // 实时行情状态 / 刷新偏好：须在「实时涨跌幅」快照查询之前初始化。
+  const quoteStatus = useQuoteStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+  const intradayRefreshEnabled = prefs?.minute_intraday_refresh ?? false
+  const intradayRefreshInterval = prefs?.minute_intraday_refresh_interval ?? 6
+
   // 实时行情快照：为「实时涨跌幅」列提供盘中最新 change_pct。
   // 数据源是 enriched 表，由 quote_service 在盘中持续写入；收盘后等同于收盘数据。
   // 当前后端接口无 market 参数，仅支持 A 股；ETF/港美股暂不提供。
@@ -450,11 +456,6 @@ export function Screener() {
   const caps = useCapabilities()
   const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
   const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
-
-  const quoteStatus = useQuoteStatus()
-  const realtimeRunning = quoteStatus.data?.running ?? false
-  const intradayRefreshEnabled = prefs?.minute_intraday_refresh ?? false
-  const intradayRefreshInterval = prefs?.minute_intraday_refresh_interval ?? 6
 
   // 分时数据加载策略 (与自选页一致, 简洁优先):
   //  - 全量加载当前列表 symbol, 但按数据源 batch 上限截断,
