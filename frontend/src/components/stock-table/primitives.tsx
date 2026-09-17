@@ -61,6 +61,10 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
       return <td key={col.id} className={`${numCls} text-secondary`}>{fmtMaybePrice(r.close)}</td>
     case 'pct':
       return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(r.change_pct)}`}>{fmtPct(r.change_pct)}</td>
+    case 'rt_pct': {
+      const rtPct = r.rt_change_pct ?? r.rt_pct ?? r.change_pct
+      return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(rtPct)}`}>{fmtPct(rtPct)}</td>
+    }
     case 'change_amount':
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.change_amount)}`}>{r.change_amount != null ? fmtPrice(r.change_amount) : '—'}</td>
     case 'amplitude':

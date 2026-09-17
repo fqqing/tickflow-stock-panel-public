@@ -64,6 +64,7 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'symbol':        return r.symbol
     case 'price':         return r.rt_price ?? r.close
     case 'pct':           return r.rt_pct ?? r.change_pct
+    case 'rt_pct':        return r.rt_change_pct ?? r.rt_pct ?? r.change_pct
     case 'change_amount': return r.change_amount
     case 'amplitude':     return r.amplitude
     case 'turnover':      return r.turnover_rate

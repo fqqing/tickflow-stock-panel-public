@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
+import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type MarketSnapshotRow } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -359,11 +359,44 @@ export function Screener() {
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
 
+  // 实时行情快照：为「实时涨跌幅」列提供盘中最新 change_pct。
+  // 数据源是 enriched 表，由 quote_service 在盘中持续写入；收盘后等同于收盘数据。
+  // 当前后端接口无 market 参数，仅支持 A 股；ETF/港美股暂不提供。
+  const marketSnapshot = useQuery({
+    queryKey: QK.marketSnapshot,
+    queryFn: api.marketSnapshot,
+    enabled: assetType === 'stock' && market === 'cn',
+    staleTime: 1_000,
+    placeholderData: previousData => previousData,
+    refetchInterval: realtimeRunning ? 5_000 : 30_000,
+  })
+
+  const rtQuoteMap = useMemo(() => {
+    const map = new Map<string, MarketSnapshotRow>()
+    marketSnapshot.data?.rows?.forEach((r: MarketSnapshotRow) => {
+      if (r.symbol) map.set(r.symbol, r)
+    })
+    return map
+  }, [marketSnapshot.data])
+
   // 当前显示的行数据 (全部模式 或 单策略模式) + 失效行
   const displayRows = useMemo(() => {
     let rows = showAll
       ? applyFilter(allRows, filter)
       : filteredRows
+    // 注入实时行情快照： enriched 表由 quote_service 盘中持续更新。
+    if (rtQuoteMap.size > 0) {
+      rows = rows.map(r => {
+        const q = rtQuoteMap.get(r.symbol)
+        if (!q) return r
+        return {
+          ...r,
+          rt_change_pct: q.change_pct,
+          rt_price: q.close,
+          rt_amount: q.amount,
+        }
+      })
+    }
     // 排序：用户点了表头则按该列，否则默认评分降序
     rows = sort
       ? sortRows(rows, columns)
@@ -380,7 +413,7 @@ export function Screener() {
       }
     }
     return mainRows
-  }, [showAll, allRows, filteredRows, filter, activeStrategy, strategyLimits, expiredRows, sort, sortRows, columns])
+  }, [showAll, allRows, filteredRows, filter, activeStrategy, strategyLimits, expiredRows, sort, sortRows, columns, rtQuoteMap])
 
   // 日k列是否启用 → 决定是否加载批量 kline 数据
   const candleColumn = useMemo(() =>
@@ -418,16 +451,17 @@ export function Screener() {
   const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
   const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
 
+  const quoteStatus = useQuoteStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+  const intradayRefreshEnabled = prefs?.minute_intraday_refresh ?? false
+  const intradayRefreshInterval = prefs?.minute_intraday_refresh_interval ?? 6
+
   // 分时数据加载策略 (与自选页一致, 简洁优先):
   //  - 全量加载当前列表 symbol, 但按数据源 batch 上限截断,
   //    超出时只取前 batch 只并提示用户, 避免一次性发太多请求打爆 rpm 配额
   //  - 刷新: minute_intraday_refresh 偏好开启时按用户设定间隔轮询; 否则仅首次加载,
   //    用户可点表头刷新按钮手动更新
   const minuteBatchCap = caps.data?.capabilities?.['kline.minute.batch']?.batch ?? 100
-  const quoteStatus = useQuoteStatus()
-  const realtimeRunning = quoteStatus.data?.running ?? false
-  const intradayRefreshEnabled = prefs?.minute_intraday_refresh ?? false
-  const intradayRefreshInterval = prefs?.minute_intraday_refresh_interval ?? 6
 
   const allIntradaySymbols = useMemo(
     () => displayRows.map((r: any) => r.symbol),
