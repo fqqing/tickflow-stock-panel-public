@@ -390,17 +390,15 @@ export function Screener() {
     let rows = showAll
       ? applyFilter(allRows, filter)
       : filteredRows
-    // 注入实时行情快照： enriched 表由 quote_service 盘中持续更新。
+    // 注入实时行情快照：enriched 表由 quote_service 盘中持续更新。
+    // 只注入「实时涨跌幅」列所需的字段 —— 若一并注入 rt_price / rt_amount，
+    // getSortValue 会让「现价」「成交额」按实时值排序、而渲染仍取收盘值，造成
+    // 排序与显示不一致。
     if (rtQuoteMap.size > 0) {
       rows = rows.map(r => {
         const q = rtQuoteMap.get(r.symbol)
         if (!q) return r
-        return {
-          ...r,
-          rt_change_pct: q.change_pct,
-          rt_price: q.close,
-          rt_amount: q.amount,
-        }
+        return { ...r, rt_change_pct: q.change_pct }
       })
     }
     // 排序：用户点了表头则按该列，否则默认评分降序
