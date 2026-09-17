@@ -41,7 +41,9 @@ export const QK = {
   // Screener
   screener:             ['screener'] as const,
   screenerStrategies:   (assetType: string = 'stock') => ['screener-strategies', assetType] as const,
-  screenerCachedSummary: (market: string = 'cn') => ['screener-cached', 'summary', market] as const,
+  // 摘要也按日期区分: 后端按日期槽回数据, 不带 asOf 会让 queryKey 与内容不匹配,
+  // 切日期后仍展示上一个日期的命中数。
+  screenerCachedSummary: (market: string = 'cn', asOf?: string) => ['screener-cached', 'summary', market, asOf ?? ''] as const,
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? '', market] as const,
   screenerCached:       (asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'all', asOf ?? '', ext ?? '', market] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,

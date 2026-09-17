@@ -147,21 +147,23 @@ export function Screener() {
   // 卡片首屏只读取轻量摘要；明细在点击策略或“全部”时按需加载。
   // 摘要/明细缓存端点新增 market 维度: 切市场后 queryKey 变化自动失效并重取,
   // 避免把上一市场(A 股)的命中数当成当前市场展示。
+  // asOf 维度: 后端按日期槽取缓存, 传 asOf 才能拿到选中日期的结果——不传时后端
+  // 回最近写入的日期(首屏 asOf 尚未确定时用它兜底), queryKey 带 asOf 保证切换即重取。
   const summaryQuery = useQuery({
-    queryKey: QK.screenerCachedSummary(market),
-    queryFn: () => api.screenerCachedSummary(market),
+    queryKey: QK.screenerCachedSummary(market, asOf),
+    queryFn: () => api.screenerCachedSummary(market, asOf || undefined),
     enabled: assetType === 'stock',
   })
 
   const fullCachedQuery = useQuery({
     queryKey: QK.screenerCached(asOf, extColumnsParam, market),
-    queryFn: () => api.screenerCached(extColumnsParam || undefined, market),
+    queryFn: () => api.screenerCached(extColumnsParam || undefined, market, asOf || undefined),
     enabled: assetType === 'stock' && showAll,
   })
 
   const singleCachedQuery = useQuery({
     queryKey: QK.screenerCachedResult(activeStrategy ?? '', asOf, extColumnsParam, market),
-    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined, market),
+    queryFn: () => api.screenerCachedResult(activeStrategy!, extColumnsParam || undefined, market, asOf || undefined),
     enabled: assetType === 'stock'
       && !showAll
       && !!activeStrategy

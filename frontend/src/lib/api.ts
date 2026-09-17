@@ -2182,8 +2182,10 @@ export const api = {
     request<{ as_of: string | null; results: Record<string, ScreenerResultSummary> }>(
       '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true, market }) },
     ),
-  screenerCachedSummary: (market: string = 'cn') =>
-    request<ScreenerCachedSummary>(`/api/screener/cached-summary?market=${market}`),
+  screenerCachedSummary: (market: string = 'cn', date?: string) =>
+    request<ScreenerCachedSummary>(
+      `/api/screener/cached-summary?market=${market}${date ? `&date=${encodeURIComponent(date)}` : ''}`,
+    ),
 
   // 港美股主要指数（多市场扩展）
   indicesMarketList: (market: 'hk' | 'us') =>
@@ -2216,17 +2218,18 @@ export const api = {
       `/api/market-recap/market-data?market=${market}`,
     ),
 
-  screenerCachedResult: (strategyId: string, extColumns?: string, market: string = 'cn') =>
+  // date 传入选中日期: 后端按日期槽取缓存, 切回已算过的日期直接命中, 不触发重跑。
+  screenerCachedResult: (strategyId: string, extColumns?: string, market: string = 'cn', date?: string) =>
     request<ScreenerCachedResult>(
-      extColumns
-        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}&market=${market}`
-        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}?market=${market}`,
+      `/api/screener/cached-result/${encodeURIComponent(strategyId)}?market=${market}`
+      + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : '')
+      + (date ? `&date=${encodeURIComponent(date)}` : ''),
     ),
-  screenerCached: (extColumns?: string, market: string = 'cn') =>
+  screenerCached: (extColumns?: string, market: string = 'cn', date?: string) =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
-      extColumns
-        ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}&market=${market}`
-        : `/api/screener/cached?market=${market}`,
+      `/api/screener/cached?market=${market}`
+      + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : '')
+      + (date ? `&date=${encodeURIComponent(date)}` : ''),
     ),
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),

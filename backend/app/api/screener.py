@@ -239,8 +239,9 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
                            market: str = "cn") -> None:
     """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
     from app.services import strategy_cache
-    cached = strategy_cache.read_cache(data_dir, market)
-    if cached and cached.get("as_of") == as_of:
+    # 按日期读: 该日期没有缓存时返回 None, 与原 as_of 比对逻辑等价
+    cached = strategy_cache.read_cache(data_dir, market, as_of)
+    if cached is not None:
         results = cached.get("results", {})
         results[strategy_id] = {
             "total": safe_data.get("total", 0),
@@ -354,13 +355,24 @@ def run_preset(req: PresetRequest, request: Request):
     return _result_with_ext(safe_data, ext_values)
 
 
-def _cached_with_realtime(request: Request, market: str = "cn") -> dict:
-    """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。
+def _as_query_str(value: Any) -> str | None:
+    """规范化 Optional 查询参数。
+
+    直接调用端点函数时 FastAPI 不会注入 Query 默认值, 形参拿到的是 Query 对象本身,
+    str() 会得到 "Query(None)" 这类无意义字符串 —— 于是 None 判断失效、查库路径跑偏。
+    真实请求下这里永远是 str 或 None, 所以按类型收口即可。
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _cached_with_realtime(request: Request, market: str = "cn", as_of: str | None = None) -> dict:
+    """读取指定日期的盘后缓存，并用监控引擎的实时结果覆盖同策略。
 
     实时结果仅由 A 股监控引擎产出, 港美股只返回盘后缓存(不叠加实时)。
+    as_of=None 时取最近写入的日期 (旧行为)。
     """
     data_dir = request.app.state.repo.store.data_dir
-    cached = strategy_cache.read_cache(data_dir, market)
+    cached = strategy_cache.read_cache(data_dir, market, as_of)
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
@@ -370,6 +382,14 @@ def _cached_with_realtime(request: Request, market: str = "cn") -> dict:
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
     if market == "cn" and monitor_engine is not None:
         realtime_results = monitor_engine.latest_strategy_results()
+        # 实时结果的 as_of 恒为「今天」, 与历史日期槽对不上 —— 请求历史日期时只
+        # 叠加同日的条目, 否则今天的实时命中会混进用户正在看的历史日期结果里。
+        if realtime_results and as_of is not None:
+            realtime_results = {
+                sid: item
+                for sid, item in realtime_results.items()
+                if isinstance(item, dict) and str(item.get("as_of")) == as_of
+            }
         if realtime_results:
             results = dict(cached.get("results") or {})
             results.update(realtime_results)
@@ -387,10 +407,12 @@ def get_cached(
     request: Request,
     ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
     market: str = Query("cn", description="cn|hk|us"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD, 省略时取最近写入的日期"),
 ):
-    """读取策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
+    """读取指定日期的策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
 
     - 盘后缓存 (strategy_cache.json): 非监控策略 / 页面秒加载用, run_all 写入。
+      每个交易日期独立成槽, 切回已算过的日期直接命中, 不重算。
     - 监控引擎内存结果 (latest_strategy_results): 实时行情每轮对「加入监控的策略」算出,
       不落盘 (避免与 read_cache 的 mtime 校验冲突), 在此直接叠加覆盖盘后结果。
       被监控的策略拿到新鲜数据, 非监控策略仍用盘后缓存。
@@ -398,7 +420,8 @@ def get_cached(
     - market 未显式传参时可能是 Query 默认对象而非字符串, 先规范化再做比较。
     """
     market = str(market) or "cn"
-    cached = _cached_with_realtime(request, market)
+    as_of = _as_query_str(date)
+    cached = _cached_with_realtime(request, market, as_of)
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
@@ -412,10 +435,16 @@ def get_cached(
 def get_cached_summary(
     request: Request,
     market: str = Query("cn", description="cn|hk|us"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD, 省略时取最近写入的日期"),
 ):
-    """返回策略卡片所需的轻量摘要，不序列化股票明细。"""
+    """返回指定日期策略卡片所需的轻量摘要，不序列化股票明细。
+
+    前端据 results[sid].as_of 与当前选中日期比对来判断哪些策略还没算过,
+    因此这里必须只回该日期的槽, 混入其他日期会让「未算过」被判成「已算过」。
+    """
     market = str(market) or "cn"
-    cached = _cached_with_realtime(request, market)
+    as_of = _as_query_str(date)
+    cached = _cached_with_realtime(request, market, as_of)
     results = cached.get("results") or {}
     summary = {
         sid: {
@@ -452,10 +481,11 @@ def get_cached_result(
     request: Request,
     ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
     market: str = Query("cn", description="cn|hk|us"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD, 省略时取最近写入的日期"),
 ):
-    """按需返回单个策略的完整明细及其今日失效行。"""
+    """按需返回指定日期单个策略的完整明细及其该日失效行。"""
     market = str(market) or "cn"
-    cached = _cached_with_realtime(request, market)
+    cached = _cached_with_realtime(request, market, _as_query_str(date))
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {
