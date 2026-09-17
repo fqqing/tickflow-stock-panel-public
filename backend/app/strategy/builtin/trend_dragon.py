@@ -24,6 +24,11 @@ BARSLASTCOUNT / HHV / MA 全部按有效 bar 计数, 停牌日不计入窗口。
 - ``--max-bias20`` (信号日收盘价相对 MA20 的乖离率上限) -> ``bias20_cap_pct``
 - ``--max-momentum`` (资金动能上限) -> ``use_momentum_filter`` + ``momentum_cap``
 
+**两者默认开启且默认值对齐用户日常用法**
+(``python 选股_趋势擒龙.py --max-momentum 1 --max-bias20 10 --feishu``, 见源脚本 docstring
+第 30 行): ``use_momentum_filter=True`` / ``momentum_cap=1.0`` / ``bias20_cap_pct=10.0``。
+要复现源脚本「不加限制」的原始信号, 把开关关掉 / 把上限填 0 即可。
+
 资金动能口径 (源脚本 compute_capital_momentum):
 
     A1 = C / INDEXC * 1e6            # INDEXC = 该股所属市场的基准指数收盘价
@@ -87,7 +92,13 @@ _MIN_HISTORY = 20  # 源脚本 n < 20 直接返回全 False
 
 # 资金动能: MA(A1, 52), 窗口按有效 bar 计
 _MOMENTUM_WINDOW = 52
-_DEFAULT_MOMENTUM_CAP = 0.0  # 源脚本 --max-momentum 推荐值 0
+
+# 事件研究过滤的默认值 —— 对齐源脚本 docstring 第 30 行的日常调用:
+#   python 选股_趋势擒龙.py --max-momentum 1 --max-bias20 10 --feishu
+# 源脚本自己不带默认值(None = 不过滤), 这里按用户实际用法把限制默认打开。
+_DEFAULT_MOMENTUM_ENABLED = True
+_DEFAULT_MOMENTUM_CAP = 1.0
+_DEFAULT_BIAS20_CAP_PCT = 10.0
 
 # 依赖深度: A2 需要 4+9 根 -> A3 再等 5 根 -> MA10 / HHV5 各自 10 / 5 根; 60 根足够收敛
 _WARMUP_BARS = 60
@@ -136,25 +147,25 @@ META = {
             "id": "bias20_cap_pct",
             "label": "MA20乖离率上限%(0=不过滤)",
             "type": "float",
-            "default": 0.0,
+            "default": _DEFAULT_BIAS20_CAP_PCT,
             "min": 0.0,
             "max": 50.0,
-            "step": 1.0,
+            "step": 0.1,
         },
         {
             "id": "use_momentum_filter",
             "label": "启用资金动能上限",
             "type": "bool",
-            "default": False,
+            "default": _DEFAULT_MOMENTUM_ENABLED,
         },
         {
             "id": "momentum_cap",
-            "label": "资金动能上限(推荐0)",
+            "label": "资金动能上限(工具默认1)",
             "type": "float",
             "default": _DEFAULT_MOMENTUM_CAP,
             "min": -50.0,
             "max": 50.0,
-            "step": 1.0,
+            "step": 0.1,
         },
     ],
     "scoring": {"momentum_20d": 0.4, "vol_ratio_5d": 0.3, "change_pct": 0.3},
@@ -175,7 +186,7 @@ class TrendDragonMatrixStrategy:
         return frozenset({"open", "high", "close"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        if params.get("use_momentum_filter", False):
+        if _momentum_enabled(params):
             return max(_WARMUP_BARS, _MOMENTUM_WARMUP_BARS)
         return _WARMUP_BARS
 
@@ -239,12 +250,12 @@ class TrendDragonMatrixStrategy:
         scan_days = _resolve_scan_days(params)
         entry = rolling_max(dragon.astype(np.float32), valid, scan_days) >= np.float32(0.5)
 
-        bias_cap = _resolve_float(params.get("bias20_cap_pct"), 0.0)
+        bias_cap = _resolve_float(params.get("bias20_cap_pct"), _DEFAULT_BIAS20_CAP_PCT)
         if bias_cap > 0:
             bias_pct = matrix_feature(market, "ma20_bias") * np.float32(100.0)
             entry &= np.isfinite(bias_pct) & (bias_pct <= np.float32(bias_cap))
 
-        if params.get("use_momentum_filter", False):
+        if _momentum_enabled(params):
             momentum = _capital_momentum(market, valid)
             cap = _resolve_float(params.get("momentum_cap"), _DEFAULT_MOMENTUM_CAP)
             # 基准数据整列缺失 (该交易所的指数读不到) 时不参与过滤, 避免把结果清空;
@@ -306,6 +317,18 @@ def _resolve_scan_days(params: dict) -> int:
     except (TypeError, ValueError):
         return _DEFAULT_SCAN_DAYS
     return min(max(days, 1), 20)
+
+
+def _momentum_enabled(params: dict) -> bool:
+    """资金动能过滤开关: 缺省按 :data:`_DEFAULT_MOMENTUM_ENABLED` (默认开)。
+
+    面板传下来的 params 只会带用户显式改过的键, 所以缺省值必须与 META 一致 ——
+    否则「UI 显示开着、实际没生效」。
+    """
+    raw = params.get("use_momentum_filter", _DEFAULT_MOMENTUM_ENABLED)
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
 
 
 def _resolve_float(value: object, fallback: float) -> float:

@@ -23,6 +23,15 @@ from app.indicators.formula_signals import trend_dragon
 
 _FIELDS = ("open", "high", "low", "close", "volume")
 
+# 策略 META 的默认值现在对齐源脚本的日常用法 (`--max-momentum 1 --max-bias20 10`)。
+# 下面这些用例想验证的是**信号本身**, 所以一律显式关掉两条事件研究过滤, 免得
+# 「默认又改了一档」把断言带偏。
+_NO_FILTERS = {"use_momentum_filter": False, "bias20_cap_pct": 0.0}
+
+
+def _params(**overrides) -> dict:
+    return {**_NO_FILTERS, **overrides}
+
 
 def _panel_from_series(
     series: dict[str, np.ndarray],
@@ -105,7 +114,7 @@ def test_trend_dragon_matches_source_formula_on_random_panel():
 
     market = _market(frames)
     # scan_days=1 -> entry 就是「当日出现信号」, 可与源公式逐 bar 对拍
-    signals = MATRIX_STRATEGY.compute_signals(market, {"scan_days": 1})
+    signals = MATRIX_STRATEGY.compute_signals(market, _params(scan_days=1))
 
     for asset_id, symbol in enumerate(market.symbols):
         entry = signals.entry[:, asset_id].astype(bool)
@@ -123,8 +132,8 @@ def test_trend_dragon_scan_window_marks_subsequent_valid_bars():
     series = _random_series(seed=99, bars=400)
     market = _market([_panel_from_series(series, "000001.SZ")])
 
-    single = MATRIX_STRATEGY.compute_signals(market, {"scan_days": 1}).entry[:, 0].astype(bool)
-    window = MATRIX_STRATEGY.compute_signals(market, {"scan_days": 5}).entry[:, 0].astype(bool)
+    single = MATRIX_STRATEGY.compute_signals(market, _params(scan_days=1)).entry[:, 0].astype(bool)
+    window = MATRIX_STRATEGY.compute_signals(market, _params(scan_days=5)).entry[:, 0].astype(bool)
 
     hits = np.flatnonzero(single)
     assert hits.size >= 1, "构造序列没有信号, 窗口断言无意义"
@@ -143,11 +152,11 @@ def test_trend_dragon_param_switches_only_relax_conditions():
     series = _random_series(seed=25, bars=400)
     market = _market([_panel_from_series(series, "000001.SZ")])
 
-    strict = MATRIX_STRATEGY.compute_signals(market, {"scan_days": 1}).entry[:, 0].astype(bool)
+    strict = MATRIX_STRATEGY.compute_signals(market, _params(scan_days=1)).entry[:, 0].astype(bool)
     relaxed = (
         MATRIX_STRATEGY.compute_signals(
             market,
-            {"scan_days": 1, "require_above_ma10": False, "require_strong_close": False},
+            _params(scan_days=1, require_above_ma10=False, require_strong_close=False),
         )
         .entry[:, 0]
         .astype(bool)
@@ -164,9 +173,9 @@ def test_trend_dragon_bias_cap_filters_high_bias_entries():
     series = _random_series(seed=31, bars=400, drift=0.004)
     market = _market([_panel_from_series(series, "000001.SZ")])
 
-    uncapped = MATRIX_STRATEGY.compute_signals(market, {"scan_days": 1}).entry[:, 0].astype(bool)
+    uncapped = MATRIX_STRATEGY.compute_signals(market, _params(scan_days=1)).entry[:, 0].astype(bool)
     capped = (
-        MATRIX_STRATEGY.compute_signals(market, {"scan_days": 1, "bias20_cap_pct": 3.0})
+        MATRIX_STRATEGY.compute_signals(market, _params(scan_days=1, bias20_cap_pct=3.0))
         .entry[:, 0]
         .astype(bool)
     )
@@ -204,3 +213,32 @@ def test_trend_dragon_meta_and_signal_ids():
     assert module.ENTRY_SIGNALS == ["signal_trend_dragon"]
     assert module.MATRIX_STRATEGY.required_fields() == frozenset({"open", "high", "close"})
     assert module.MATRIX_STRATEGY.required_warmup_bars({}) > 0
+
+
+def test_trend_dragon_defaults_match_tool_usage():
+    """默认参数对齐源脚本的日常调用 ``--max-momentum 1 --max-bias20 10``。
+
+    源脚本 docstring 第 30 行就是 ``python 选股_趋势擒龙.py --max-momentum 1
+    --max-bias20 10 --feishu`` —— 用户是**带着限制**跑的。面板默认若不带同样的
+    限制, 两边选出来的票天然对不上 (2026-09-17 实测: 面板无限制当日 7097 只 vs
+    工具 578 只)。
+    """
+    from app.strategy.builtin import trend_dragon as module
+
+    params = {item["id"]: item for item in module.META["params"]}
+    assert params["use_momentum_filter"]["default"] is True
+    assert params["momentum_cap"]["default"] == 1.0
+    assert params["bias20_cap_pct"]["default"] == 10.0
+
+    # 步长要允许 0.5 这类非整数上限 (源脚本 --max-momentum 0.5)
+    for key in ("momentum_cap", "bias20_cap_pct"):
+        assert params[key]["step"] <= 0.5, f"{key} 的步长太粗, 调不出 0.5"
+    assert params["momentum_cap"]["min"] <= 0.5 <= params["momentum_cap"]["max"]
+
+    # 面板只回传用户改过的键, 所以缺省路径必须与 META 的默认一致 ——
+    # 否则会出现「UI 显示开着、实际没生效」。
+    strategy = module.MATRIX_STRATEGY
+    assert strategy.required_warmup_bars({}) == strategy.required_warmup_bars(
+        {"use_momentum_filter": True}
+    )
+    assert strategy.required_warmup_bars({"use_momentum_filter": False}) < strategy.required_warmup_bars({})

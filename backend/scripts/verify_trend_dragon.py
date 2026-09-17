@@ -10,10 +10,20 @@
 (``qushiqinlong/趋势擒龙_选股结果_*.csv``), 额外报告覆盖率 —— 那份 CSV 出自另一条
 数据源 (pytdx), 前复权基准与本地不一致, 因此只作参考不参与判定。
 
-``--max-momentum`` 打开资金动能过滤: 参考实现用 ``capital_momentum``
-(与个股 K 线副图同口径) 在「个股有效 bar 序列 ∩ 指数可用日」上算 52 日均值,
-取最后一根的值 —— 与源脚本 ``scan_one`` 一致。指数序列缺值按矩阵口径**前向沿用**
-(源脚本是 inner join 直接丢行; 指数分区完整时两者等价)。
+``--max-momentum`` / ``--max-bias20`` 分别打开资金动能与 MA20 乖离率过滤 —— 参数的
+**两侧语义都跟源脚本 ``scan_one`` 对齐**: 值取不到 (动能/乖离为 None) 或超过上限
+都直接剔除。
+
+- 资金动能: 参考实现用 ``capital_momentum`` (与个股 K 线副图同口径) 在
+  「个股有效 bar 序列 ∩ 指数可用日」上算 52 日均值, 取最后一根的值。指数序列缺值
+  按矩阵口径**前向沿用** (源脚本是 inner join 直接丢行; 指数分区完整时两者等价)。
+- MA20 乖离率: ``(信号日收盘 / MA20 - 1) * 100``, MA20 取最近 20 根有效收盘。
+
+⚠️ 策略 ``META`` 里的默认值已经对齐源脚本的日常用法
+(``--max-momentum 1 --max-bias20 10``), 所以本脚本**总是显式**写入
+``use_momentum_filter`` / ``momentum_cap`` / ``bias20_cap_pct`` 三个键 ——
+不给 ``--max-momentum`` / ``--max-bias20`` 就是「关掉对应过滤」, 而不是
+「用策略默认值」。两边不能混, 否则面板过滤了参考没过滤。
 
 **已知数值边界 (非移植偏差)**: 矩阵里的价格是 float32, 本脚本的参考实现是 float64。
 MA10 这种「价格均线」在两侧的末位会差 ~1e-7 量级, 于是 ``C > MA10`` 这类**严格比较**
@@ -53,6 +63,8 @@ from app.strategy.builtin.trend_dragon import MATRIX_STRATEGY, META
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "kline_daily_enriched"
 _SHARE_RE = re.compile(r"\d{6}\.(SH|SZ|BJ)")
+
+_BIAS20_WINDOW = 20  # 源脚本 df['close'].rolling(20)
 
 
 def _partition_dates() -> list[date]:
@@ -180,6 +192,21 @@ def _reference_momentum(
     return last if math.isfinite(last) else None
 
 
+def _reference_bias20(close: np.ndarray) -> float | None:
+    """源脚本 ``scan_one`` 口径的 MA20 乖离率: ``(信号日收盘 / MA20 - 1) * 100``。
+
+    源脚本用 ``df['close'].rolling(20).mean()`` 取**信号日**那一根 (不是最后一根),
+    但 ``sig_idx`` 就是最近一次信号所在行, 而这里传进来的序列已经截到 as_of,
+    只有 as_of 当根有信号时才会走到这里, 所以取最后一根等价。
+    """
+    if close.size < _BIAS20_WINDOW:
+        return None
+    average = float(np.mean(close[-_BIAS20_WINDOW:]))
+    if not math.isfinite(average) or average == 0.0:
+        return None
+    return (float(close[-1]) / average - 1.0) * 100.0
+
+
 def _split_float32_boundary(
     candidates: list[str],
     market: MarketDataMatrix,
@@ -251,7 +278,13 @@ def main() -> int:
         "--max-momentum",
         type=float,
         default=None,
-        help="资金动能上限 (源脚本 --max-momentum, 推荐 0); 不给则不过滤",
+        help="资金动能上限 (源脚本 --max-momentum, 日常用法 1); 不给则关掉该过滤",
+    )
+    parser.add_argument(
+        "--max-bias20",
+        type=float,
+        default=None,
+        help="MA20 乖离率上限%% (源脚本 --max-bias20, 日常用法 10); 不给则关掉该过滤",
     )
     parser.add_argument("--baseline", default=None, help="源脚本历史选股结果 CSV, 仅作覆盖率参考")
     parser.add_argument("--show", type=int, default=20, help="打印前 N 个差异")
@@ -277,14 +310,21 @@ def main() -> int:
     if not args.no_basic_filter:
         print("[WARN] 未加 --no-basic-filter: 结果会被 basic_filter 裁剪, 仅作冒烟")
 
-    params: dict = {"scan_days": args.scan_days}
+    # 策略 META 的默认值已经对齐源脚本的日常用法 (--max-momentum 1 --max-bias20 10),
+    # 对拍必须**显式**声明本次用哪一档, 否则「不给参数」会被当成默认开过滤。
+    params: dict = {
+        "scan_days": args.scan_days,
+        "use_momentum_filter": args.max_momentum is not None,
+        "momentum_cap": float(args.max_momentum) if args.max_momentum is not None else 0.0,
+        "bias20_cap_pct": float(args.max_bias20) if args.max_bias20 is not None else 0.0,
+    }
     index_lookup: dict[str, dict[date, float]] = {}
     if args.max_momentum is not None:
-        params["use_momentum_filter"] = True
-        params["momentum_cap"] = float(args.max_momentum)
         index_lookup = _index_close_lookup()
         covered = ", ".join(f"{k}:{len(v)}" for k, v in sorted(index_lookup.items()))
         print(f"资金动能上限={args.max_momentum}  指数序列 {covered or '缺失'}")
+    if args.max_bias20 is not None:
+        print(f"MA20 乖离率上限={args.max_bias20}%")
 
     signals = MatrixStrategyPipeline().run(
         MATRIX_STRATEGY,
@@ -316,6 +356,7 @@ def main() -> int:
     mismatched_suspension: list[str] = []
     skipped = 0
     momentum_missing = 0
+    bias_missing = 0
     for asset_id, symbol in enumerate(market.symbols):
         usable = (
             np.isfinite(close[: as_of_row + 1, asset_id])
@@ -339,6 +380,12 @@ def main() -> int:
             close[rows, asset_id],
             args.scan_days,
         )
+        if hit and args.max_bias20 is not None:
+            # 源脚本 scan_one: bias20 取 None 或超过上限都直接剔除
+            bias = _reference_bias20(close[rows, asset_id])
+            if bias is None or bias > float(args.max_bias20):
+                bias_missing += 1
+                hit = False
         if hit and args.max_momentum is not None:
             # 源脚本 scan_one: 动能取 None 或超过上限都直接剔除
             momentum = _reference_momentum(
@@ -369,6 +416,8 @@ def main() -> int:
     )
     if args.max_momentum is not None:
         print(f"  参考口径因动能缺失被剔除 {momentum_missing} 只")
+    if args.max_bias20 is not None:
+        print(f"  参考口径因乖离缺失被剔除 {bias_missing} 只")
     if mismatched_suspension:
         print(
             f"[DIFF] 目标日停牌却命中 {len(mismatched_suspension)}: "

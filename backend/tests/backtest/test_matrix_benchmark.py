@@ -289,10 +289,18 @@ def test_trend_dragon_momentum_filter_only_removes_entries(fake_data_dir):
 
     market, valid, _ = _prepare_momentum_panel(fake_data_dir)
     strategy = _strategy()
-    base = strategy.compute_signals(market, {"scan_days": 5}).entry.astype(bool)
+    # 过滤默认是开的 -> 基准那一侧要显式关掉, 否则两边都带过滤, 断言退化成恒真
+    base = strategy.compute_signals(
+        market, {"scan_days": 5, "use_momentum_filter": False, "bias20_cap_pct": 0.0}
+    ).entry.astype(bool)
     filtered = strategy.compute_signals(
         market,
-        {"scan_days": 5, "use_momentum_filter": True, "momentum_cap": _MOMENTUM_CAP},
+        {
+            "scan_days": 5,
+            "use_momentum_filter": True,
+            "momentum_cap": _MOMENTUM_CAP,
+            "bias20_cap_pct": 0.0,
+        },
     ).entry.astype(bool)
 
     momentum = _capital_momentum(market, valid)
@@ -310,10 +318,17 @@ def test_trend_dragon_momentum_filter_keeps_entries_without_benchmark(fake_data_
     market = _market([_panel_from_series(series, "600000.SH")])
     strategy = _strategy()
 
-    base = strategy.compute_signals(market, {"scan_days": 5}).entry.astype(bool)
+    base = strategy.compute_signals(
+        market, {"scan_days": 5, "use_momentum_filter": False, "bias20_cap_pct": 0.0}
+    ).entry.astype(bool)
     filtered = strategy.compute_signals(
         market,
-        {"scan_days": 5, "use_momentum_filter": True, "momentum_cap": _MOMENTUM_CAP},
+        {
+            "scan_days": 5,
+            "use_momentum_filter": True,
+            "momentum_cap": _MOMENTUM_CAP,
+            "bias20_cap_pct": 0.0,
+        },
     ).entry.astype(bool)
 
     np.testing.assert_array_equal(filtered, base)
@@ -328,10 +343,17 @@ def test_trend_dragon_momentum_filter_drops_short_history(fake_data_dir):
     market = _market([_panel_from_series(series, "600000.SH")])
     strategy = _strategy()
 
-    base = strategy.compute_signals(market, {"scan_days": 5}).entry.astype(bool)
+    base = strategy.compute_signals(
+        market, {"scan_days": 5, "use_momentum_filter": False, "bias20_cap_pct": 0.0}
+    ).entry.astype(bool)
     filtered = strategy.compute_signals(
         market,
-        {"scan_days": 5, "use_momentum_filter": True, "momentum_cap": _MOMENTUM_CAP},
+        {
+            "scan_days": 5,
+            "use_momentum_filter": True,
+            "momentum_cap": _MOMENTUM_CAP,
+            "bias20_cap_pct": 0.0,
+        },
     ).entry.astype(bool)
 
     assert base.any(), "构造序列没有命中, 断言会退化成恒真"
@@ -340,8 +362,11 @@ def test_trend_dragon_momentum_filter_drops_short_history(fake_data_dir):
 
 def test_trend_dragon_momentum_warmup_bars():
     strategy = _strategy()
-    base = strategy.required_warmup_bars({})
+    without = strategy.required_warmup_bars({"use_momentum_filter": False})
     with_filter = strategy.required_warmup_bars({"use_momentum_filter": True})
 
-    assert with_filter > base
+    assert with_filter > without
     assert with_filter >= 52 * 2 - 4  # 动能先攒 52 个有效 bar, 其均值再要 52 个
+
+    # 资金动能过滤默认开启 (对齐源脚本日常用法), 空 params 必须按开启算窗口
+    assert strategy.required_warmup_bars({}) == with_filter
