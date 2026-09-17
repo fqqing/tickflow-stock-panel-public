@@ -275,7 +275,13 @@ def _fetch_daily(
     on_chunk_done: Callable[[int, int], None] | None,
 ) -> pl.DataFrame:
     """拉日线 (不复权), 返回规范化后的面板日K表。"""
+    # Tushare 只覆盖 A 股: 港美股代码 (AAPL.US / 00700.HK) 发过去只会拿到空表,
+    # 白白消耗配额还把日志刷满 warning。日线标的池可能是多市场兜底
+    # (见 daily_pipeline._resolve_universe 的 free 分支), 必须先过滤。
+    symbols = _a_share_only(symbols)
     if not symbols:
+        if on_chunk_done:
+            on_chunk_done(1, 1)
         return pl.DataFrame()
 
     end = end_time or datetime.now()
@@ -336,7 +342,10 @@ def _fetch_adj_factors(
     任意 bar 的因子依赖其**之后**的全部事件, 按增量窗口取会让历史 bar 因子残缺
     (与 em_xdxr 同一理由)。
     """
+    symbols = _a_share_only(symbols)
     if not symbols:
+        if on_chunk_done:
+            on_chunk_done(1, 1)
         return pl.DataFrame()
 
     end = end_time or datetime.now()

@@ -391,6 +391,54 @@ def test_get_adj_factors_end_to_end_sparsifies(monkeypatch):
     assert df["ex_factor"].to_list() == pytest.approx([1.1])
 
 
+def _patch_quiet(monkeypatch, recorder):
+    """静音限速 + 记录实际发出的 ts_code。"""
+    monkeypatch.setattr(tp, "_token", lambda: "x")
+    monkeypatch.setattr(tp, "_pace", lambda i: None)
+
+    def fake_call(api, params, fields=""):
+        recorder.extend(params["ts_code"].split(","))
+        return pl.DataFrame()
+
+    monkeypatch.setattr(tp, "_call", fake_call)
+
+
+def test_get_daily_filters_non_a_share_symbols(monkeypatch):
+    """日线标的池可能是多市场兜底 —— 港美股代码发往 Tushare 只会拿到空表,
+    白白消耗配额还会把日志刷满 warning。"""
+    seen: list[str] = []
+    _patch_quiet(monkeypatch, seen)
+
+    out = tp.TushareProvider().get_daily(
+        ["000001.SZ", "AAPL.US", "00700.HK", "600519.SH"], None, None
+    )
+    assert out.is_empty()
+    assert seen == ["000001.SZ", "600519.SH"]
+
+
+def test_get_daily_all_foreign_skips_requests_but_reports_progress(monkeypatch):
+    """全是港美股时一个请求都不发, 但仍要回调一次进度 —— 否则前端进度卡在 0。"""
+    seen: list[str] = []
+    _patch_quiet(monkeypatch, seen)
+    ticks: list[tuple[int, int]] = []
+
+    out = tp._fetch_daily(
+        "daily", ["AAPL.US", "00700.HK"], None, None,
+        lambda cur, tot: ticks.append((cur, tot)),
+    )
+    assert out.is_empty()
+    assert seen == []
+    assert ticks == [(1, 1)]
+
+
+def test_get_adj_factors_filters_non_a_share_symbols(monkeypatch):
+    seen: list[str] = []
+    _patch_quiet(monkeypatch, seen)
+
+    tp.TushareProvider().get_adj_factors(["600519.SH", "AAPL.US"], None, None)
+    assert seen == ["600519.SH"]
+
+
 def test_get_metrics_scales_ocf_to_or_to_percent(monkeypatch):
     """fina_indicator 里只有 ocf_to_or 是小数, 其余已是百分点。"""
     payload = {
