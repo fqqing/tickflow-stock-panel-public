@@ -252,6 +252,41 @@ def test_call_without_token_short_circuits(monkeypatch):
     assert tp._call("daily", {"ts_code": "000001.SZ"}, "").is_empty()
 
 
+def test_pace_is_globally_shared_across_tasks(monkeypatch):
+    """限速器必须模块级共享。
+
+    财务同步 (逐个标的, 约 30 分钟/表) 与盘后日线拉取可能同时进行: 若各自独立
+    计步, 合并速率会翻倍并触发上游频次限制 —— 而超频在 ``_call`` 里只表现为
+    「返回空表」, 等于**静默丢数据**。
+    """
+    slept: list[float] = []
+    clock = [1000.0]
+
+    def _now() -> float:
+        return clock[0]
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(tp.time, "monotonic", _now)
+    monkeypatch.setattr(tp.time, "sleep", _sleep)
+    monkeypatch.setattr(tp, "_last_request_at", 0.0)
+
+    tp._pace()
+    assert slept == [], "距上次请求已久, 首次调用不应睡眠"
+    tp._pace()
+    assert slept == pytest.approx([tp._INTERVAL_S]), "紧随其后的请求必须补满间隔"
+    tp._pace()
+    assert len(slept) == 2, "连续请求应每次都补满间隔, 而不是只补第一次"
+
+
+def test_pace_interval_stays_under_quota():
+    """间隔必须 >= 60/200 秒, 否则会踩到 2100 积分档的 200 次/分钟上限。"""
+    assert tp._RPM <= 200, "_RPM 不应高于 2100 积分档的 200 次/分钟上限"
+    assert tp._INTERVAL_S >= 60.0 / 200.0
+
+
 # ---------------------------------------------------------------- 资产类型
 
 
@@ -392,9 +427,8 @@ def test_get_adj_factors_end_to_end_sparsifies(monkeypatch):
 
 
 def _patch_quiet(monkeypatch, recorder):
-    """静音限速 + 记录实际发出的 ts_code。"""
+    """记录实际发出的 ts_code (限速内置在 _call 里, 这里 _call 被整体替换, 不会 sleep)。"""
     monkeypatch.setattr(tp, "_token", lambda: "x")
-    monkeypatch.setattr(tp, "_pace", lambda i: None)
 
     def fake_call(api, params, fields=""):
         recorder.extend(params["ts_code"].split(","))

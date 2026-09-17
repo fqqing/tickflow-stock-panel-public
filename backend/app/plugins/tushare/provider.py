@@ -65,6 +65,7 @@ Tushare 在本项目里承担的是**日线与基本面**这条稳定链路。
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -96,6 +97,8 @@ _BATCH_MAX = 50
 
 # 2100 积分档的额度是 200 次/分钟; 留出余量避免踩限流。
 _RPM = 180
+# 任意两次请求的最小间隔 (秒)。
+_INTERVAL_S = 60.0 / _RPM
 
 # 各资产类型对应的日线接口 (面板 asset_type -> Tushare api_name)
 _DAILY_API = {
@@ -150,6 +153,8 @@ def _call(api_name: str, params: dict, fields: str = "") -> pl.DataFrame:
     if not token:
         logger.warning("tushare %s: 未配置 %s", api_name, _TOKEN_ENV)
         return pl.DataFrame()
+    # 限速内置于通道本身, 而不是散在各个调用循环里 —— 任何新增的请求路径都自动受限。
+    _pace()
     body = {"api_name": api_name, "token": token, "params": params, "fields": fields}
     try:
         resp = httpx.post(_HOST, json=body, timeout=_TIMEOUT_S)
@@ -233,10 +238,24 @@ def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def _pace(index: int) -> None:
-    """批次间限速 (第一批不睡, 给同步一个起步爆发)。"""
-    if index > 0:
-        time.sleep(60.0 / _RPM)
+_pace_lock = threading.Lock()
+_last_request_at = 0.0
+
+
+def _pace() -> None:
+    """请求间隔限速: 保证任意两次 Tushare 请求之间至少隔 ``_INTERVAL_S`` 秒。
+
+    限速器**必须是模块级共享**的, 不能由各循环自己计步: 财务同步 (逐个标的,
+    约 30 分钟/表) 与盘后日线拉取可能同时进行, 各算各的会让合并速率翻倍并
+    触发上游频次限制 —— 而 ``_call`` 失败只记 warning 返回空表, 超频等于
+    **静默丢数据**。持锁 sleep 让并发任务自然排队。
+    """
+    global _last_request_at
+    with _pace_lock:
+        wait = _INTERVAL_S - (time.monotonic() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
 
 
 # ================================================================
@@ -294,7 +313,6 @@ def _fetch_daily(
     chunks = _chunks(symbols, size)
     frames: list[pl.DataFrame] = []
     for i, chunk in enumerate(chunks):
-        _pace(i)
         df = _call(api_name, {"ts_code": ",".join(chunk),
                               "start_date": start_s, "end_date": end_s},
                    "ts_code,trade_date,open,high,low,close,vol,amount")
@@ -357,7 +375,6 @@ def _fetch_adj_factors(
     chunks = _chunks(symbols, size)
     frames: list[pl.DataFrame] = []
     for i, chunk in enumerate(chunks):
-        _pace(i)
         df = _call("adj_factor", {"ts_code": ",".join(chunk),
                                   "start_date": start_s, "end_date": end_s},
                    "ts_code,trade_date,adj_factor")
@@ -617,7 +634,6 @@ def _collect_per_symbol(
     rows: list[dict] = []
     total = len(symbols)
     for i, sym in enumerate(symbols):
-        _pace(i)
         df = _call(api, {"ts_code": sym, **extra}, fields)
         if not df.is_empty():
             rows.extend(df.to_dicts())
