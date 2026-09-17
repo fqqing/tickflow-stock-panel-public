@@ -87,6 +87,36 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
+def _merge_markets_not_covered(rows: list[dict], data_dir: Path) -> list[dict]:
+    """把已有维表里 **provider 未覆盖市场** 的行原样保留下来。
+
+    provider 提供的标的通常只覆盖部分市场 (tushare 只有 A 股), 而面板全量重写
+    instruments.parquet。不做合并的话, 一次标的同步就会把港美股 1.5 万行抹掉。
+    """
+    covered = {r.get("market") for r in rows if r.get("market")}
+    if not covered:
+        return rows
+    path = data_dir / "instruments" / "instruments.parquet"
+    if not path.exists():
+        return rows
+    try:
+        old = pl.read_parquet(path)
+        if "market" not in old.columns:
+            return rows
+        keep = old.filter(~pl.col("market").is_in(sorted(covered)))
+    except Exception as e:
+        logger.warning("读取已有 instruments 维表失败, 跳过多市场合并: %s", e)
+        return rows
+    if keep.is_empty():
+        return rows
+    logger.info(
+        "instruments: provider 仅覆盖 %s, 保留已有 %d 行其他市场标的",
+        sorted(covered),
+        keep.height,
+    )
+    return [*rows, *keep.to_dicts()]
+
+
 def sync_instruments(data_dir: Path, markets: list[str] | None = None) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
@@ -112,6 +142,10 @@ def sync_instruments(data_dir: Path, markets: list[str] | None = None) -> int:
                         logger.info("instruments %s (%s): %d stocks", ex, market, len(items))
                 except Exception as e:
                     logger.warning("get_instruments(%s) failed: %s", ex, e)
+    elif all_rows:
+        # provider 通常只覆盖自己支持的市场 (例: tushare 只给 A 股 —— 港美股行情不在
+        # 其积分体系内), 其余市场沿用已有维表; 否则切换日K源会把港美股标的整体抹掉。
+        all_rows = _merge_markets_not_covered(all_rows, data_dir)
 
     if not all_rows:
         return 0
