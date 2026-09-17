@@ -15,9 +15,17 @@
                  AND DIFF < DEA AND REF(MACD,1) < 0 AND DIFL3 < 0
     底部钝化   = (直接底钝化 OR 隔峰底钝化) AND REF(MACD,1) < 0
     底钝化     = 底部钝化 AND REF(底部钝化,1) = 0 AND DIFF < DEA
-    底部结构   = DIFF > REF(DIFF,1) AND REF(底钝化,1) AND DIFL1*0.9884 < DIFF
+    底部结构   = DIFF > REF(DIFF,1) AND REF(底部钝化,1) AND DIFL1*0.9884 < DIFF
     底结构形成 = 底部结构 AND REF(底部结构,1) = 0
     输出       = 底结构形成
+
+⚠️ ``底部结构`` 引用的确实是 **``底部钝化``** 而不是 ``底钝化`` (源码原文:
+``底部结构:=DIFF>REF(DIFF,1) AND (REF(底部钝化,1) AND DIFL1*0.9884<DIFF);``)。
+``底钝化`` 只被 ``M4:=BARSLAST(底钝化 OR 底再次钝化)`` 引用, 进而只服务于
+``底结构消失`` 那段指标图文字标注, **不在选股链上**。两者差别很大: ``底钝化``
+比 ``底部钝化`` 多了"上一根尚未钝化"与 ``DIFF < DEA`` 两道约束, 会让信号点整体
+后移。2026-09-16 用 2026-09-15 的真实数据实测: 误用 ``REF(底钝化,1)`` 时全市场只
+选中 9 只, 用 ``REF(底部钝化,1)`` 选中 48 只 (用户工具当日 43 只)。
 
 语义要点 (N1 / M1 的角色): 死叉之后的 ``N1+1`` 根就是"本轮下跌", ``LLV(C, N1+1)``
 取本轮下跌的收盘最低; 再往前的上一轮 ``M1+1`` 根用 ``REF`` 取到上一轮的同类低点。
@@ -146,10 +154,11 @@ def bottom_stale_chain(
     - ``valid``: 有效 bar 掩码
     - ``diff`` / ``dea`` / ``macd``: MACD 三线
     - ``direct`` / ``peak``: 直接底钝化 / 隔峰底钝化
-    - ``stale``: 底部钝化 (含价格与 DIF 双新低的背离判定)
-    - ``first_stale``: 底钝化 —— 底部钝化的**首次**成立且 DIFF 仍在 DEA 下方
-    - ``structure``: 底部结构
-    - ``formed``: 底结构形成 —— 底部结构的首次成立, 即选股输出
+    - ``stale``: 底部钝化 (含价格与 DIF 双新低的背离判定) —— 「底部结构选股」用它
+    - ``first_stale``: 底钝化 —— 底部钝化的**首次**成立且 DIFF 仍在 DEA 下方,
+      只有「钝化加低九选股」(``底钝化 AND T9``) 会用到
+    - ``structure``: 底部结构 = ``DIFF>REF(DIFF,1) AND REF(底部钝化,1) AND DIFL1*0.9884<DIFF``
+    - ``formed``: 底结构形成 —— 底部结构的首次成立, 即「底部结构选股」的选股输出
     """
     close = market.close
     valid = np.isfinite(close)
@@ -187,9 +196,10 @@ def bottom_stale_chain(
 
         stale = (direct | peak) & negative & valid
         first_stale = stale & previous_false(stale, valid) & (diff < dea) & valid
+        # 注意取 REF(底部钝化, 1) 而非 REF(底钝化, 1) —— 见模块 docstring 的口径警示
         structure = (
             (diff > diff_prev)
-            & previous_true(first_stale, valid)
+            & previous_true(stale, valid)
             & (difl1 * _BOTTOM_RATIO < diff)
             & valid
         )

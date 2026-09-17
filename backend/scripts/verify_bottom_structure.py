@@ -9,6 +9,11 @@ as_of 当日的命中集合。差异即移植偏差 (变长窗口 / BARSLAST 有
 被 ``llv_at`` 判为无效 —— 这与矩阵侧 ``_observed_only`` 的遮蔽处理等价, 是刻意
 对齐的两条路径。
 
+⚠️ 「底部结构」取的是 ``REF(底部钝化, 1)`` 而不是 ``REF(底钝化, 1)`` —— 源码原文
+``底部结构:=DIFF>REF(DIFF,1) AND (REF(底部钝化,1) AND DIFL1*0.9884<DIFF);``。
+``底钝化`` 只被 ``M4`` 引用, 服务于 ``底结构消失`` 的图表标注。早期版本两边一起
+写错成了 ``底钝化``, 已修。
+
 用法 (在 backend 目录下):
     ./.venv/Scripts/python.exe -m scripts.verify_bottom_structure
     ./.venv/Scripts/python.exe -m scripts.verify_bottom_structure --strategy stale_nine_turn
@@ -134,12 +139,14 @@ def _reference_signals(
         & _lt(difl3, 0.0)
     )
     stale = (direct | peak) & negative
-    first_stale = stale & _previous_zero(stale) & _lt(diff, dea)
     if with_nine_turn:
+        # 钝化加低九: 输出 底钝化 AND T9 (底钝化 = 底部钝化的首次成立且 DIFF<DEA)
+        first_stale = stale & _previous_zero(stale) & _lt(diff, dea)
         return first_stale & _nine_turn_down(c)
 
+    # 底部结构取 REF(底部钝化, 1) —— 不是 REF(底钝化, 1)
     structure = (
-        _gt(diff, diff_prev) & _previous_true(first_stale) & _lt(difl1 * _BOTTOM_RATIO, diff)
+        _gt(diff, diff_prev) & _previous_true(stale) & _lt(difl1 * _BOTTOM_RATIO, diff)
     )
     return structure & _previous_zero(structure)
 

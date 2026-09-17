@@ -4,9 +4,13 @@
 ``钝化加低九选股_源码.txt`` (DHJDJXG) 逐行直译的纯 numpy 版本, 与生产代码
 (共享模块 ``_quant_structure``) **不共享任何算子**, 因此对拍才有意义。
 
-源脚本 ``qushiqinlong/底部结构选股.py::dbjg_signals`` 只实现到 ``底部结构``,
-且用的是 ``底部钝化`` 而不是源码里的 ``底钝化`` (少了"首次成立"限定与
-``DIFF < DEA`` 约束) —— 本实现以 AKL 源码为准, 所以参考实现也不复用它。
+⚠️ 「底部结构」取的是 ``REF(底部钝化, 1)`` 而**不是** ``REF(底钝化, 1)`` —— 源码原文
+``底部结构:=DIFF>REF(DIFF,1) AND (REF(底部钝化,1) AND DIFL1*0.9884<DIFF);``。
+``底钝化`` 只被 ``M4:=BARSLAST(底钝化 OR 底再次钝化)`` 引用, 进而只服务于
+``底结构消失`` 那段指标图文字标注, 不在选股链上。用户脚本
+``qushiqinlong/底部结构选股.py::dbjg_signals`` 用的也是 ``底部钝化`` —— 两边本来
+一致, 是面板早期实现偏了一格 (多加了"首次成立 + DIFF<DEA"两道约束, 会让信号
+整体后移)。``test_bottom_structure_uses_raw_stale_not_first_stale`` 专门盯这条。
 
 对拍在**有效 bar 压缩序列**上做: 矩阵实现自动跳停牌行, 参考实现则在剔除
 停牌行后的连续序列上计算, 两者应当逐位一致。
@@ -175,7 +179,8 @@ def reference_bottom_chain(close: np.ndarray, *, macd_prev_bars: int = 1) -> dic
     peak = (cl1 < cl3) & (difl1 < difl2) & (difl1 > difl3) & (diff < dea) & negative & (difl3 < 0.0)
     stale = (direct | peak) & negative
     first_stale = stale & _previous_zero(stale) & (diff < dea)
-    structure = (diff > diff_prev) & _previous_true(first_stale) & (difl1 * 0.9884 < diff)
+    # 底部结构引用 REF(底部钝化,1) —— 不是 REF(底钝化,1)
+    structure = (diff > diff_prev) & _previous_true(stale) & (difl1 * 0.9884 < diff)
     formed = structure & _previous_zero(structure)
     return {
         "diff": diff,
@@ -352,6 +357,38 @@ def test_formed_signal_is_first_occurrence_of_structure():
     rows = np.flatnonzero(formed)
     assert rows.size >= 1, "构造序列没有底结构形成信号"
     assert not structure[rows - 1].any(), "首次成立的前一根不应仍在结构内"
+
+
+def test_bottom_structure_uses_raw_stale_not_first_stale():
+    """回归: 「底部结构」用的是 ``REF(底部钝化, 1)``, 不是 ``REF(底钝化, 1)``。
+
+    两者不是同一个变量 —— ``first_stale``(底钝化) 在 ``stale``(底部钝化) 之上还多了
+    「上一根尚未钝化」与 ``DIFF < DEA`` 两道约束, 窄得多。2026-09-17 用 2026-09-15
+    的全市场真实数据实测: 误用 ``first_stale`` 时面板只选出 9 只, 用 ``stale`` 选出
+    48 只 (用户工具当日 43 只) —— 这就是「面板和工具选出来不一致」的根因。
+    """
+    shared = _load_shared_module()
+
+    series = _random_series(seed=161803, bars=520)
+    market = _market([_panel_from_series(series, "000001.SZ")])
+    chain = shared.bottom_stale_chain(market)
+
+    stale = chain["stale"][:, 0].astype(bool)
+    first_stale = chain["first_stale"][:, 0].astype(bool)
+    structure = chain["structure"][:, 0].astype(bool)
+
+    # first_stale 必须是 stale 的真子集, 且严格更少 —— 否则这条回归是空跑
+    assert not (first_stale & ~stale).any()
+    assert first_stale.sum() < stale.sum()
+
+    prev_stale = np.concatenate(([False], stale[:-1]))
+    prev_first = np.concatenate(([False], first_stale[:-1]))
+
+    assert (structure & ~prev_stale).sum() == 0, "底部结构必须紧跟在「底部钝化」之后"
+    assert (structure & ~prev_first).sum() > 0, (
+        "构造序列没能体现两种口径的差异: 换成 REF(底钝化,1) 也选得出同样的票, "
+        "这条回归失去意义"
+    )
 
 
 def test_bottom_structure_scan_window_marks_subsequent_valid_bars():

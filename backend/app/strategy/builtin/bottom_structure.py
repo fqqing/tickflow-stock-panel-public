@@ -8,16 +8,18 @@
     CL2/DIFL2 = REF(..., M1+1)                        # 上一轮同类低点
     直接底钝化 = CL1<CL2 AND DIFL1>DIFL2 AND REF(MACD,1)<0 AND DIFL2<0
     隔峰底钝化 = CL1<CL3 AND DIFL1<DIFL2 AND DIFL1>DIFL3 AND DIFF<DEA ...
-    底部结构 = DIFF>REF(DIFF,1) AND REF(底钝化,1) AND DIFL1*0.9884 < DIFF
+    底部结构 = DIFF>REF(DIFF,1) AND REF(底部钝化,1) AND DIFL1*0.9884 < DIFF
     输出 = 底结构形成 = 底部结构首次成立
 
 矩阵原生实现 —— 判定链在共享模块 :mod:`_quant_structure` 里, 与「钝化加低九」
 策略复用同一份逻辑; 算子全部走 app.backtest.matrix 的 ``valid_*`` 族
 (有效 bar 口径: 停牌日不占窗口位置)。
 
-⚠️ 与 ``qushiqinlong/底部结构选股.py`` 的一处差异: 那份脚本的 ``dbjg_signals``
-用的是 ``底部钝化`` (未做"首次成立"限定、也没有 ``DIFF < DEA`` 约束), 而 AKL
-源码的 ``底部结构`` 引用的是 ``底钝化``。本实现以 AKL 源码为准。
+⚠️ 与 ``qushiqinlong/底部结构选股.py`` 的差异只有一处, 且已对齐: 早期版本误把
+``底部结构`` 写成 ``REF(底钝化,1)``。AKL 源码原文用的是 ``REF(底部钝化,1)``,
+用户脚本用的也是 ``底部钝化`` —— 两边本来就一致, 是面板实现偏了 (2026-09-17 修)。
+``底钝化`` 在源码里只被 ``M4`` 引用, 服务于 ``底结构消失`` 的指标图文字标注,
+不在选股链上。
 """
 
 import numpy as np
