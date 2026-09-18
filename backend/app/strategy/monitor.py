@@ -47,6 +47,9 @@ _SIGNAL_CN: dict[str, str] = {
     "signal_trend_dragon": "趋势擒龙",
     "signal_bottom_structure": "底部结构",
     "signal_stale_nine_turn": "钝化加低九",
+    "signal_chan_1buy": "缠论一买", "signal_chan_2buy": "缠论二买",
+    "signal_chan_3buy": "缠论三买", "signal_chan_1sell": "缠论一卖",
+    "signal_chan_2sell": "缠论二卖", "signal_chan_3sell": "缠论三卖",
     **INTRADAY_SIGNAL_LABELS,
     # 行情字段
     "close": "收盘价", "open": "开盘价", "high": "最高价", "low": "最低价",

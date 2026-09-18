@@ -339,10 +339,13 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
 
     # import 白名单: Polars 与矩阵策略只开放执行协议所需模块。
     # 白名单而非黑名单 — 黑名单挡不住 ctypes/importlib/builtins/pickle 等未列出的危险模块。
+    # app.indicators.chan 只依赖 numpy、无 IO / 无副作用, 与 app.backtest.matrix 同级信任,
+    # 是顺序结构类策略 (缠论) 唯一能拿到笔/中枢算法的入口。
     _ALLOWED_IMPORT_MODULES = frozenset({
         "polars",
         "numpy",
         "app.backtest.matrix",
+        "app.indicators.chan",
         "app.strategy.builtin.factor_rank_research",
         "datetime",
         "__future__",
