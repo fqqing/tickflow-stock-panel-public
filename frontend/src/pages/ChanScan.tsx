@@ -2,7 +2,8 @@
  * 缠论买卖点全市场扫描。
  *
  * 与策略页的区别：策略页回答「哪些票符合我的选股条件」，这里回答
- * 「此刻全市场哪些票刚出现一买/二买/三买」—— 用来找当下的结构性机会，不依赖策略池。
+ * 「此刻全市场哪些票刚出现一买/二买/三买（或一卖/二卖/三卖）」—— 用来找当下的
+ * 结构性机会，不依赖策略池。买卖两侧只是方向不同，共用同一套结构算法与扫描路径。
  *
  * 后端一次扫描要遍历全市场日K（约 5500 只），冷启动 20 秒左右，热态（结果缓存命中）
  * 瞬时返回，所以页面用「点按钮才发请求」而不是进入即扫。
@@ -19,12 +20,21 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { fmtPrice } from '@/lib/format'
 import { useMarket } from '@/lib/market'
 
-/** 可扫描的买点类型（卖点不在这里扫：事件研究显示卖点不是减仓信号，见报告） */
-const KIND_OPTIONS: { key: string; label: string; cls: string }[] = [
+/** 可扫描的买点类型（红系 = 买，与选股结果列的缠论买点配色一致） */
+const BUY_KIND_OPTIONS: { key: string; label: string; cls: string }[] = [
   { key: '1buy', label: '一买', cls: 'bg-red-500/10 text-red-400/90 border-red-500/20' },
   { key: '2buy', label: '二买', cls: 'bg-red-500/15 text-red-400 border-red-500/30' },
   { key: '3buy', label: '三买', cls: 'bg-red-500/25 text-red-500 border-red-500/45' },
 ]
+
+/** 可扫描的卖点类型（绿系 = 卖。卖点同样是结构结论，只是离场方向） */
+const SELL_KIND_OPTIONS: { key: string; label: string; cls: string }[] = [
+  { key: '1sell', label: '一卖', cls: 'bg-emerald-500/10 text-emerald-500/90 border-emerald-500/20' },
+  { key: '2sell', label: '二卖', cls: 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30' },
+  { key: '3sell', label: '三卖', cls: 'bg-emerald-500/25 text-emerald-600 border-emerald-500/45' },
+]
+
+const KIND_OPTIONS = [...BUY_KIND_OPTIONS, ...SELL_KIND_OPTIONS]
 const KIND_CLS: Record<string, string> = Object.fromEntries(KIND_OPTIONS.map(o => [o.key, o.cls]))
 const KIND_FALLBACK_CLS = 'bg-elevated text-secondary border-border'
 
@@ -160,7 +170,7 @@ export function ChanScan() {
   return (
     <div className="flex flex-col h-full">
       <PageHeader
-        title="缠论买点扫描"
+        title="缠论买卖点扫描"
         subtitle={
           market === 'cn'
             ? '全市场日K · 笔/中枢/一二三买卖点'
@@ -194,7 +204,25 @@ export function ChanScan() {
         <section className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-btn border border-border bg-surface/60 px-4 py-2.5">
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-muted">买点</span>
-            {KIND_OPTIONS.map(opt => {
+            {BUY_KIND_OPTIONS.map(opt => {
+              const on = kinds.includes(opt.key)
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => toggleKind(opt.key)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+                    on ? opt.cls : 'bg-elevated/60 text-muted border-border hover:text-secondary'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-muted">卖点</span>
+            {SELL_KIND_OPTIONS.map(opt => {
               const on = kinds.includes(opt.key)
               return (
                 <button
@@ -250,7 +278,7 @@ export function ChanScan() {
 
           <div className="flex items-center gap-1 text-[10.5px] text-muted">
             <Info className="h-3 w-3" />
-            信号价 = 买点确认时的价格；中枢区间是该买点所属中枢的 ZD ~ ZG
+            信号价 = 买卖点确认时的价格；中枢区间是该信号所属中枢的 ZD ~ ZG
           </div>
         </section>
 
@@ -293,7 +321,7 @@ export function ChanScan() {
           <EmptyState
             icon={ScanSearch}
             title="无命中"
-            hint={`当前条件下全市场没有距今 ${recentBars} 根内的${kinds.map(k => KIND_OPTIONS.find(o => o.key === k)?.label).join('/')}。可放宽新鲜度或改选其它买点类型。`}
+            hint={`当前条件下全市场没有距今 ${recentBars} 根内的${kinds.map(k => KIND_OPTIONS.find(o => o.key === k)?.label).join('/')}。可放宽新鲜度或改选其它买卖点类型。`}
           />
         ) : (
           <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>

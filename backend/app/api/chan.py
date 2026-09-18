@@ -22,7 +22,7 @@ import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.indicators.chan import analyze
+from app.indicators.chan import analyze, latest_signal
 from app.parquet import market_symbol_filter, scan_enriched_parquet
 from app.tickflow.repository import enriched_dirname
 
@@ -90,22 +90,28 @@ def _serialize(analysis, dates: list[str], symbol: str, name: str | None) -> dic
             }
         )
     snap = analysis.snapshot
+    sell_snap = analysis.sell_snapshot
+
+    def _snap_payload(item) -> dict[str, Any]:
+        return {
+            "kind": item.kind,
+            "label": item.label,
+            "bars_since": item.bars_since,
+            "price": round(item.price, 4) if item.price is not None else None,
+            "center_zd": round(item.center_zd, 4) if item.center_zd is not None else None,
+            "center_zg": round(item.center_zg, 4) if item.center_zg is not None else None,
+            "trend": item.trend,
+            "text": item.text,
+        }
+
     return {
         "symbol": symbol,
         "name": name,
         "bars": len(dates),
         "dates": dates,
         "trend": analysis.trend,
-        "snapshot": {
-            "kind": snap.kind,
-            "label": snap.label,
-            "bars_since": snap.bars_since,
-            "price": round(snap.price, 4) if snap.price is not None else None,
-            "center_zd": round(snap.center_zd, 4) if snap.center_zd is not None else None,
-            "center_zg": round(snap.center_zg, 4) if snap.center_zg is not None else None,
-            "trend": snap.trend,
-            "text": snap.text,
-        },
+        "snapshot": _snap_payload(snap),
+        "sell_snapshot": _snap_payload(sell_snap),
         "strokes": strokes,
         "centers": centers,
         "signals": signals,
@@ -238,12 +244,31 @@ class AnnotateRequest(BaseModel):
     recent_bars: int = Field(60, ge=1, le=500, description="只保留近 N 根内出现的买点")
 
 
+def _side_payload(prefix: str, snap, recent_bars: int, side_cn: str) -> dict[str, Any]:
+    """把某一方向的快照转成标注行字段 (买点不加前缀, 卖点加 ``sell_``)。"""
+    stale = snap.kind is None or snap.bars_since is None or snap.bars_since > recent_bars
+    if stale:
+        text = f"最近{side_cn}已超 {recent_bars} 根 ({snap.text})" if snap.kind else snap.text
+    else:
+        text = snap.text
+    return {
+        f"{prefix}kind": None if stale else snap.kind,
+        f"{prefix}label": f"无{side_cn}" if stale else snap.label,
+        f"{prefix}bars_since": snap.bars_since,
+        f"{prefix}price": round(snap.price, 4) if snap.price is not None else None,
+        f"{prefix}trend": snap.trend,
+        f"{prefix}text": text,
+        f"{prefix}stale": stale,
+    }
+
+
 @router.post("/annotate")
 def chan_annotate(request: Request, req: AnnotateRequest):
-    """批量标注: 给策略选股结果加「缠论买点」列。
+    """批量标注: 给策略选股结果加「缠论买点」/「缠论卖点」列。
 
-    返回每个标的的最新买点类型、距今根数与快照文案; 无买点的也会返回一行,
-    便于前端统一渲染。
+    返回每个标的的**最新买点**与**最新卖点**各自的类型、距今根数与快照文案;
+    两侧都无信号的也返回一行, 便于前端统一渲染。买卖点共用同一次分析结果,
+    所以加一列卖点不增加任何扫描开销。
     """
     repo = request.app.state.repo
     symbols = [s for s in dict.fromkeys(req.symbols) if s]
@@ -267,45 +292,56 @@ def chan_annotate(request: Request, req: AnnotateRequest):
         name = names.get(symbol)
         analysis = found.get(symbol)
         if analysis is None:
-            items.append({"symbol": symbol, "name": name, "kind": None, "label": "数据不足", "bars_since": None, "price": None, "trend": None, "text": "", "stale": True})
+            items.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "kind": None,
+                    "label": "数据不足",
+                    "bars_since": None,
+                    "price": None,
+                    "trend": None,
+                    "text": "",
+                    "stale": True,
+                    "sell_kind": None,
+                    "sell_label": "数据不足",
+                    "sell_bars_since": None,
+                    "sell_price": None,
+                    "sell_trend": None,
+                    "sell_text": "",
+                    "sell_stale": True,
+                }
+            )
             continue
-        snap = analysis.snapshot
-        stale = snap.kind is None or snap.bars_since is None or snap.bars_since > req.recent_bars
-        if stale:
-            text = f"最近买点已超 {req.recent_bars} 根 ({snap.text})" if snap.kind else snap.text
-        else:
-            text = snap.text
-        items.append(
-            {
-                "symbol": symbol,
-                "name": name,
-                "kind": None if stale else snap.kind,
-                "label": "无买点" if stale else snap.label,
-                "bars_since": snap.bars_since,
-                "price": round(snap.price, 4) if snap.price is not None else None,
-                "trend": snap.trend,
-                "text": text,
-                "stale": stale,
-            }
-        )
+        item: dict[str, Any] = {"symbol": symbol, "name": name}
+        item.update(_side_payload("", analysis.snapshot, req.recent_bars, "买点"))
+        sell = _side_payload("sell_", analysis.sell_snapshot, req.recent_bars, "卖点")
+        if sell["sell_kind"] is None and analysis.snapshot.kind is None:
+            sell["sell_label"] = "无卖点"
+        item.update(sell)
+        items.append(item)
     return {"items": items}
 
 
 @router.get("/scan")
 def chan_scan(
     request: Request,
-    kinds: str = Query("3buy", description="逗号分隔的买点类型: 1buy,2buy,3buy"),
+    kinds: str = Query("3buy", description="逗号分隔的买卖点类型: 1buy,2buy,3buy,1sell,2sell,3sell"),
     lookback: int = Query(320, ge=120, le=1500, description="每只标的使用的日线根数"),
     recent_bars: int = Query(15, ge=1, le=250, description="信号距今不超过 N 根"),
     strict: bool = Query(True),
     limit: int = Query(300, ge=1, le=2000),
 ):
-    """全市场扫描: 找出最近出现指定缠论买点的标的。"""
+    """全市场扫描: 找出最近出现指定缠论买卖点的标的。
+
+    ⚠️ 判定用的是「wanted 内最新的那个信号」而不是快照 —— 快照只覆盖买点,
+    直接读快照会让卖点扫描恒定返回空 (2026-09-18 修正)。
+    """
     wanted = {k.strip() for k in kinds.split(",") if k.strip()}
     valid = {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}
     invalid = wanted - valid
     if invalid:
-        raise HTTPException(status_code=400, detail=f"不支持的买点类型: {', '.join(sorted(invalid))}")
+        raise HTTPException(status_code=400, detail=f"不支持的买卖点类型: {', '.join(sorted(invalid))}")
 
     repo = request.app.state.repo
     # 全市场扫描是 CPU 密集操作 (5000+ 只 x 300 根), 命中结果缓存直接返回
@@ -327,23 +363,35 @@ def chan_scan(
         if analysis is None:
             continue
         scanned += 1
-        snap = analysis.snapshot
-        if snap.kind is None or snap.kind not in wanted or snap.bars_since is None:
+        snap = latest_signal(analysis.signals, wanted)
+        if snap is None:
             continue
-        if snap.bars_since > recent_bars:
+        bars_since = max(close.shape[0] - 1 - snap.index, 0)
+        if bars_since > recent_bars:
             continue
+        center = (
+            analysis.centers[snap.center_pos]
+            if snap.center_pos is not None and snap.center_pos < len(analysis.centers)
+            else None
+        )
+        label = snap.label
         hits.append(
             {
                 "symbol": symbol,
                 "name": names.get(symbol),
                 "kind": snap.kind,
-                "label": snap.label,
-                "bars_since": snap.bars_since,
-                "price": round(snap.price, 4) if snap.price is not None else None,
-                "trend": snap.trend,
-                "center_zd": round(snap.center_zd, 4) if snap.center_zd is not None else None,
-                "center_zg": round(snap.center_zg, 4) if snap.center_zg is not None else None,
-                "text": snap.text,
+                "label": label,
+                "is_buy": snap.is_buy,
+                "bars_since": bars_since,
+                "price": round(snap.price, 4),
+                "trend": analysis.trend,
+                "center_zd": round(center.zd, 4) if center else None,
+                "center_zg": round(center.zg, 4) if center else None,
+                "text": (
+                    f"{label} @ {snap.price:.2f}, 距今 {bars_since} 根"
+                    + (" (伴随背驰)" if snap.divergence else "")
+                    + (f", 中枢 {center.zd:.2f} ~ {center.zg:.2f}" if center else "")
+                ),
             }
         )
 

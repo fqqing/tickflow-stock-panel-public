@@ -39,6 +39,7 @@ __all__ = [
     "build_strokes",
     "detect_centers",
     "detect_fractals",
+    "latest_signal",
     "merge_inclusions",
 ]
 
@@ -72,6 +73,7 @@ SIGNAL_LABELS: dict[str, str] = {
 }
 
 _BUY_KINDS = ("1buy", "2buy", "3buy")
+_SELL_KINDS = ("1sell", "2sell", "3sell")
 
 
 # ===== 数据结构 =====
@@ -191,6 +193,10 @@ class ChanAnalysis:
     signals: tuple[ChanSignal, ...]
     trend: str
     snapshot: ChanSnapshot
+    """最近**买点**快照。"""
+
+    sell_snapshot: ChanSnapshot
+    """最近**卖点**快照 (与 ``snapshot`` 对称, 供卖点提示复用同一套渲染)。"""
 
 
 # ===== 基础工具 =====
@@ -629,13 +635,21 @@ def _build_snapshot(
     centers: list[Center],
     trend: str,
     n_bars: int,
+    *,
+    is_buy: bool = True,
 ) -> ChanSnapshot:
-    """产出「当下点位」提示: 取最后一个买点, 并给出可读结论。"""
+    """产出「当下点位」提示: 取该方向上最后一个信号, 并给出可读结论。
+
+    买卖两侧共用这段文案逻辑 (``is_buy`` 只切换取哪个方向与措辞),
+    这样选股列 / 扫描页能对卖点复用完全相同的渲染路径。
+    """
+    kinds = _BUY_KINDS if is_buy else _SELL_KINDS
+    side_cn = "买点" if is_buy else "卖点"
     last_center = centers[-1] if centers else None
-    buys = [s for s in signals if s.is_buy]
-    if not buys:
-        label = "无买点"
-        detail = "当前无缠论买点信号"
+    picked = [s for s in signals if s.kind in kinds]
+    if not picked:
+        label = f"无{side_cn}"
+        detail = f"当前无缠论{side_cn}信号"
         if last_center is not None:
             detail += f", 处于中枢 {last_center.zd:.2f} ~ {last_center.zg:.2f} 区间运行"
         return ChanSnapshot(
@@ -649,7 +663,7 @@ def _build_snapshot(
             text=detail,
         )
 
-    latest = buys[-1]
+    latest = picked[-1]
     bars_since = max(n_bars - 1 - latest.index, 0)
     label = latest.label
     parts = [f"{label} @ {latest.price:.2f}", f"距今 {bars_since} 根"]
@@ -677,6 +691,22 @@ def _build_snapshot(
 
 
 # ===== 对外入口 =====
+
+
+def latest_signal(
+    signals: tuple[ChanSignal, ...] | list[ChanSignal],
+    kinds: set[str] | frozenset[str] | tuple[str, ...],
+) -> ChanSignal | None:
+    """取指定类型里索引最大的信号; 没有则 None。
+
+    扫描端点用它判「某类信号是否新鲜」—— 直接读 ``snapshot`` 只覆盖买点,
+    扫卖点会恒定返回空 (2026-09-18 修正)。
+    """
+    best: ChanSignal | None = None
+    for signal in signals:
+        if signal.kind in kinds and (best is None or signal.index > best.index):
+            best = signal
+    return best
 
 
 def analyze(
@@ -718,7 +748,8 @@ def analyze(
     signals.sort(key=lambda s: (s.index, s.kind))
 
     trend = _classify_trend(strokes, centers)
-    snapshot = _build_snapshot(signals, centers, trend, n_bars)
+    snapshot = _build_snapshot(signals, centers, trend, n_bars, is_buy=True)
+    sell_snapshot = _build_snapshot(signals, centers, trend, n_bars, is_buy=False)
 
     return ChanAnalysis(
         merged=tuple(merged),
@@ -728,4 +759,5 @@ def analyze(
         signals=tuple(signals),
         trend=trend,
         snapshot=snapshot,
+        sell_snapshot=sell_snapshot,
     )

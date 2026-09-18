@@ -3,7 +3,7 @@
  *
  * 表格骨架（表头排序/sticky/遍历）由共享的 StockDataTable 承担；本组件只负责
  * 策略页特有的单元格内容：symbol 列（含加自选按钮 + 失效行灰显）、strategies、
- * score、signals、chan、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
+ * score、signals、chan、chan_sell、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Check, Plus, Eye, EyeOff, RefreshCw } from 'lucide-react'
@@ -51,8 +51,9 @@ interface ScreenerTableProps {
   /** 分时数据正在刷新中 (按钮 loading 态) */
   intradayRefreshing?: boolean
   /**
-   * symbol → 缠论买点标注，仅当启用缠论买点列时传入。
+   * symbol → 缠论买卖点标注，启用缠论买点/卖点任一列时传入。
    * 键缺失代表「尚未算到该票」（渲染 loading 占位），值为 kind=null 代表「算了但无买点」。
+   * 买点列读 kind/label/price/bars_since，卖点列读 sell_* —— 同一次请求，两列零额外开销。
    */
   chanBySymbol?: Record<string, ChanAnnotation>
   /** 缠论买点列是否正在计算 */
@@ -341,9 +342,28 @@ export function ScreenerTable({
           </td>
         )
       }
-      case 'chan': {
+      case 'chan':
+      case 'chan_sell': {
         const ann = chanBySymbol?.[r.symbol]
-        // 键缺失 = 还没算到；kind=null = 算了但近期无买点
+        // ⚠️ switch 是按 col.source.key 分支的, 这里必须跟着用 source.key ——
+        // 用 col.id ('builtin:chan_sell') 判会永远为 false, 两列都渲染成买点。
+        const isSell = col.source.type === 'builtin' && col.source.key === 'chan_sell'
+        const side = isSell
+          ? {
+              kind: ann?.sell_kind ?? null,
+              label: ann?.sell_label,
+              price: ann?.sell_price ?? null,
+              barsSince: ann?.sell_bars_since ?? null,
+              text: ann?.sell_text,
+            }
+          : {
+              kind: ann?.kind ?? null,
+              label: ann?.label,
+              price: ann?.price ?? null,
+              barsSince: ann?.bars_since ?? null,
+              text: ann?.text,
+            }
+        // 键缺失 = 还没算到；kind=null = 算了但近期无信号
         if (!ann) {
           return (
             <td key={col.id} className="px-3 py-2">
@@ -353,24 +373,24 @@ export function ScreenerTable({
             </td>
           )
         }
-        if (!ann.kind) {
+        if (!side.kind) {
           return (
             <td key={col.id} className="px-3 py-2">
-              <span className="text-[11px] text-muted" title={ann.text}>—</span>
+              <span className="text-[11px] text-muted" title={side.text}>—</span>
             </td>
           )
         }
         return (
           <td key={col.id} className="px-3 py-2">
-            <div className="flex items-center gap-1.5" title={ann.text}>
-              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${CHAN_TAG_CLS[ann.kind] ?? CHAN_TAG_FALLBACK_CLS}`}>
-                {ann.label}
+            <div className="flex items-center gap-1.5" title={side.text}>
+              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${CHAN_TAG_CLS[side.kind] ?? CHAN_TAG_FALLBACK_CLS}`}>
+                {side.label}
               </span>
-              {ann.price != null && (
-                <span className="text-[11px] text-secondary num tabular-nums">{fmtPrice(ann.price)}</span>
+              {side.price != null && (
+                <span className="text-[11px] text-secondary num tabular-nums">{fmtPrice(side.price)}</span>
               )}
-              {ann.bars_since != null && (
-                <span className="shrink-0 text-[10px] text-muted num tabular-nums">{ann.bars_since}根前</span>
+              {side.barsSince != null && (
+                <span className="shrink-0 text-[10px] text-muted num tabular-nums">{side.barsSince}根前</span>
               )}
             </div>
           </td>

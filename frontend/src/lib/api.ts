@@ -412,6 +412,14 @@ export interface ChanAnnotation {
   trend: string | null
   text: string
   stale?: boolean
+  /** 最近卖点类型: 1sell/2sell/3sell; 与买点同一次分析结果, 不额外增加开销 */
+  sell_kind?: string | null
+  sell_label?: string
+  sell_bars_since?: number | null
+  sell_price?: number | null
+  sell_trend?: string | null
+  sell_text?: string
+  sell_stale?: boolean
 }
 
 export interface ChanSignalPoint {
@@ -448,6 +456,18 @@ export interface ChanCenter {
   stroke_count: number
 }
 
+/** 「当下点位」快照: 买点用 snapshot, 卖点用 sell_snapshot, 结构完全对称 */
+export interface ChanSnapshotPayload {
+  kind: string | null
+  label: string
+  bars_since: number | null
+  price: number | null
+  center_zd: number | null
+  center_zg: number | null
+  trend: string
+  text: string
+}
+
 export interface ChanAnalysis {
   symbol: string
   name?: string | null
@@ -455,16 +475,8 @@ export interface ChanAnalysis {
   dates: string[]
   /** up 上涨 / down 下跌 / range 盘整 */
   trend: string
-  snapshot: {
-    kind: string | null
-    label: string
-    bars_since: number | null
-    price: number | null
-    center_zd: number | null
-    center_zg: number | null
-    trend: string
-    text: string
-  }
+  snapshot: ChanSnapshotPayload
+  sell_snapshot: ChanSnapshotPayload
   strokes: ChanStrokePoint[]
   centers: ChanCenter[]
   signals: ChanSignalPoint[]
@@ -476,6 +488,8 @@ export interface ChanScanItem {
   name?: string | null
   kind: string
   label: string
+  /** true 买点 / false 卖点 (扫描结果里买卖点混排) */
+  is_buy?: boolean
   bars_since: number
   price: number | null
   trend: string
