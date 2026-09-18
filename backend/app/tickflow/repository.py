@@ -43,9 +43,10 @@ logger = logging.getLogger(__name__)
 # 两者必须对得上 —— 曾经一个按 (lookback+60)x2 日历日算、一个只预计算 300 天,
 # 结果缓存必然 miss, 每次策略运行都要 10 秒级全市场重算。
 _HISTORY_WARMUP_BARS = 60
-# 预计算窗口: 需覆盖 最长 lookback(201) + warmup(60) = 261 个交易日。
-# 261 交易日 ≈ 392 日历日, 留出节假日余量取 420。
-_REFRESH_HISTORY_DAYS = 420
+# 预计算窗口: 需覆盖 最长 lookback(261) + warmup(60) = 321 个交易日。
+# 321 交易日 ≈ 449 日历日, 留出节假日余量取 480。
+# (2026-09-18: upward_trend_breakout 的实测收敛点把最长 lookback 从 201 抬到 261)
+_REFRESH_HISTORY_DAYS = 480
 
 def enriched_dirname(asset_type: str, market: str = "cn") -> str:
     """asset_type + market → enriched parquet 目录名。
@@ -711,7 +712,7 @@ class KlineRepository:
                 return
 
             # Step 2: 读近 _REFRESH_HISTORY_DAYS 天 14 列数据 → compute → filter(latest) → 缓存
-            # 420 日历天 ≈ 288 交易日, 覆盖策略最大 lookback(201) + 指标 warmup(60)。
+            # 480 日历天 ≈ 330 交易日, 覆盖策略最大 lookback(261) + 指标 warmup(60)。
             # 窗口必须 >= 该需求量, 否则 get_enriched_history 的覆盖校验永远不通过,
             # 预计算出来的缓存一次也用不上。
             try:

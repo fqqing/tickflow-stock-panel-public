@@ -34,8 +34,14 @@ from app.backtest.matrix import (
 
 _SPAN_SHORT = 26
 _SPAN_LONG = 89
-# 89 日轨自身预热 + REF(CSG,89) 再回望 89 根
-_WARMUP_BARS = 2 * _SPAN_LONG + 22
+# EMA89 自身收敛 + REF(CSG,89) 回望 89 根 + EMA26 短轨收敛余量。
+# 原值 200 (2*89+22) 是「按依赖链线性叠加」的估算, 实测 EMA 的收敛比这个估算慢:
+#   9/18 探针扫 120~300 根, 信号数在 262 根后才不再变化 (261 起仍差 2 只),
+#   即 200 根时有标的的 EMA89 尚未收敛 —— 表现为「同一标的今日选出、历史不选出」
+#   的欠预热假阳性。261 是覆盖实测收敛点且留 1 根余量的最小取值。
+# 代价: 单标的计算量 +29%。预计算窗口已同步抬到 _REFRESH_HISTORY_DAYS=480
+#   日历日 (约 330 交易日), 仍覆盖 261 + warmup(60), 不触发额外重建。
+_WARMUP_BARS = 261
 
 META = {
     "id": "upward_trend_breakout",

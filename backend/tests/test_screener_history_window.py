@@ -253,7 +253,7 @@ def test_history_cache_ttl_is_long_enough_to_survive_date_hopping():
 
 def test_refresh_window_covers_longest_strategy_lookback():
     """预计算窗口必须覆盖「最长 lookback + 指标 warmup」, 否则缓存永远判不覆盖。"""
-    longest_lookback = 201  # upward_trend_breakout: 2xEMA89 + 22
+    longest_lookback = 261  # upward_trend_breakout: 实测 EMA89 收敛点 + 1 根余量
     needed_bars = longest_lookback + _HISTORY_WARMUP_BARS
     approx_trading_days = _REFRESH_HISTORY_DAYS / 7 * 5
     assert approx_trading_days >= needed_bars
