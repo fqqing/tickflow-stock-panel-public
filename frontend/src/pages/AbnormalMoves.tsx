@@ -393,6 +393,7 @@ export function AbnormalMoves() {
           symbol={preview.symbol}
           name={preview.name}
           onClose={() => setPreview(null)}
+          chanOverlay
         />
       )}
     </div>

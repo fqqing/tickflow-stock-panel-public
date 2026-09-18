@@ -511,6 +511,7 @@ export function IndustryAnalysis() {
           symbol={previewSymbol}
           name={previewName}
           onClose={() => { setPreviewSymbol(null); setPreviewName('') }}
+          chanOverlay
         />
       )}
       {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind="industry" />}

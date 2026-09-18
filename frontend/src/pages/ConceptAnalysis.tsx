@@ -447,6 +447,7 @@ export function ConceptAnalysis() {
           symbol={previewSymbol}
           name={previewName}
           onClose={() => { setPreviewSymbol(null); setPreviewName('') }}
+          chanOverlay
         />
       )}
 

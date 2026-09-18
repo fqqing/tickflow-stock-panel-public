@@ -159,6 +159,7 @@ export function StockAnalysis() {
         name={previewSymbol === symbol ? name : undefined}
         triggerInfo={null}
         onClose={() => setPreviewSymbol(null)}
+        chanOverlay
       />
 
       {showPriceAlerts && symbol && (

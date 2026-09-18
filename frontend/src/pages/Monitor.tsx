@@ -620,6 +620,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
           message: previewEv.message,
         } : null}
         onClose={() => { setPreviewEv(null); setMemberPreview(null) }}
+        chanOverlay
       />
 
       <DimensionMembersDialog
@@ -907,6 +908,7 @@ function RulesList({ rulesQuery, onEdit }: {
         symbol={previewSymbol}
         name={previewSymbol ? symbolNames[previewSymbol] : undefined}
         onClose={() => setPreviewSymbol(null)}
+        chanOverlay
       />
     </div>
   )

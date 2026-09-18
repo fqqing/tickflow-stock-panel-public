@@ -1899,6 +1899,7 @@ export function LimitUpLadder() {
         symbol={previewSymbol}
         name={previewName}
         onClose={() => setPreviewSymbol(null)}
+        chanOverlay
       />
 
       {/* 字段配置弹窗 */}

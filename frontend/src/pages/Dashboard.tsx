@@ -868,6 +868,7 @@ export function Dashboard() {
           message: previewStock.alert.message,
         } : null}
         onClose={() => setPreviewStock(null)}
+        chanOverlay
       />
     </div>
   )
