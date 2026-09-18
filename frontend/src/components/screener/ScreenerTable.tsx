@@ -13,6 +13,7 @@ import type { ColumnConfig } from '@/lib/screener-columns'
 import { getSignals, signalCls } from '@/lib/stock-table'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
+import { ChanSideCell, ChanStateCell } from '@/components/stock-table/chan-cells'
 import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { StockDataTable, type SortState } from '@/components/stock-table/StockDataTable'
@@ -122,22 +123,6 @@ function renderTagList(
 
 const EXT_TAG_CLS = 'inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight text-yellow-500 bg-yellow-500/10'
 const STRATEGY_TAG_CLS = 'inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight bg-amber-500/10 text-amber-600 border border-amber-500/20'
-
-/**
- * 缠论买卖点标签配色。
- * A股惯例：买点红系、卖点绿系；级别越高底色越重 —— 一买是抄底、二买是确认、三买是主升起点。
- */
-const CHAN_TAG_CLS: Record<string, string> = {
-  '1buy': 'bg-red-500/10 text-red-400/90 border-red-500/20',
-  '2buy': 'bg-red-500/15 text-red-400 border-red-500/30',
-  '3buy': 'bg-red-500/25 text-red-500 border-red-500/45',
-  '1sell': 'bg-emerald-500/10 text-emerald-500/90 border-emerald-500/20',
-  '2sell': 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30',
-  '3sell': 'bg-emerald-500/25 text-emerald-600 border-emerald-500/45',
-}
-const CHAN_TAG_FALLBACK_CLS = 'bg-elevated text-secondary border-border'
-// 失效标记: 买点被跌破 / 卖点被新高升破后, 标签置灰加删除线 (结构已作废)
-const CHAN_TAG_INVALID_CLS = 'bg-elevated text-muted border-border opacity-60 line-through'
 
 function renderExtValue(
   val: any,
@@ -346,94 +331,16 @@ export function ScreenerTable({
         )
       }
       case 'chan':
-      case 'chan_sell': {
+      case 'chan_sell':
+      case 'chan_state': {
         const ann = chanBySymbol?.[r.symbol]
+        const key = col.source.type === 'builtin' ? col.source.key : ''
+        if (key === 'chan_state') {
+          return <ChanStateCell ann={ann} loading={chanLoading} colId={col.id} />
+        }
         // ⚠️ switch 是按 col.source.key 分支的, 这里必须跟着用 source.key ——
         // 用 col.id ('builtin:chan_sell') 判会永远为 false, 两列都渲染成买点。
-        const isSell = col.source.type === 'builtin' && col.source.key === 'chan_sell'
-        const side = isSell
-          ? {
-              kind: ann?.sell_kind ?? null,
-              label: ann?.sell_label,
-              price: ann?.sell_price ?? null,
-              barsSince: ann?.sell_bars_since ?? null,
-              text: ann?.sell_text,
-              invalid: ann?.sell_invalid ?? false,
-            }
-          : {
-              kind: ann?.kind ?? null,
-              label: ann?.label,
-              price: ann?.price ?? null,
-              barsSince: ann?.bars_since ?? null,
-              text: ann?.text,
-              invalid: ann?.invalid ?? false,
-            }
-        // 键缺失 = 还没算到；kind=null = 算了但近期无信号
-        if (!ann) {
-          return (
-            <td key={col.id} className="px-3 py-2">
-              <span className={`text-[11px] text-muted ${chanLoading ? 'animate-pulse' : ''}`}>
-                {chanLoading ? '计算中…' : '—'}
-              </span>
-            </td>
-          )
-        }
-        if (!side.kind) {
-          return (
-            <td key={col.id} className="px-3 py-2">
-              <span className="text-[11px] text-muted" title={side.text}>—</span>
-            </td>
-          )
-        }
-        return (
-          <td key={col.id} className="px-3 py-2">
-            <div className="flex items-center gap-1.5" title={side.invalid ? `${side.text ?? ''} (已失效)` : side.text}>
-              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${side.invalid ? CHAN_TAG_INVALID_CLS : (CHAN_TAG_CLS[side.kind] ?? CHAN_TAG_FALLBACK_CLS)}`}>
-                {side.label}
-              </span>
-              {side.price != null && (
-                <span className="text-[11px] text-secondary num tabular-nums">{fmtPrice(side.price)}</span>
-              )}
-              {side.barsSince != null && (
-                <span className="shrink-0 text-[10px] text-muted num tabular-nums">{side.barsSince}根前</span>
-              )}
-            </div>
-          </td>
-        )
-      }
-      case 'chan_state': {
-        // 当前状态: 后端合成 (取买卖两侧更近者主导 + 失效检查 + 买点距离)
-        const ann = chanBySymbol?.[r.symbol]
-        if (!ann) {
-          return (
-            <td key={col.id} className="px-3 py-2">
-              <span className={`text-[11px] text-muted ${chanLoading ? 'animate-pulse' : ''}`}>
-                {chanLoading ? '计算中…' : '—'}
-              </span>
-            </td>
-          )
-        }
-        if (!ann.state_side || !ann.state_label) {
-          return (
-            <td key={col.id} className="px-3 py-2">
-              <span className="text-[11px] text-muted" title={ann.state_text}>—</span>
-            </td>
-          )
-        }
-        const stateCls = ann.state_invalid
-          ? CHAN_TAG_INVALID_CLS
-          : ann.state_side === 'buy'
-            ? 'bg-red-500/15 text-red-400 border-red-500/30'
-            : 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30'
-        return (
-          <td key={col.id} className="px-3 py-2">
-            <div className="flex items-center gap-1.5" title={ann.state_text}>
-              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${stateCls}`}>
-                {ann.state_label}
-              </span>
-            </div>
-          </td>
-        )
+        return <ChanSideCell ann={ann} isSell={key === 'chan_sell'} loading={chanLoading} colId={col.id} />
       }
       case 'candle': {
         const candleRows = klineData[r.symbol] ?? []

@@ -70,6 +70,11 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:limit_downs', source: { type: 'builtin', key: 'limit_downs' }, label: '连跌', visible: false, align: 'center' },
   // 信号 & 图表
   { id: 'builtin:signals', source: { type: 'builtin', key: 'signals' }, label: '信号', visible: true, align: 'center' },
+  // 缠论买卖点/当前状态 (点开后在表格内即时计算, 详见 Watchlist.tsx 的缠论标注 effect);
+  // 与策略页共用 stock-table/chan-cells.tsx 的单元格实现, 判断口径完全一致。
+  { id: 'builtin:chan', source: { type: 'builtin', key: 'chan' }, label: '缠论买点', visible: false, align: 'left' },
+  { id: 'builtin:chan_sell', source: { type: 'builtin', key: 'chan_sell' }, label: '缠论卖点', visible: false, align: 'left' },
+  { id: 'builtin:chan_state', source: { type: 'builtin', key: 'chan_state' }, label: '当前状态', visible: false, align: 'left' },
   { id: 'builtin:candle', source: { type: 'builtin', key: 'candle' }, label: '日k', visible: false, align: 'center' },
   { id: 'builtin:intraday', source: { type: 'builtin', key: 'intraday' }, label: '分时', visible: false, align: 'center' },
   // 财务指标 (需财务数据能力 financial, 列默认隐藏)
@@ -93,7 +98,7 @@ export const COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'tech', label: '技术指标', icon: '🔬', keys: ['rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10'] },
   { id: 'momentum', label: '动量', icon: '🚀', keys: ['momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d'] },
   { id: 'limit', label: '连板', icon: '🔥', keys: ['limit_ups', 'limit_downs'] },
-  { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'candle', 'intraday'] },
+  { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'chan', 'chan_sell', 'chan_state', 'candle', 'intraday'] },
   { id: 'finance', label: '财务', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'revenue_yoy', 'net_income_yoy', 'debt_ratio'] },
 ]
 

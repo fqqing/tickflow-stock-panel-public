@@ -47,7 +47,8 @@ export const QK = {
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? '', market] as const,
   screenerCached:       (asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'all', asOf ?? '', ext ?? '', market] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
-  // 缠论买点批量标注: 仅取决于 symbol 集合 (口径/参数为常量), 后端有结果缓存
+  // 缠论买卖点批量标注: 仅取决于 symbol 集合 (口径/参数为常量), 后端有结果缓存。
+  // 自选页与策略页共用同一缓存 (同一 symbol 集合 → 同一份结果)。
   screenerChanAnnotate: (symbols: string) => ['screener-chan-annotate', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,

@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
+import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor, type ChanAnnotation } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
@@ -37,6 +37,7 @@ import { useTableSort } from '@/components/stock-table/useTableSort'
 import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
+import { ChanSideCell, ChanStateCell } from '@/components/stock-table/chan-cells'
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
@@ -63,6 +64,12 @@ function getBoardType(symbol: string): BoardType | null {
   if (/^00[012]/.test(symbol))   return '深主板'
   return null
 }
+
+// ===== 缠论标注参数 =====
+// 与策略页保持一致 (口径/参数为常量, 后端按 symbol 集合缓存结果)
+const CHAN_BATCH_CAP = 800
+const CHAN_LOOKBACK = 400
+const CHAN_RECENT_BARS = 60
 
 // ===== 换手率分档色（卡片/表格用） =====
 
@@ -821,6 +828,43 @@ export function Watchlist() {
 
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
   const symbolsKey = symbols.join(',')
+
+  // ── 缠论买卖点/当前状态标注 ────────────────────────────────────────
+  // 选中「缠论买点」「缠论卖点」或「当前状态」任一列时, 对自选列表发 1 次批量请求
+  // 算缠论结构 (后端按 symbol 集合缓存, 与策略页共用同一份结果)。三列同一次请求返回。
+  const chanColumn = useMemo(() =>
+    columns.find(c =>
+      c.source.type === 'builtin'
+      && (c.source.key === 'chan' || c.source.key === 'chan_sell' || c.source.key === 'chan_state')
+      && c.visible,
+    ),
+    [columns],
+  )
+  const chanVisible = !!chanColumn
+  const allChanSymbols = useMemo(
+    () => [...new Set(symbols)].sort(),
+    [symbols],
+  )
+  const chanTruncated = chanVisible && allChanSymbols.length > CHAN_BATCH_CAP
+  const chanRequestSymbols = useMemo(
+    () => chanTruncated ? allChanSymbols.slice(0, CHAN_BATCH_CAP) : allChanSymbols,
+    [allChanSymbols, chanTruncated],
+  )
+  const chanSymbolsKey = chanRequestSymbols.join(',')
+  const chanAnnotation = useQuery({
+    queryKey: QK.screenerChanAnnotate(chanSymbolsKey),
+    queryFn: () => api.chanAnnotate(chanRequestSymbols, CHAN_LOOKBACK, true, CHAN_RECENT_BARS),
+    enabled: chanVisible && chanRequestSymbols.length > 0,
+    staleTime: 5 * 60_000,
+    placeholderData: previousData => previousData,
+  })
+  // 未选中该列时不传 map (undefined), 让表格走「—」而非「计算中…」
+  const chanBySymbol = useMemo(() => {
+    if (!chanVisible) return undefined
+    const out: Record<string, ChanAnnotation> = {}
+    for (const it of chanAnnotation.data?.items ?? []) out[it.symbol] = it
+    return out
+  }, [chanVisible, chanAnnotation.data])
 
   // 指数无本地分钟K数据, 分时批量请求剔除指数 symbol (省请求, 避免逐只 404)
   const minuteSymbols = useMemo(
@@ -1753,6 +1797,22 @@ export function Watchlist() {
                         </div>
                       )}
                     </td>
+                  )
+                }
+                // 缠论买卖点 / 当前状态 (共享 stock-table/chan-cells.tsx 的渲染,
+                // 判断口径与策略页完全一致: 谁近谁主导 + 失效检查)
+                if (key === 'chan' || key === 'chan_sell' || key === 'chan_state') {
+                  const ann = chanBySymbol?.[r.symbol]
+                  if (key === 'chan_state') {
+                    return <ChanStateCell ann={ann} loading={chanAnnotation.isLoading} colId={col.id} />
+                  }
+                  return (
+                    <ChanSideCell
+                      ann={ann}
+                      isSell={key === 'chan_sell'}
+                      loading={chanAnnotation.isLoading}
+                      colId={col.id}
+                    />
                   )
                 }
                 // 日k列
