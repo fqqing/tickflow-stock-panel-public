@@ -1944,6 +1944,7 @@ export function Watchlist() {
         symbol={previewSymbol}
         name={previewName}
         onClose={closePreview}
+        chanOverlay
       />
 
       <DimensionMembersDialog
