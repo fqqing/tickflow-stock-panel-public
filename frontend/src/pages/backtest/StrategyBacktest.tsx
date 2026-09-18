@@ -409,68 +409,53 @@ function DailyTradeChip({ trade, side, strategyName, onClick, signalNames }: { t
   const price = isBuy ? trade.entry_price : trade.exit_price
   const amount = isBuy ? trade.entry_value : trade.exit_value
   const pnlColor = priceColorClass(trade.pnl_amount ?? trade.pnl_pct)
-  const footerColor = isBuy ? 'text-secondary' : pnlColor
-  const footerText = `仓位 ${fmtPositionPct(trade.position_pct, 2)}`
+  const pnlText = isBuy
+    ? `仓位 ${fmtPositionPct(trade.position_pct, 2)}`
+    : `${fmtSignedMoney(trade.pnl_amount)} / ${fmtPct(trade.pnl_pct)}`
   const scoreText = fmtScore(trade.entry_score)
   const buyStrategy = strategyName || '策略'
+  const tooltip = isBuy
+    ? `${trade.name || trade.symbol} ${trade.symbol} · 买入 ${fmtPrice(price)} · ${fmtMoney(amount)} · 策略 ${buyStrategy} · 评分 ${scoreText} · ${pnlText}`
+    : `${trade.name || trade.symbol} ${trade.symbol} · 卖出 ${fmtPrice(price)} · ${fmtMoney(amount)} · ${pnlText}`
 
+  // 紧凑两行 chip: 主行=名称/代码/成交价/金额, 副行=评分或盈亏。
+  // 高度约 40px, 远低于原 232px 宽竖直卡片的 82px, 且不会被窄列挤压换行。
   return (
-    <button type="button" onClick={onClick} className={`inline-flex ${isBuy ? 'w-[14.5rem]' : 'w-[14.5rem]'} flex-col gap-0.5 rounded-btn border px-1.5 py-1 text-left text-[11px] leading-4 transition-colors hover:border-accent/45 hover:bg-elevated/60 focus:outline-none focus:ring-1 focus:ring-accent/40 ${
-      isBuy ? 'border-accent/25 bg-accent/5' : 'border-border/70 bg-base/45'
-    }`}>
-      <span className="flex items-center gap-1">
+    <button
+      type="button"
+      onClick={onClick}
+      title={tooltip}
+      className={`flex w-full max-w-[22rem] flex-col gap-0.5 rounded-btn border px-2 py-1 text-left text-[11px] leading-4 transition-colors hover:border-accent/45 hover:bg-elevated/60 focus:outline-none focus:ring-1 focus:ring-accent/40 ${
+        isBuy ? 'border-accent/25 bg-accent/5' : 'border-border/70 bg-base/45'
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-1">
         <span className={`shrink-0 rounded px-1 py-px text-[9px] font-medium ${
           isBuy ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'
         }`}>
           {isBuy ? '买' : '卖'}
         </span>
-        <span className="min-w-0 flex-1 truncate text-foreground">{trade.name || trade.symbol}</span>
+        <span className="min-w-0 max-w-[6.5rem] shrink truncate font-medium text-foreground">{trade.name || trade.symbol}</span>
         {tag && <span className={`shrink-0 rounded px-1 text-[9px] font-medium ${isBuy ? 'bg-accent/20 text-accent' : 'bg-elevated text-secondary'}`}>{tag}</span>}
+        <span className="shrink-0 font-mono text-[10px] text-muted">{trade.symbol}</span>
+        <span className="num ml-auto shrink-0 text-secondary">{fmtPrice(price)}</span>
+        <span className="num shrink-0 font-medium text-foreground">{fmtMoney(amount)}</span>
       </span>
-      <span className="flex items-center justify-between gap-2 text-muted">
-        <span className="min-w-0 truncate">
-          <span className="font-mono">{trade.symbol}</span>
-          <span className="mx-1">·</span>
-          <span className="num">{fmtLots(trade.lots)}手</span>
-        </span>
+      <span className="flex min-w-0 items-center gap-1 text-[10px]">
         {isBuy ? (
-          <span className="num shrink-0 text-secondary">{fmtPrice(price)}</span>
-        ) : (
-          <span className="flex shrink-0 items-center gap-1.5">
-            <span className="num text-secondary">{fmtPrice(price)}</span>
-            <ExitReasonBadge reason={trade.exit_reason} signalId={trade.exit_signal_id} signalNames={signalNames} />
-          </span>
-        )}
-      </span>
-      {isBuy ? (
-        <>
-          <span className="flex items-center justify-between gap-2">
+          <>
             <span className="min-w-0 truncate text-muted" title={buyStrategy}>策略 {buyStrategy}</span>
-            <span className="shrink-0 rounded border border-accent/25 bg-accent/10 px-1.5 py-px font-mono text-[10px] text-accent">
+            <span className="ml-auto shrink-0 rounded border border-accent/25 bg-accent/10 px-1 py-px font-mono text-accent">
               评分 {scoreText}
             </span>
-          </span>
-          <span className="flex items-center justify-between gap-2">
-            <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
-            <span className={`min-w-0 truncate text-right num ${footerColor}`}>{footerText}</span>
-          </span>
-        </>
-      ) : (
-        <>
-          <span className="flex items-center justify-between gap-2">
-            <span className="text-muted">卖出</span>
-            <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
-          </span>
-          <span className="flex items-center justify-between gap-2">
-            <span className="text-muted">盈亏</span>
-            <span className={`flex shrink-0 items-center gap-1.5 text-right num font-medium ${pnlColor}`}>
-              <span>{fmtSignedMoney(trade.pnl_amount)}</span>
-              <span className="text-muted/40">/</span>
-              <span>{fmtPct(trade.pnl_pct)}</span>
-            </span>
-          </span>
-        </>
-      )}
+          </>
+        ) : (
+          <>
+            <ExitReasonBadge reason={trade.exit_reason} signalId={trade.exit_signal_id} signalNames={signalNames} />
+            <span className={`num ml-auto shrink-0 ${pnlColor}`}>{pnlText}</span>
+          </>
+        )}
+      </span>
     </button>
   )
 }
@@ -952,6 +937,7 @@ export function StrategyBacktest() {
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
   const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
+  const [dailyPageSize, setDailyPageSize] = useState(10)
   const [tradePage, setTradePage] = useState(0)
   const [tradePageSize, setTradePageSize] = useState(10)
   const [selectedTrade, setSelectedTrade] = useState<StrategyBacktestTrade | null>(null)
@@ -1252,7 +1238,6 @@ export function StrategyBacktest() {
   const tradePageCount = sortedTrades.length
     ? Math.ceil(sortedTrades.length / tradePageSize)
     : 0
-  const dailyPageSize = 10
   const dailyPageCount = dailyTradeRows.length
     ? Math.ceil(dailyTradeRows.length / dailyPageSize)
     : 0
@@ -2160,51 +2145,51 @@ export function StrategyBacktest() {
                 {resultTab === 'daily' && (
                   <div>
                     <div className="overflow-x-auto">
-                    <table className="w-full min-w-[960px] text-sm text-foreground">
+                    <table className="w-full min-w-[960px] text-sm text-foreground table-fixed">
                       <thead className="bg-elevated">
                         <tr className="text-left text-secondary">
-                          <th className="px-3 py-2.5 font-medium w-[8.5rem]">日期</th>
-                          <th className="px-3 py-2.5 font-medium">买入</th>
-                          <th className="px-3 py-2.5 font-medium">卖出</th>
-                          <th className="px-3 py-2.5 font-medium text-right w-[8rem]">当日收益</th>
-                          <th className="px-3 py-2.5 font-medium text-right w-[8rem]">累计收益</th>
+                          <th className="px-3 py-2.5 font-medium w-[9rem]">日期</th>
+                          <th className="px-3 py-2.5 font-medium w-[32%]">买入</th>
+                          <th className="px-3 py-2.5 font-medium w-[32%]">卖出</th>
+                          <th className="px-3 py-2.5 font-medium text-right w-[7.5rem]">当日收益</th>
+                          <th className="px-3 py-2.5 font-medium text-right w-[7.5rem]">累计收益</th>
                         </tr>
                       </thead>
                       <tbody>
                         {visibleDailyRows.map(row => (
-                          <tr key={row.date} className="border-t border-border hover:bg-elevated/50 transition-colors">
-                            <td className="px-3 py-2.5 whitespace-nowrap">
+                          <tr key={row.date} className="border-t border-border align-top hover:bg-elevated/50 transition-colors">
+                            <td className="px-3 py-2.5 whitespace-nowrap align-top">
                               <div className="font-mono text-foreground">{row.date}</div>
                               <div className="mt-0.5 text-[11px] text-muted">
                                 买 {row.buys.length} / 卖 {row.sells.length}
                               </div>
                             </td>
-                            <td className="px-3 py-2.5">
+                            <td className="px-3 py-2.5 align-top">
                               {row.buys.length === 0 ? (
                                 <span className="text-muted">—</span>
                               ) : (
-                                <div className="flex flex-wrap gap-1.5">
+                                <div className="flex flex-col gap-1">
                                   {row.buys.map((t, i) => (
                                     <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
                             </td>
-                            <td className="px-3 py-2.5">
+                            <td className="px-3 py-2.5 align-top">
                               {row.sells.length === 0 ? (
                                 <span className="text-muted">—</span>
                               ) : (
-                                <div className="flex flex-wrap gap-1.5">
+                                <div className="flex flex-col gap-1">
                                   {row.sells.map((t, i) => (
                                     <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
                                   ))}
                                 </div>
                               )}
                             </td>
-                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap ${priceColorClass(row.realizedPnl)}`}>
+                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap align-top ${priceColorClass(row.realizedPnl)}`}>
                               {fmtSignedMoney(row.realizedPnl)}
                             </td>
-                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap ${priceColorClass(row.cumulativePnl)}`}>
+                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap align-top ${priceColorClass(row.cumulativePnl)}`}>
                               {fmtSignedMoney(row.cumulativePnl)}
                             </td>
                           </tr>
@@ -2215,9 +2200,25 @@ export function StrategyBacktest() {
                     {dailyTradeRows.length > 0 && (
                       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-2 text-xs text-muted">
                         <span>
-                          显示 {dailyStart + 1}-{dailyEnd} 天 / 共 {dailyTradeRows.length} 天，每页 10 天
+                          显示 {dailyStart + 1}-{dailyEnd} 天 / 共 {dailyTradeRows.length} 天
                         </span>
                         <div className="flex flex-wrap items-center gap-2">
+                          <label className="flex items-center gap-1.5">
+                            <span>每页</span>
+                            <select
+                              value={dailyPageSize}
+                              onChange={e => {
+                                setDailyPageSize(Number(e.target.value))
+                                setDailyPage(0)
+                              }}
+                              className="rounded-btn border border-border bg-surface px-2 py-1 text-xs text-secondary focus:outline-none focus:border-accent"
+                            >
+                              {TRADE_PAGE_SIZE_OPTIONS.map(size => (
+                                <option key={size} value={size}>{size}</option>
+                              ))}
+                            </select>
+                            <span>天</span>
+                          </label>
                           <button
                             type="button"
                             onClick={() => setDailyPage(p => Math.max(0, p - 1))}
