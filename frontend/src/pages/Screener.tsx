@@ -500,13 +500,13 @@ export function Screener() {
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
   // ── 缠论买卖点标注 ────────────────────────────────────────────────
-  // 选中「缠论买点」或「缠论卖点」列时, 对当前结果集发 1 次批量请求算缠论结构
-  // (后端按 symbol 集合做结果缓存)。买卖点在同一次请求里返回, 所以开两列不加开销。
+  // 选中「缠论买点」「缠论卖点」或「当前状态」列时, 对当前结果集发 1 次批量请求算缠论结构
+  // (后端按 symbol 集合做结果缓存)。买卖点与状态在同一次请求里返回, 开多列不加开销。
   // 缠论笔/中枢会被后续行情改写, 所以这里只能按「截至目前」重算, 不做增量。
   const chanColumn = useMemo(() =>
     columns.find(c =>
       c.source.type === 'builtin'
-      && (c.source.key === 'chan' || c.source.key === 'chan_sell')
+      && (c.source.key === 'chan' || c.source.key === 'chan_sell' || c.source.key === 'chan_state')
       && c.visible,
     ),
     [columns],

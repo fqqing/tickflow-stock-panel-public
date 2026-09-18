@@ -51,9 +51,10 @@ interface ScreenerTableProps {
   /** 分时数据正在刷新中 (按钮 loading 态) */
   intradayRefreshing?: boolean
   /**
-   * symbol → 缠论买卖点标注，启用缠论买点/卖点任一列时传入。
+   * symbol → 缠论买卖点标注，启用缠论买点/卖点/当前状态任一列时传入。
    * 键缺失代表「尚未算到该票」（渲染 loading 占位），值为 kind=null 代表「算了但无买点」。
-   * 买点列读 kind/label/price/bars_since，卖点列读 sell_* —— 同一次请求，两列零额外开销。
+   * 买点列读 kind/label/price/bars_since/invalid，卖点列读 sell_*，状态列读 state_* ——
+   * 同一次请求，多列零额外开销。invalid=true 时标签置灰加删除线 (结构已作废)。
    */
   chanBySymbol?: Record<string, ChanAnnotation>
   /** 缠论买点列是否正在计算 */
@@ -135,6 +136,8 @@ const CHAN_TAG_CLS: Record<string, string> = {
   '3sell': 'bg-emerald-500/25 text-emerald-600 border-emerald-500/45',
 }
 const CHAN_TAG_FALLBACK_CLS = 'bg-elevated text-secondary border-border'
+// 失效标记: 买点被跌破 / 卖点被新高升破后, 标签置灰加删除线 (结构已作废)
+const CHAN_TAG_INVALID_CLS = 'bg-elevated text-muted border-border opacity-60 line-through'
 
 function renderExtValue(
   val: any,
@@ -355,6 +358,7 @@ export function ScreenerTable({
               price: ann?.sell_price ?? null,
               barsSince: ann?.sell_bars_since ?? null,
               text: ann?.sell_text,
+              invalid: ann?.sell_invalid ?? false,
             }
           : {
               kind: ann?.kind ?? null,
@@ -362,6 +366,7 @@ export function ScreenerTable({
               price: ann?.price ?? null,
               barsSince: ann?.bars_since ?? null,
               text: ann?.text,
+              invalid: ann?.invalid ?? false,
             }
         // 键缺失 = 还没算到；kind=null = 算了但近期无信号
         if (!ann) {
@@ -382,8 +387,8 @@ export function ScreenerTable({
         }
         return (
           <td key={col.id} className="px-3 py-2">
-            <div className="flex items-center gap-1.5" title={side.text}>
-              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${CHAN_TAG_CLS[side.kind] ?? CHAN_TAG_FALLBACK_CLS}`}>
+            <div className="flex items-center gap-1.5" title={side.invalid ? `${side.text ?? ''} (已失效)` : side.text}>
+              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${side.invalid ? CHAN_TAG_INVALID_CLS : (CHAN_TAG_CLS[side.kind] ?? CHAN_TAG_FALLBACK_CLS)}`}>
                 {side.label}
               </span>
               {side.price != null && (
@@ -392,6 +397,40 @@ export function ScreenerTable({
               {side.barsSince != null && (
                 <span className="shrink-0 text-[10px] text-muted num tabular-nums">{side.barsSince}根前</span>
               )}
+            </div>
+          </td>
+        )
+      }
+      case 'chan_state': {
+        // 当前状态: 后端合成 (取买卖两侧更近者主导 + 失效检查 + 买点距离)
+        const ann = chanBySymbol?.[r.symbol]
+        if (!ann) {
+          return (
+            <td key={col.id} className="px-3 py-2">
+              <span className={`text-[11px] text-muted ${chanLoading ? 'animate-pulse' : ''}`}>
+                {chanLoading ? '计算中…' : '—'}
+              </span>
+            </td>
+          )
+        }
+        if (!ann.state_side || !ann.state_label) {
+          return (
+            <td key={col.id} className="px-3 py-2">
+              <span className="text-[11px] text-muted" title={ann.state_text}>—</span>
+            </td>
+          )
+        }
+        const stateCls = ann.state_invalid
+          ? CHAN_TAG_INVALID_CLS
+          : ann.state_side === 'buy'
+            ? 'bg-red-500/15 text-red-400 border-red-500/30'
+            : 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30'
+        return (
+          <td key={col.id} className="px-3 py-2">
+            <div className="flex items-center gap-1.5" title={ann.state_text}>
+              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${stateCls}`}>
+                {ann.state_label}
+              </span>
             </div>
           </td>
         )

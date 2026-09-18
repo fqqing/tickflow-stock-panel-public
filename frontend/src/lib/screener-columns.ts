@@ -78,6 +78,8 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   // 缠论买点 (点开后在表格内即时计算, 详见 Screener.tsx 的缠论标注 effect)
   { id: 'builtin:chan', source: { type: 'builtin', key: 'chan' }, label: '缠论买点', visible: true, align: 'left' },
   { id: 'builtin:chan_sell', source: { type: 'builtin', key: 'chan_sell' }, label: '缠论卖点', visible: true, align: 'left' },
+  // 当前状态: 取买卖两侧更近者主导 + 失效检查 (后端合成, 见 api/chan.py _state_payload)
+  { id: 'builtin:chan_state', source: { type: 'builtin', key: 'chan_state' }, label: '当前状态', visible: true, align: 'left' },
   { id: 'builtin:candle', source: { type: 'builtin', key: 'candle' }, label: '日k', visible: false, align: 'center' },
   { id: 'builtin:intraday', source: { type: 'builtin', key: 'intraday' }, label: '分时', visible: false, align: 'center' },
   // 财务指标 (与自选页对齐; 当前后端 enriched 未返回这些字段，默认隐藏)
@@ -103,7 +105,7 @@ export const SCREENER_COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'momentum', label: '动量', icon: '🚀', keys: ['momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d'] },
   { id: 'abnormal', label: '异动', icon: '⚡', keys: ['deviate_3d', 'deviate_10d', 'deviate_30d'] },
   { id: 'limit', label: '连板', icon: '🔥', keys: ['limit_ups', 'limit_downs'] },
-  { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'chan', 'chan_sell', 'candle', 'intraday'] },
+  { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'chan', 'chan_sell', 'chan_state', 'candle', 'intraday'] },
   { id: 'finance', label: '财务', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'revenue_yoy', 'net_income_yoy', 'debt_ratio'] },
 ]
 

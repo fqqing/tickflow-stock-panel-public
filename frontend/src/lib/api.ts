@@ -412,6 +412,8 @@ export interface ChanAnnotation {
   trend: string | null
   text: string
   stale?: boolean
+  /** 失效检查: 最新收盘已跌破买点信号价 (结构被破坏) */
+  invalid?: boolean
   /** 最近卖点类型: 1sell/2sell/3sell; 与买点同一次分析结果, 不额外增加开销 */
   sell_kind?: string | null
   sell_label?: string
@@ -420,6 +422,16 @@ export interface ChanAnnotation {
   sell_trend?: string | null
   sell_text?: string
   sell_stale?: boolean
+  /** 失效检查: 最新收盘已升破卖点信号价 (卖点后新高, 结构转强) */
+  sell_invalid?: boolean
+  /** 合成的当前状态: 取买卖两侧更近者主导, 叠加失效与买点距离提示 */
+  state_side?: 'buy' | 'sell' | null
+  /** 如 买后4天·贴近买点价 / 卖后14天·已新高失效 / 无信号 */
+  state_label?: string | null
+  state_bars_since?: number | null
+  state_price?: number | null
+  state_invalid?: boolean
+  state_text?: string
 }
 
 export interface ChanSignalPoint {
