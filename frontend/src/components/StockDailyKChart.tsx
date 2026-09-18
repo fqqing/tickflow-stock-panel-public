@@ -8,6 +8,7 @@ import {
   OVERLAY_INDICATORS,
   SUB_CHARTS,
   type ChartMarker,
+  type ChartPolyline,
   type ChartPriceLine,
   type ChartRange,
   type OHLC,
@@ -47,9 +48,17 @@ interface Props {
   markers?: ChartMarker[]
   ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
+  /** 主图折线（缠论笔） */
+  polylines?: ChartPolyline[]
   showLimitMarkers?: boolean
   showIndicatorControls?: boolean
   showMarkerToggle?: boolean
+  /**
+   * 缠论叠加开关（受控）。传 undefined = 不渲染「缠论」按钮、也不画缠论。
+   * 数据由上层（StockPanel）注入到 markers/ranges/polylines。
+   */
+  chanEnabled?: boolean
+  onToggleChan?: () => void
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
@@ -147,9 +156,12 @@ export function StockDailyKChart({
   markers,
   ranges,
   priceLines,
+  polylines,
   showLimitMarkers = true,
   showIndicatorControls = true,
   showMarkerToggle = true,
+  chanEnabled,
+  onToggleChan,
   showMA = true,
   showInfoBar = true,
   visibleBars = 60,
@@ -270,18 +282,35 @@ export function StockDailyKChart({
               </select>
             </div>
           )}
-          {showMarkerToggle && showLimitMarkers && (
-            <button
-              onClick={() => setShowMarkers(v => !v)}
-              className={`ml-auto px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                showMarkers
-                  ? 'text-[#FACC15] bg-[#FACC15]/10'
-                  : 'bg-elevated text-muted hover:text-secondary'
-              }`}
-            >
-              异动
-            </button>
-          )}
+          {(showMarkerToggle && showLimitMarkers) || chanEnabled !== undefined ? (
+            <div className="ml-auto flex items-center gap-1.5">
+              {showMarkerToggle && showLimitMarkers && (
+                <button
+                  onClick={() => setShowMarkers(v => !v)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                    showMarkers
+                      ? 'text-[#FACC15] bg-[#FACC15]/10'
+                      : 'bg-elevated text-muted hover:text-secondary'
+                  }`}
+                >
+                  异动
+                </button>
+              )}
+              {chanEnabled !== undefined && (
+                <button
+                  onClick={onToggleChan}
+                  title={chanEnabled ? '隐藏缠论笔/中枢/买卖点' : '显示缠论笔/中枢/买卖点'}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                    chanEnabled
+                      ? 'text-accent bg-accent/15'
+                      : 'bg-elevated text-muted hover:text-secondary'
+                  }`}
+                >
+                  缠论
+                </button>
+              )}
+            </div>
+          ) : null}
         </div>
       )}
       {kline.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
@@ -295,6 +324,7 @@ export function StockDailyKChart({
           markers={allMarkers}
           ranges={ranges}
           priceLines={priceLines}
+          polylines={polylines}
           height={chartHeight - 22}
           showMA={showMA}
           showInfoBar={showInfoBar}

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
+import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 
@@ -77,6 +78,24 @@ export interface ChartPriceLine {
   color?: string
   start?: string
   end?: string
+}
+
+/**
+ * 主图折线（用于缠论「笔」这类连续斜线）。
+ *
+ * 顶点按 date 升序给出，渲染时对相邻顶点之间的每个交易日做**线性插值**补点，
+ * 因此画出来的是顶点之间严格笔直的折线（而不是各顶点独立连线的虚线）。
+ * date 不在当前 x 轴范围内的顶点会被丢弃。
+ */
+export interface ChartPolyline {
+  points: { date: string; price: number }[]
+  color?: string
+  /** 线宽，默认 1.2 */
+  width?: number
+  dashed?: boolean
+  name?: string
+  /** 在顶点处画小圆点，默认 false */
+  showSymbol?: boolean
 }
 
 export interface StockInfo {
@@ -516,6 +535,8 @@ interface Props {
   markers?: ChartMarker[]
   ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
+  /** 主图折线（缠论笔等连续斜线） */
+  polylines?: ChartPolyline[]
   height?: number
   showMA?: boolean
   showInfoBar?: boolean
@@ -722,6 +743,7 @@ function buildOption(
   markers: ChartMarker[] | undefined,
   ranges: ChartRange[] | undefined,
   priceLines: ChartPriceLine[] | undefined,
+  polylines: ChartPolyline[] | undefined,
   showMA: boolean,
   compact: boolean,
   activeIndicators: string[],
@@ -967,6 +989,33 @@ function buildOption(
     series.push(maLine('ma10', THEME.ma10, 'MA10'))
     series.push(maLine('ma20', THEME.ma20, 'MA20'))
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
+  }
+
+  // 主图折线（缠论「笔」）：相邻顶点之间逐 bar 线性插值 ⇒ 画出来是笔直的斜线。
+  for (const poly of polylines ?? []) {
+    if (poly.points.length < 2) continue
+    const dense = densePolyline(poly.points, dates.length, dateIndexMap)
+    // 只有落在图内且连成段的顶点才有意义；没有两个有效顶点时 dense 全是占位符
+    if (dense.every(v => v === POLYLINE_GAP)) continue
+    const lineColor = poly.color ?? CT().text
+    series.push({
+      name: poly.name ?? 'chan-stroke',
+      type: 'line',
+      symbol: poly.showSymbol ? 'circle' : 'none',
+      symbolSize: 3,
+      animation: false,
+      silent: true,
+      connectNulls: false,
+      data: dense,
+      lineStyle: {
+        width: poly.width ?? 1.2,
+        color: lineColor,
+        type: poly.dashed ? ('dashed' as const) : ('solid' as const),
+        opacity: 0.95,
+      },
+      itemStyle: { color: lineColor },
+      z: 7,
+    })
   }
 
   // BOLL 布林带 — 需在 activeIndicators 中激活
@@ -1220,6 +1269,7 @@ export function EChartsCandlestick({
   markers,
   ranges,
   priceLines,
+  polylines,
   height = 480,
   showMA = true,
   showInfoBar = true,
@@ -1560,6 +1610,7 @@ export function EChartsCandlestick({
       showMarkersProp ? markers : undefined,
       ranges,
       priceLines,
+      polylines,
       showMA, compactRef.current,
       activeIndicators, chartHeight,
       infoIdxRef.current,
@@ -1582,7 +1633,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, polylines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

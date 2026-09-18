@@ -3,11 +3,11 @@
  *
  * 表格骨架（表头排序/sticky/遍历）由共享的 StockDataTable 承担；本组件只负责
  * 策略页特有的单元格内容：symbol 列（含加自选按钮 + 失效行灰显）、strategies、
- * score、signals、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
+ * score、signals、chan、candle、ext 列。其余纯数据列（价格/指标/财务…）交给共享原语。
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Check, Plus, Eye, EyeOff, RefreshCw } from 'lucide-react'
-import type { KlineRow, MinuteKlineRow } from '@/lib/api'
+import type { ChanAnnotation, KlineRow, MinuteKlineRow } from '@/lib/api'
 import { fmtPrice, formatExtNumber } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/screener-columns'
 import { getSignals, signalCls } from '@/lib/stock-table'
@@ -50,6 +50,13 @@ interface ScreenerTableProps {
   onRefreshIntraday?: () => void
   /** 分时数据正在刷新中 (按钮 loading 态) */
   intradayRefreshing?: boolean
+  /**
+   * symbol → 缠论买点标注，仅当启用缠论买点列时传入。
+   * 键缺失代表「尚未算到该票」（渲染 loading 占位），值为 kind=null 代表「算了但无买点」。
+   */
+  chanBySymbol?: Record<string, ChanAnnotation>
+  /** 缠论买点列是否正在计算 */
+  chanLoading?: boolean
   /** 表头排序（受控，由 Screener.tsx 传入） */
   sort?: SortState | null
   onSortToggle?: (colId: string) => void
@@ -114,6 +121,20 @@ function renderTagList(
 const EXT_TAG_CLS = 'inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight text-yellow-500 bg-yellow-500/10'
 const STRATEGY_TAG_CLS = 'inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight bg-amber-500/10 text-amber-600 border border-amber-500/20'
 
+/**
+ * 缠论买卖点标签配色。
+ * A股惯例：买点红系、卖点绿系；级别越高底色越重 —— 一买是抄底、二买是确认、三买是主升起点。
+ */
+const CHAN_TAG_CLS: Record<string, string> = {
+  '1buy': 'bg-red-500/10 text-red-400/90 border-red-500/20',
+  '2buy': 'bg-red-500/15 text-red-400 border-red-500/30',
+  '3buy': 'bg-red-500/25 text-red-500 border-red-500/45',
+  '1sell': 'bg-emerald-500/10 text-emerald-500/90 border-emerald-500/20',
+  '2sell': 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30',
+  '3sell': 'bg-emerald-500/25 text-emerald-600 border-emerald-500/45',
+}
+const CHAN_TAG_FALLBACK_CLS = 'bg-elevated text-secondary border-border'
+
 function renderExtValue(
   val: any,
   col: ColumnConfig,
@@ -153,6 +174,7 @@ export function ScreenerTable({
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
+  chanBySymbol, chanLoading = false,
   sort, onSortToggle,
 }: ScreenerTableProps) {
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
@@ -316,6 +338,41 @@ export function ScreenerTable({
             ) : (
               <span className="text-muted text-xs">—</span>
             )}
+          </td>
+        )
+      }
+      case 'chan': {
+        const ann = chanBySymbol?.[r.symbol]
+        // 键缺失 = 还没算到；kind=null = 算了但近期无买点
+        if (!ann) {
+          return (
+            <td key={col.id} className="px-3 py-2">
+              <span className={`text-[11px] text-muted ${chanLoading ? 'animate-pulse' : ''}`}>
+                {chanLoading ? '计算中…' : '—'}
+              </span>
+            </td>
+          )
+        }
+        if (!ann.kind) {
+          return (
+            <td key={col.id} className="px-3 py-2">
+              <span className="text-[11px] text-muted" title={ann.text}>—</span>
+            </td>
+          )
+        }
+        return (
+          <td key={col.id} className="px-3 py-2">
+            <div className="flex items-center gap-1.5" title={ann.text}>
+              <span className={`inline-block shrink-0 px-1.5 py-px rounded text-[10px] font-semibold leading-tight border ${CHAN_TAG_CLS[ann.kind] ?? CHAN_TAG_FALLBACK_CLS}`}>
+                {ann.label}
+              </span>
+              {ann.price != null && (
+                <span className="text-[11px] text-secondary num tabular-nums">{fmtPrice(ann.price)}</span>
+              )}
+              {ann.bars_since != null && (
+                <span className="shrink-0 text-[10px] text-muted num tabular-nums">{ann.bars_since}根前</span>
+              )}
+            </div>
           </td>
         )
       }

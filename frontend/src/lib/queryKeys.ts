@@ -47,6 +47,8 @@ export const QK = {
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? '', market] as const,
   screenerCached:       (asOf?: string, ext?: string, market: string = 'cn') => ['screener-cached', 'all', asOf ?? '', ext ?? '', market] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
+  // 缠论买点批量标注: 仅取决于 symbol 集合 (口径/参数为常量), 后端有结果缓存
+  screenerChanAnnotate: (symbols: string) => ['screener-chan-annotate', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
 
@@ -79,6 +81,12 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  // 缠论单票结构（笔/中枢/一二三买卖点），按 symbol + 回溯根数 + 笔口径缓存
+  chanAnalysis:         (symbol: string, lookback: number, strict: boolean) =>
+                           ['chan-analysis', symbol, lookback, strict] as const,
+  // 缠论全市场买点扫描，按买点类型 + 新鲜度 + 笔口径缓存（后端侧也有结果缓存）
+  chanScan:             (kinds: string, recentBars: number, strict: boolean) =>
+                           ['chan-scan', kinds, recentBars, strict] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>

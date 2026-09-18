@@ -17,6 +17,7 @@ import {
 // Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
+const ChanScan = lazy(() => import('./pages/ChanScan').then(m => ({ default: m.ChanScan })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
 const Mining = lazy(() => import('./pages/Mining').then(m => ({ default: m.Mining })))
 const Financials = lazy(() => import('./pages/Financials').then(m => ({ default: m.Financials })))
@@ -49,6 +50,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/review',
   '/watchlist',
   '/screener',
+  '/chan-scan',
   '/backtest',
   '/mining',
   '/financials',
@@ -122,6 +124,7 @@ export const router = createBrowserRouter([
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'screener', element: <Screener /> },
+      { path: 'chan-scan', element: <ChanScan /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'mining', element: <Mining /> },
       { path: 'financials', element: <Financials /> },

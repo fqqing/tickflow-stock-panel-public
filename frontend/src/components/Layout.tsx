@@ -51,6 +51,7 @@ import {
   WifiOff,
   PanelLeftClose,
   PanelLeftOpen,
+  GitBranch,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -80,6 +81,7 @@ const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
+  { to: '/chan-scan',  label: '缠论买点', icon: GitBranch },
   { to: '/backtest',   label: '回测', icon: History },
   { to: '/mining',     label: '挖掘', icon: Pickaxe },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },

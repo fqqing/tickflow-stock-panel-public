@@ -396,6 +396,105 @@ export interface ScreenerCachedResult {
   updated_at: number | null
 }
 
+// ===== 缠论 (笔 / 中枢 / 一买二买三买) =====
+
+/** 缠论买卖点标注结果 (POST /api/chan/annotate 的单行)。 */
+export interface ChanAnnotation {
+  symbol: string
+  name?: string | null
+  /** 最近买点类型: 1buy/2buy/3buy; 超出 recent_bars 或无买点时为 null */
+  kind: string | null
+  /** 中文标签: 一买/二买/三买/无买点/数据不足 */
+  label: string
+  /** 买点距今多少根 K 线 */
+  bars_since: number | null
+  price: number | null
+  trend: string | null
+  text: string
+  stale?: boolean
+}
+
+export interface ChanSignalPoint {
+  kind: string
+  label: string
+  is_buy: boolean
+  index: number
+  date: string | null
+  price: number
+  /** 是否伴随 MACD 背驰 (仅一买/一卖有意义) */
+  divergence: boolean
+  center_zd: number | null
+  center_zg: number | null
+}
+
+export interface ChanStrokePoint {
+  start_index: number
+  end_index: number
+  start_date: string | null
+  end_date: string | null
+  start_price: number
+  end_price: number
+  /** +1 向上笔, -1 向下笔 */
+  direction: number
+}
+
+export interface ChanCenter {
+  start_index: number
+  end_index: number
+  start_date: string | null
+  end_date: string | null
+  zd: number
+  zg: number
+  stroke_count: number
+}
+
+export interface ChanAnalysis {
+  symbol: string
+  name?: string | null
+  bars: number
+  dates: string[]
+  /** up 上涨 / down 下跌 / range 盘整 */
+  trend: string
+  snapshot: {
+    kind: string | null
+    label: string
+    bars_since: number | null
+    price: number | null
+    center_zd: number | null
+    center_zg: number | null
+    trend: string
+    text: string
+  }
+  strokes: ChanStrokePoint[]
+  centers: ChanCenter[]
+  signals: ChanSignalPoint[]
+  counts: Record<string, number>
+}
+
+export interface ChanScanItem {
+  symbol: string
+  name?: string | null
+  kind: string
+  label: string
+  bars_since: number
+  price: number | null
+  trend: string
+  center_zd: number | null
+  center_zg: number | null
+  text: string
+}
+
+export interface ChanScanResult {
+  as_of: string
+  kinds: string[]
+  strict: boolean
+  scanned: number
+  hit_count: number
+  elapsed_ms: number
+  frame_ms?: number
+  items: ChanScanItem[]
+}
+
 export interface MarketSnapshotRow {
   symbol: string
   name?: string | null
@@ -1947,6 +2046,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
+
+  // 缠论: 单票结构 / 批量标注 / 全市场扫描
+  chanAnalysis: (symbol: string, lookback = 400, strict = true) =>
+    request<ChanAnalysis>(
+      `/api/chan/analysis?symbol=${encodeURIComponent(symbol)}&lookback=${lookback}&strict=${strict}`,
+    ),
+  chanAnnotate: (symbols: string[], lookback = 400, strict = true, recentBars = 60) =>
+    request<{ items: ChanAnnotation[] }>('/api/chan/annotate', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, lookback, strict, recent_bars: recentBars }),
+    }),
+  chanScan: (kinds: string, lookback = 320, recentBars = 15, strict = true, limit = 300) =>
+    request<ChanScanResult>(
+      `/api/chan/scan?kinds=${encodeURIComponent(kinds)}&lookback=${lookback}`
+      + `&recent_bars=${recentBars}&strict=${strict}&limit=${limit}`,
+    ),
   klineMinuteBatch: (symbols: string[], date?: string) =>
     request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
       method: 'POST',

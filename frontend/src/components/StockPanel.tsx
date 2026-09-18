@@ -6,6 +6,7 @@ import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
+import { useChanOverlay } from '@/lib/useChanOverlay'
 import type { ChartMarker, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
 import {
   loadInfoFields,
@@ -13,6 +14,12 @@ import {
   buildInfoExtColumnsParam,
   type ColumnConfig,
 } from '@/lib/stock-info-fields'
+
+/**
+ * 缠论开启时图表的初始可视根数。
+ * 120 根在 500px 宽的图里约 4px/根，既能看清笔的折点，又能把最近 1~2 个中枢纳入视野。
+ */
+const CHAN_VISIBLE_BARS = 120
 
 interface Props {
   symbol: string
@@ -28,6 +35,9 @@ interface Props {
   priceLines?: ChartPriceLine[]
   showLimitMarkers?: boolean
   showMarkerToggle?: boolean
+  /** 缠论叠加开关（受控）。传 undefined = 不启用缠论, 也不显示「缠论」按钮 */
+  chanOverlay?: boolean
+  onToggleChan?: () => void
   /** 加监控回调 (传入后信息条显示 RadioTower 图标) */
   onMonitor?: () => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -56,6 +66,8 @@ export function StockPanel({
   priceLines,
   showLimitMarkers = true,
   showMarkerToggle = true,
+  chanOverlay,
+  onToggleChan,
   onMonitor,
   onPriceDoubleClick,
   inWatchlist,
@@ -100,6 +112,24 @@ export function StockPanel({
   const rows = dailyResult?.rows ?? []
   const stockInfo = dailyResult?.stockInfo
   const rawRows: KlineRow[] = dailyResult?.rawRows ?? []
+
+  // ── 缠论叠加 ──────────────────────────────────────────────────
+  // 图表 x 轴日期序列：由日K结果派生，供缠论叠加层裁剪到当前显示区间
+  const chartDates = useMemo(() => (dailyResult?.rows ?? []).map(r => r.date), [dailyResult])
+  const chanActive = chanOverlay === true && !infoBarOnly
+  const chanLayers = useChanOverlay(symbol, chartDates, chanActive)
+  // 合并外部标注与缠论标注；用 useMemo 保住引用，避免 ECharts 每次渲染都全量 setOption
+  const mergedMarkers = useMemo(
+    () => (chanLayers.markers.length > 0 ? [...(markers ?? []), ...chanLayers.markers] : markers),
+    [markers, chanLayers.markers],
+  )
+  const mergedRanges = useMemo(
+    () => (chanLayers.ranges.length > 0 ? [...(ranges ?? []), ...chanLayers.ranges] : ranges),
+    [ranges, chanLayers.ranges],
+  )
+  // 缠论开启时放宽初始可视根数：中枢一定在买点之前（三买更是如此），
+  // 默认 40~60 根只会看到箭头看不到它所依附的中枢，等于信息残缺。
+  const baseVisibleBars = chanActive ? CHAN_VISIBLE_BARS : showIntraday ? 40 : 60
 
   // symbol 变化时重置分时相关状态，避免切股后残留旧日期。
   // 注意：必须跳过首次挂载——重开弹窗时 kline 命中 react-query 缓存，
@@ -156,16 +186,19 @@ export function StockPanel({
           height={height}
           className="flex-1 min-w-0"
           dateRange={dateRange}
-          markers={markers}
-          ranges={ranges}
+          markers={mergedMarkers}
+          ranges={mergedRanges}
           priceLines={priceLines}
+          polylines={chanLayers.polylines}
           showLimitMarkers={showLimitMarkers}
           showMarkerToggle={showMarkerToggle}
+          chanEnabled={chanOverlay === undefined ? undefined : chanOverlay === true}
+          onToggleChan={onToggleChan}
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
           onPriceDoubleClick={onPriceDoubleClick}
           onDataChange={setDailyResult}
-          visibleBars={showIntraday ? 40 : 60}
+          visibleBars={baseVisibleBars}
           extColumns={extColumns}
         />
 

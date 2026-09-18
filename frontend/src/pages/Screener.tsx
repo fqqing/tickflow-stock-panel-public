@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X } from 'lucide-react'
-import { api, genRuleId, type ScreenerStrategy, type ScreenerResult, type MarketSnapshotRow } from '@/lib/api'
+import { api, genRuleId, type ChanAnnotation, type ScreenerStrategy, type ScreenerResult, type MarketSnapshotRow } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -38,6 +38,14 @@ import {
 
 // 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
 const SHOW_STRATEGY_STORE = false
+
+// ── 缠论买点列参数 ────────────────────────────────────────────────
+// 后端 POST /api/chan/annotate 单次上限 (超出截断, 与分时列同策略, 避免打爆配额)
+const CHAN_BATCH_CAP = 800
+// 参与缠论计算的日K回溯根数: 400 根足够涵盖 3~5 个中枢, 再长对当下买点判定无增益
+const CHAN_LOOKBACK = 400
+// 买点超过多少根 K 线就算「失效」→ 单元格显示 —(列只提示当下的买点)
+const CHAN_RECENT_BARS = 60
 
 export function Screener() {
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
@@ -491,6 +499,39 @@ export function Screener() {
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
+  // ── 缠论买点标注 ──────────────────────────────────────────────────
+  // 选中「缠论买点」列时, 对当前结果集发 1 次批量请求算缠论结构 (后端按 symbol 集合做结果缓存)。
+  // 缠论笔/中枢会被后续行情改写, 所以这里只能按「截至目前」重算, 不做增量。
+  const chanColumn = useMemo(() =>
+    columns.find(c => c.source.type === 'builtin' && c.source.key === 'chan' && c.visible),
+    [columns],
+  )
+  const chanVisible = !!chanColumn
+  const allChanSymbols = useMemo(
+    () => [...new Set(displayRows.map((r: any) => r.symbol as string))].sort(),
+    [displayRows],
+  )
+  const chanTruncated = chanVisible && allChanSymbols.length > CHAN_BATCH_CAP
+  const chanRequestSymbols = useMemo(
+    () => chanTruncated ? allChanSymbols.slice(0, CHAN_BATCH_CAP) : allChanSymbols,
+    [allChanSymbols, chanTruncated],
+  )
+  const chanSymbolsKey = chanRequestSymbols.join(',')
+  const chanAnnotation = useQuery({
+    queryKey: QK.screenerChanAnnotate(chanSymbolsKey),
+    queryFn: () => api.chanAnnotate(chanRequestSymbols, CHAN_LOOKBACK, true, CHAN_RECENT_BARS),
+    enabled: chanVisible && chanRequestSymbols.length > 0,
+    staleTime: 5 * 60_000,
+    placeholderData: previousData => previousData,
+  })
+  // 未选中该列时不传 map (undefined), 让表格走「—」而非「计算中…」
+  const chanBySymbol = useMemo(() => {
+    if (!chanVisible) return undefined
+    const out: Record<string, ChanAnnotation> = {}
+    for (const it of chanAnnotation.data?.items ?? []) out[it.symbol] = it
+    return out
+  }, [chanVisible, chanAnnotation.data])
+
   // asOf 确定后 + 策略列表就绪 + 策略池非空 → 自动跑一次 (受系统设置开关控制)
   // 缓存命中时秒加载; 未命中时, 仅当 screener_auto_run 开启才自动触发 runAll
   useEffect(() => {
@@ -928,6 +969,21 @@ export function Screener() {
                       </button>
                     </span>
                   )}
+                  {/* 缠论买点: 计算中指示 + 超批量上限时的截断提示 (内联, 与分时提示同款式) */}
+                  {chanVisible && chanAnnotation.isFetching && (
+                    <span className="inline-flex items-center gap-1 text-xs text-muted animate-pulse">
+                      <RefreshCw className="h-3 w-3 animate-spin" />
+                      缠论计算中…
+                    </span>
+                  )}
+                  {chanTruncated && (
+                    <span
+                      className="inline-flex items-center gap-1 text-xs text-warning/90"
+                      title={`缠论标注单次上限 ${CHAN_BATCH_CAP} 只, 其余行显示 —`}
+                    >
+                      缠论仅前 {CHAN_BATCH_CAP}/{allChanSymbols.length} · 受单次请求上限限制
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -974,6 +1030,8 @@ export function Screener() {
                     intradayAutoRefresh={intradayRefreshEnabled && realtimeRunning}
                     onRefreshIntraday={() => minuteBatch.refetch()}
                     intradayRefreshing={minuteBatch.isFetching}
+                    chanBySymbol={chanBySymbol}
+                    chanLoading={chanAnnotation.isFetching}
                     sort={sort}
                     onSortToggle={toggle}
                   />
@@ -1011,6 +1069,7 @@ export function Screener() {
         symbol={previewSymbol}
         name={previewName}
         onClose={closePreview}
+        chanOverlay
       />
 
       <StrategySettingsDialog

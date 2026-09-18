@@ -32,6 +32,11 @@ interface Props {
     signals?: string[]
     message?: string
   } | null
+  /**
+   * 是否启用缠论叠加（笔/中枢/一二三买卖点）。
+   * 传 true = 显示「缠论」按钮且默认开启；不传 = 完全不出现缠论入口。
+   */
+  chanOverlay?: boolean
 }
 
 // ===== 板块标识（与 Screener 列表一致）=====
@@ -79,13 +84,15 @@ function fmtAbnormalCalcTime(asofSec: number): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {
+export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOverlay }: Props) {
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
   const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
+  // 缠论叠加开关：跨换股保留用户选择，所以不从 symbol 变化里重置
+  const [chanOn, setChanOn] = useState(!!chanOverlay)
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
 
@@ -478,6 +485,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   showIntraday
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
+                  chanOverlay={chanOverlay === undefined ? undefined : chanOn}
+                  onToggleChan={() => setChanOn(v => !v)}
                   onPriceDoubleClick={openPriceAlert}
                 />
               ) : (
