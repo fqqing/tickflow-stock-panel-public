@@ -474,8 +474,10 @@ PORT=3018                      # 服务端口
 本项目以 [MIT](./LICENSE) 协议开源，与上游保持一致。
 
 ```
-Copyright (c) 2026 tickflow-stock-panel contributors   # 上游原始版权，完整保留
-Copyright (c) 2026 hzy1522                             # 本 fork 修改部分
+Copyright (c) 2026 tickflow-stock-panel contributors   # 原创项目版权，完整保留
+Copyright (c) 2026 hzy1522                             # 原创作者
+Copyright (c) 2026 shy3130                             # 多市场扩展层（A股/港股/美股）
+Copyright (c) 2026 川秦 (fqqing)                        # 本层增量（缠论体系与策略工程）
 ```
 
 上游的原始版权声明已完整保留于 [LICENSE](./LICENSE)，未作删除或改写。衍生关系与第三方声明详见 [NOTICE](./NOTICE)。
