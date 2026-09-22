@@ -14,7 +14,7 @@ from typing import AsyncIterator
 
 import polars as pl
 
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
+from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df, to_json_safe_rows
 
 logger = logging.getLogger(__name__)
 
@@ -40,20 +40,8 @@ def _load_stock_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]
         # 按 period_end 降序,截取最新 N 期
         if "period_end" in df.columns:
             df = df.sort("period_end", descending=True).head(_MAX_PERIODS)
-        # 清洗 NaN/Inf,转成 JSON 安全的 dict 列表
-        rows = []
-        for rec in df.to_dicts():
-            clean = {}
-            for k, v in rec.items():
-                if k == "symbol":
-                    continue  # 不需要重复回传 symbol
-                if isinstance(v, float):
-                    import math
-                    clean[k] = None if not math.isfinite(v) else v
-                else:
-                    clean[k] = v
-            rows.append(clean)
-        result[table] = rows
+        # 清洗 NaN/Inf 与 date 列, 转成 JSON 安全的 dict 列表
+        result[table] = to_json_safe_rows(df)
     return result
 
 

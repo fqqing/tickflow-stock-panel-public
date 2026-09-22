@@ -22,7 +22,7 @@ from typing import AsyncIterator
 import polars as pl
 
 from app.indicators.levels import compute_levels, summarize_levels
-from app.services.financial_sync import get_financial_df
+from app.services.financial_sync import get_financial_df, to_json_safe_rows
 
 logger = logging.getLogger(__name__)
 
@@ -96,19 +96,7 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
             continue
         if "period_end" in df.columns:
             df = df.sort("period_end", descending=True).head(2)  # 只取最近 2 期
-        import math
-        rows = []
-        for rec in df.to_dicts():
-            clean = {}
-            for k, v in rec.items():
-                if k == "symbol":
-                    continue
-                if isinstance(v, float):
-                    clean[k] = None if not math.isfinite(v) else v
-                else:
-                    clean[k] = v
-            rows.append(clean)
-        out[table] = rows
+        out[table] = to_json_safe_rows(df)
     return out
 
 

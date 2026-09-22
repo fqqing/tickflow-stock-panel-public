@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -283,6 +284,40 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
     except Exception as e:
         logger.warning("读取 financials/%s 失败: %s", table, e)
         return pl.DataFrame()
+
+
+def json_safe_value(value: Any) -> Any:
+    """单个值 -> JSON 安全形态。
+
+    datetime 是 date 的子类, 因此用 (date, datetime) 元组一次覆盖两者,
+    isoformat() 对 date 给 "2026-06-30"、对 datetime 给 "2026-06-30T00:00:00"。
+    """
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def to_json_safe_rows(df: pl.DataFrame) -> list[dict]:
+    """把财务 DataFrame 转成 JSON 安全的 dict 列表。
+
+    polars 的 Date 列在 to_dicts() 之后是 datetime.date, 直接 json.dumps 会抛
+    "Object of type date is not JSON serializable"。财务表普遍带 period_end 与
+    announce_date 两个 Date 列, 所以 date 清洗必须在这里统一做 —— 只处理 float
+    是不够的, 那会让 AI 分析在提示词组装阶段整段失败。
+
+    返回时去掉 symbol 列: 提示词里已单独给出标的代码, 不必在每行重复。
+    """
+    rows: list[dict] = []
+    for rec in df.to_dicts():
+        clean: dict[str, Any] = {}
+        for key, value in rec.items():
+            if key == "symbol":
+                continue
+            clean[key] = json_safe_value(value)
+        rows.append(clean)
+    return rows
 
 
 # ================================================================
