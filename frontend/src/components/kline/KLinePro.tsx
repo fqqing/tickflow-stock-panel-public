@@ -32,6 +32,8 @@ export interface KLineProProps {
   symbol: string
   className?: string
   dateRange: { start: string; end: string }
+  /** 日 / 周 / 月（周月由后端按日 K 聚合并重算指标） */
+  period?: 'day' | 'week' | 'month'
   chanEnabled?: boolean
   priceLines?: ChartPriceLine[]
 }
@@ -54,7 +56,14 @@ function parseRows(rows: KlineRow[]): kc.KLineData[] {
   return rows.map(rowToKLine).filter((d): d is kc.KLineData => d !== null)
 }
 
-export function KLinePro({ symbol, className, dateRange, chanEnabled = false, priceLines = [] }: KLineProProps) {
+export function KLinePro({
+  symbol,
+  className,
+  dateRange,
+  period = 'day',
+  chanEnabled = false,
+  priceLines = [],
+}: KLineProProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<kc.Chart | null>(null)
   const rowsRef = useRef<kc.KLineData[]>([])
@@ -66,8 +75,8 @@ export function KLinePro({ symbol, className, dateRange, chanEnabled = false, pr
   }, [dateRange])
 
   const kline = useQuery({
-    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, undefined, 'day', 'qfq'),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, 'day', 'qfq'),
+    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, undefined, period, 'qfq'),
+    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, 'qfq'),
     enabled: !!symbol,
     placeholderData: prev => prev,
   })
@@ -132,6 +141,13 @@ export function KLinePro({ symbol, className, dateRange, chanEnabled = false, pr
     rowsRef.current = rows
     chart.resetData()
   }, [rows])
+
+  // 周期切换：setPeriod 内部会 resetData 重新走 loader
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    chart.setPeriod({ type: period, span: 1 })
+  }, [period, ready])
 
   // 缠论叠加层：创建一次，之后用 overrideOverlay 更新 extendData
   const chanOverlayIdRef = useRef<string | null>(null)

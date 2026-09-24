@@ -1,15 +1,15 @@
 /**
- * 个股终端(全屏工作区) —— P0 的核心交付。
+ * 个股终端(全屏工作区) —— P0 容器 + P2 终端形态。
  *
- * 与旧弹窗(StockPreviewDialog)的分工:
- *  - 终端: 独立路由 /stock/:symbol, 占满视口, 图表高度随窗口自适应,
- *          全屏只有一个价格(与盘口共用 ['depth', symbol] 缓存), 承载触发上下文。
- *  - 弹窗: 保留为「快速预览」, 用于自选/监控列表里扫一眼, 不做重度分析。
+ * P0: 独立路由 /stock/:symbol, 占满视口, 图表高度自适应, 价格单一源, 承载触发上下文。
+ * P2: 三栏可折叠工作区 + 键盘优先 + 响应式三档
+ *       >=1440  左栏(股票轨道) + 图表 + 右栏(盘口)
+ *       1024-1440  图表 + 右栏(左栏收为抽屉)
+ *       <1024   图表全宽(左右都收为抽屉)
  *
- * 图表内核仍是 ECharts(见 StockDailyKChart), P0 阶段刻意不动内核 ——
- * 先把容器和一致性问题修掉, 换内核放到 P1 单独做, 失败可独立回退。
+ * 图表内核: 默认 ECharts(StockPanel), 灰度开关可切到 KLineChart(KLinePro, P1)。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -17,12 +17,17 @@ import { QK } from '@/lib/queryKeys'
 import { useQuote, useElementHeight } from '@/lib/useQuote'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
+import { useLayoutMode } from '@/lib/useLayoutMode'
+import { useRecentStocks } from '@/lib/useRecentStocks'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { DepthPanel } from '@/components/DepthPanel'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { TerminalHeader } from '@/components/stock-terminal/TerminalHeader'
 import { ContextRibbon, type TriggerContext } from '@/components/stock-terminal/ContextRibbon'
+import { StockRail, type RailItem } from '@/components/stock-terminal/StockRail'
+import { CommandPalette } from '@/components/stock-terminal/CommandPalette'
+import { ShortcutHelp } from '@/components/stock-terminal/ShortcutHelp'
 import { KLinePro } from '@/components/kline/KLinePro'
 import { getKLineProFlag, setKLineProFlag } from '@/components/kline/useKLineProFlag'
 import type { ChartPriceLine } from '@/components/EChartsCandlestick'
@@ -40,10 +45,7 @@ function iso(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
 
-/**
- * 区间选择条 —— 从旧弹窗顶栏下沉到图表上方。
- * 顶栏因此只剩「标识 + 价格 + 动作」, 视觉重心回到图表。
- */
+/** 区间选择条 —— 从旧弹窗顶栏下沉到图表上方 */
 function RangeBar({
   value,
   onChange,
@@ -58,7 +60,7 @@ function RangeBar({
     onChange({ start: iso(s), end: iso(end) })
   }
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-1.5 pb-1.5">
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {PRESETS.map(p => {
         const s = new Date()
         s.setMonth(s.getMonth() - p.months)
@@ -86,13 +88,26 @@ function RangeBar({
   )
 }
 
+/** 抽屉入口小按钮 */
+function DrawerButton({ side, label, onClick }: { side: 'left' | 'right'; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`展开${label}`}
+      className="h-6 shrink-0 rounded border border-border bg-elevated px-1.5 text-[11px] text-muted transition-colors hover:text-foreground"
+    >
+      {side === 'left' ? '› ' : ''}{label}{side === 'right' ? ' ‹' : ''}
+    </button>
+  )
+}
+
 export function StockTerminal() {
   const { symbol = '' } = useParams<{ symbol: string }>()
   const navigate = useNavigate()
   const location = useLocation()
   const qc = useQueryClient()
 
-  // 实时刷新: 复用自选列表的「分时刷新开关 + 间隔」偏好, 与弹窗口径一致
   const { data: prefs } = usePreferences()
   const { data: quoteStatus } = useQuoteStatus()
   const realtimeRunning = quoteStatus?.running ?? false
@@ -107,10 +122,29 @@ export function StockTerminal() {
   const [dateRange, setDateRange] = useState(() => getDefaultRange())
   const [chanOn, setChanOn] = useState(false)
   const [useKLine, setUseKLine] = useState(() => getKLineProFlag())
+  const [period, setPeriod] = useState<'day' | 'week' | 'month'>('day')
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
 
-  // 图表高度随窗口自适应: 扣掉信息条约 92px, 替代写死的 420
+  // ── P2 布局 ────────────────────────────────────────────────
+  const mode = useLayoutMode()
+  const [railOpen, setRailOpen] = useState(() => mode === 'three')
+  const [depthOpen, setDepthOpen] = useState(() => mode !== 'one')
+  const prevMode = useRef(mode)
+  useEffect(() => {
+    if (prevMode.current === mode) return
+    prevMode.current = mode
+    setRailOpen(mode === 'three')
+    setDepthOpen(mode !== 'one')
+  }, [mode])
+  const railDocked = mode === 'three' && railOpen
+  const railDrawer = mode !== 'three' && railOpen
+  const depthDocked = mode !== 'one' && depthOpen
+  const depthDrawer = mode === 'one' && depthOpen
+
+  // 图表高度随窗口自适应
   const boxRef = useRef<HTMLDivElement>(null)
   const chartHeight = useElementHeight(boxRef, 92, 260)
 
@@ -121,16 +155,7 @@ export function StockTerminal() {
     return () => clearFocusSymbol()
   }, [symbol])
 
-  // Esc 返回上一页
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !showMonitor) navigate(-1)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [navigate, showMonitor])
-
-  // ── 触发上下文: 优先跳转时带入的 state, 其次该股当前异动 ──────────────
+  // ── 触发上下文 ────────────────────────────────────────────
   const stateCtx = (location.state as { trigger?: TriggerContext } | null)?.trigger ?? null
   const abnormal = useQuery({
     queryKey: QK.abnormalOverview(0.5, 300),
@@ -159,7 +184,7 @@ export function StockTerminal() {
     }
   }, [stateCtx, abRow])
 
-  // ── 自选 ──────────────────────────────────────────────────────
+  // ── 自选 ──────────────────────────────────────────────────
   const watchlist = useQuery({ queryKey: QK.watchlist, queryFn: () => api.watchlistList() })
   const inWatchlist = useMemo(
     () => (watchlist.data?.symbols ?? []).some(s => s.symbol === symbol),
@@ -173,6 +198,35 @@ export function StockTerminal() {
     },
   })
 
+  // ── 左栏轨道 / [ ] 换股序列 ────────────────────────────────
+  const { recent } = useRecentStocks({ symbol, name: quote.raw?.name ?? undefined })
+  const watchItems = useMemo<RailItem[]>(
+    () => (watchlist.data?.symbols ?? []).map(s => ({ symbol: s.symbol, name: s.name ?? null })),
+    [watchlist.data],
+  )
+  const navSeq = useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const it of [...watchItems, ...recent]) {
+      if (seen.has(it.symbol)) continue
+      seen.add(it.symbol)
+      out.push(it.symbol)
+    }
+    return out
+  }, [watchItems, recent])
+
+  const gotoSymbol = useCallback((next: string) => {
+    if (!next || next === symbol) return
+    navigate(`/stock/${next}`, { state: location.state ?? undefined })
+  }, [location.state, navigate, symbol])
+
+  const stepSymbol = useCallback((delta: number) => {
+    if (navSeq.length === 0) return
+    const idx = navSeq.indexOf(symbol)
+    if (idx < 0) { gotoSymbol(navSeq[0]); return }
+    gotoSymbol(navSeq[(idx + delta + navSeq.length) % navSeq.length])
+  }, [gotoSymbol, navSeq, symbol])
+
   const handleRefresh = () => {
     qc.invalidateQueries({ queryKey: ['kline', symbol] })
     qc.invalidateQueries({ queryKey: ['depth', symbol] })
@@ -182,13 +236,67 @@ export function StockTerminal() {
     setPriceLines([{ value: price, color: '#F79009', label: '触发价' }])
   }
 
-  const handleToggleKLine = () => {
+  const handleToggleKLine = useCallback(() => {
     setUseKLine(v => {
       const next = !v
       setKLineProFlag(next)
       return next
     })
-  }
+  }, [])
+
+  // ── P2 键盘优先 ────────────────────────────────────────────
+  useEffect(() => {
+    if (!symbol) return
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(true)
+        return
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      if (paletteOpen || helpOpen || showMonitor) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setPaletteOpen(false)
+          setHelpOpen(false)
+          setShowMonitor(false)
+        }
+        return
+      }
+      switch (e.key) {
+        case '/':
+          e.preventDefault(); setPaletteOpen(true); break
+        case '?':
+          e.preventDefault(); setHelpOpen(true); break
+        case 'c':
+          setChanOn(v => !v); break
+        case 'r':
+          setRailOpen(v => !v); break
+        case 'p':
+          setDepthOpen(v => !v); break
+        case 'g':
+          handleToggleKLine(); break
+        case '[':
+          stepSymbol(-1); break
+        case ']':
+          stepSymbol(1); break
+        case '1':
+          if (useKLine) setPeriod('day'); break
+        case '2':
+          if (useKLine) setPeriod('week'); break
+        case '3':
+          if (useKLine) setPeriod('month'); break
+        case 'Escape':
+          e.preventDefault(); navigate(-1); break
+        default:
+          break
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, symbol, useKLine])
 
   if (!symbol) {
     return (
@@ -199,7 +307,7 @@ export function StockTerminal() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
       <TerminalHeader
         symbol={symbol}
         name={quote.raw?.name ?? undefined}
@@ -215,12 +323,39 @@ export function StockTerminal() {
       <ContextRibbon ctx={ctx} onLocatePrice={handleLocatePrice} />
 
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3 pt-2">
+        {railDocked && (
+          <aside className="w-[190px] shrink-0">
+            <StockRail watchlist={watchItems} recent={recent} current={symbol} onSelect={gotoSymbol} className="h-full" />
+          </aside>
+        )}
+
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center justify-between pb-1.5">
+          <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 pb-1.5">
+            {!railDocked && !railDrawer && (
+              <DrawerButton side="left" label="股票" onClick={() => setRailOpen(true)} />
+            )}
             <RangeBar value={dateRange} onChange={setDateRange} />
-            <div className="flex items-center gap-1.5">
+            <div className="ml-auto flex items-center gap-1.5">
+              {useKLine && (
+                <div className="flex items-center gap-0.5 rounded border border-border/70 p-0.5">
+                  {([['day', '日'], ['week', '周'], ['month', '月']] as const).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setPeriod(k)}
+                      className={cn(
+                        'h-5 rounded px-1.5 text-[10px] font-mono transition-colors',
+                        period === k ? 'bg-accent text-white' : 'text-muted hover:text-secondary',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <button
                 onClick={() => setChanOn(v => !v)}
+                title="缠论笔 / 中枢 / 买卖点 (c)"
                 className={cn(
                   'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
                   chanOn ? 'border-accent/30 bg-accent/20 text-accent' : 'border-transparent text-muted hover:bg-elevated',
@@ -230,7 +365,7 @@ export function StockTerminal() {
               </button>
               <button
                 onClick={handleToggleKLine}
-                title={useKLine ? '切回 ECharts 内核' : '试用 KLineChart 内核'}
+                title={useKLine ? '切回 ECharts 内核 (g)' : '试用 KLineChart 内核 (g)'}
                 className={cn(
                   'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
                   useKLine ? 'border-amber-500/30 bg-amber-500/20 text-amber-400' : 'border-transparent text-muted hover:bg-elevated',
@@ -238,6 +373,16 @@ export function StockTerminal() {
               >
                 {useKLine ? 'KLinePro' : 'ECharts'}
               </button>
+              <button
+                onClick={() => setHelpOpen(true)}
+                title="键盘快捷键 (?)"
+                className="h-6 rounded border border-transparent px-1.5 text-[11px] font-mono text-muted transition-colors hover:bg-elevated hover:text-foreground"
+              >
+                ?
+              </button>
+              {!depthDocked && !depthDrawer && (
+                <DrawerButton side="right" label="盘口" onClick={() => setDepthOpen(true)} />
+              )}
             </div>
           </div>
           <div ref={boxRef} className="min-h-0 flex-1">
@@ -245,6 +390,7 @@ export function StockTerminal() {
               <KLinePro
                 symbol={symbol}
                 dateRange={dateRange}
+                period={period}
                 chanEnabled={chanOn}
                 priceLines={priceLines}
               />
@@ -255,7 +401,6 @@ export function StockTerminal() {
                 dateRange={dateRange}
                 priceLines={priceLines}
                 chanOverlay={chanOn}
-                onToggleChan={() => setChanOn(v => !v)}
                 refetchIntervalMs={refetchMs}
                 inWatchlist={inWatchlist}
                 onAddToWatchlist={() => toggleWatchlist.mutate('add')}
@@ -267,10 +412,47 @@ export function StockTerminal() {
           </div>
         </main>
 
-        <aside className="w-[180px] shrink-0 overflow-hidden rounded-card border border-border bg-surface">
-          <DepthPanel symbol={symbol} refetchIntervalMs={refetchMs} />
-        </aside>
+        {depthDocked && (
+          <aside className="w-[190px] shrink-0 overflow-hidden rounded-card border border-border bg-surface">
+            <DepthPanel symbol={symbol} refetchIntervalMs={refetchMs} />
+          </aside>
+        )}
       </div>
+
+      {/* 抽屉形态：窄屏时左右两栏浮在图表之上 */}
+      {railDrawer && (
+        <div className="absolute inset-y-0 left-0 z-20 flex w-[220px] p-3">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setRailOpen(false)} />
+          <div className="relative h-full w-full">
+            <StockRail
+              watchlist={watchItems}
+              recent={recent}
+              current={symbol}
+              onSelect={s => { gotoSymbol(s); setRailOpen(false) }}
+              className="h-full"
+            />
+          </div>
+        </div>
+      )}
+      {depthDrawer && (
+        <div className="absolute inset-y-0 right-0 z-20 flex w-[220px] p-3">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setDepthOpen(false)} />
+          <div className="relative h-full w-full overflow-hidden rounded-card border border-border bg-surface">
+            <DepthPanel symbol={symbol} refetchIntervalMs={refetchMs} />
+          </div>
+        </div>
+      )}
+
+      {paletteOpen && (
+        <CommandPalette
+          current={symbol}
+          recent={recent}
+          onPick={s => { setPaletteOpen(false); gotoSymbol(s) }}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+
+      {helpOpen && <ShortcutHelp onClose={() => setHelpOpen(false)} />}
 
       {showMonitor && (
         <div
