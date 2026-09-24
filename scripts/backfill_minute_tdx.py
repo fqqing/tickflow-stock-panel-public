@@ -99,6 +99,32 @@ def existing_counts(out_dir: Path, days: list[str]) -> dict[tuple[str, str], int
     return counts
 
 
+def all_a_share_symbols() -> list[str]:
+    """从最新一个日线分区取全部 A 股标的(.SZ/.SH), 供 --source all 使用。
+
+    只取 pytdx 覆盖的沪深两市(港美股 pytdx 拿不到分钟, 必须走 stocksdk)。
+    """
+    if not DAILY_DIR.exists():
+        return []
+    parts = sorted((p for p in DAILY_DIR.glob("date=*") if p.is_dir()),
+                   key=lambda p: p.name)
+    if not parts:
+        return []
+    files = sorted(parts[-1].glob("*.parquet"))
+    if not files:
+        return []
+    # 逐文件读: 分区内多个 parquet 的 date 列类型可能不一致(date32 vs dictionary),
+    # 一次性 read_parquet(files) 会因合并 schema 报 ArrowTypeError。
+    syms: set[str] = set()
+    for f in files:
+        try:
+            d = pd.read_parquet(f, columns=["symbol"])
+        except Exception:
+            continue
+        syms.update(s for s in d["symbol"].astype(str) if s.endswith((".SZ", ".SH")))
+    return sorted(syms)
+
+
 def day_timestamps(day: str) -> list[pd.Timestamp]:
     """某交易日的 240 个分钟时间戳(北京墙钟 09:31~11:30 / 13:01~15:00)。"""
     base = pd.Timestamp(day)
@@ -143,6 +169,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 只(试跑用)")
     ap.add_argument("--skip-first", type=int, default=0, help="跳过前 N 只(续跑用)")
     ap.add_argument("--symbols", default="", help="逗号分隔指定标的, 默认读自选股")
+    ap.add_argument("--symbols-file", default="",
+                    help="从文件逐行读标的(全市场回补用; 命令行 --symbols 有长度上限)")
+    ap.add_argument("--source", default="", choices=["", "all"],
+                    help="all=从最新日线分区自动取全部 A 股(定时任务用, 不依赖自选股/外部文件)")
     ap.add_argument("--out-dir", default=str(DEFAULT_OUT))
     ap.add_argument("--skip-existing", action="store_true",
                     help="跳过已有完整 BARS_PER_DAY 根的 (标的, 日期)")
@@ -165,7 +195,18 @@ def main() -> int:
         return 1
     print("trade days = %d  (%s ~ %s)" % (len(days), days[0], days[-1]))
 
-    if args.symbols.strip():
+    if args.source == "all":
+        symbols = all_a_share_symbols()
+        if not symbols:
+            print("ERROR: 从日线分区取不到 A 股标的, 检查 %s" % DAILY_DIR)
+            return 1
+    elif args.symbols_file.strip():
+        symbols = [
+            s.strip()
+            for s in Path(args.symbols_file).read_text(encoding="utf-8").splitlines()
+            if s.strip()
+        ]
+    elif args.symbols.strip():
         symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     elif WATCHLIST.exists():
         symbols = [str(s) for s in pd.read_parquet(WATCHLIST)["symbol"].tolist()]
