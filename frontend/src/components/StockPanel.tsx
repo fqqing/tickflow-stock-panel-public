@@ -7,6 +7,7 @@ import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
 import { useChanOverlay } from '@/lib/useChanOverlay'
+import type { UnifiedQuote } from '@/lib/useQuote'
 import type { ChartMarker, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
 import {
   loadInfoFields,
@@ -50,6 +51,11 @@ interface Props {
   refetchIntervalMs?: number
   /** 只渲染信息条, 隐藏图表 (用于分时 tab 共享信息条) */
   infoBarOnly?: boolean
+  /**
+   * 实时快照（价格单一源），透传给 StockInfoBar。
+   * 传入后信息条主价格与顶栏/盘口同源, 不传则沿用日 K 最后一根(向后兼容)。
+   */
+  liveQuote?: UnifiedQuote | null
 }
 
 export { getDefaultRange }
@@ -76,6 +82,7 @@ export function StockPanel({
   watchlistPending,
   refetchIntervalMs,
   infoBarOnly = false,
+  liveQuote,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -172,6 +179,7 @@ export function StockPanel({
         fields={fields}
         onFieldsChange={handleFieldsChange}
         financialMetrics={financialMetrics}
+        liveQuote={liveQuote}
         onMonitor={onMonitor}
         inWatchlist={inWatchlist}
         onAddToWatchlist={onAddToWatchlist}

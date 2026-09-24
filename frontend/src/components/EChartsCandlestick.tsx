@@ -3,6 +3,10 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
+import type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange } from '@/lib/chart-primitives'
+
+// 原语类型已抽到 lib/chart-primitives(换图表内核时上游无需改动), 此处原样导出保持兼容
+export type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange }
 
 export interface OHLC {
   date: string
@@ -55,31 +59,6 @@ export interface OHLC {
   ms_ty?: number | null
 }
 
-export interface ChartMarker {
-  date: string
-  kind: 'buy' | 'sell' | 'neutral'
-  label?: string
-  /** 若为 true，标记放在蜡烛上方（如涨停连板标签）。 */
-  above?: boolean
-  /** 自定义标签颜色，覆盖默认的 kind 对应色。 */
-  color?: string
-}
-
-export interface ChartRange {
-  start: string
-  end: string
-  label?: string
-  color?: string
-}
-
-export interface ChartPriceLine {
-  value: number
-  label?: string
-  color?: string
-  start?: string
-  end?: string
-}
-
 /**
  * 主图折线（用于缠论「笔」这类连续斜线）。
  *
@@ -87,16 +66,6 @@ export interface ChartPriceLine {
  * 因此画出来的是顶点之间严格笔直的折线（而不是各顶点独立连线的虚线）。
  * date 不在当前 x 轴范围内的顶点会被丢弃。
  */
-export interface ChartPolyline {
-  points: { date: string; price: number }[]
-  color?: string
-  /** 线宽，默认 1.2 */
-  width?: number
-  dashed?: boolean
-  name?: string
-  /** 在顶点处画小圆点，默认 false */
-  showSymbol?: boolean
-}
 
 export interface StockInfo {
   name?: string
@@ -1267,7 +1236,6 @@ function buildOption(
     series,
   }
 }
-
 
 export function EChartsCandlestick({
   data,

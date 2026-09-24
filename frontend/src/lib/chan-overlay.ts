@@ -14,7 +14,7 @@
  * 笔的两个端点线性插值价格，避免因为端点在图外而整条笔消失。
  */
 import type { ChanAnalysis, ChanStrokePoint } from '@/lib/api'
-import type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
+import type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange } from '@/lib/chart-primitives'
 
 const STROKE_UP_COLOR = '#F87171'
 const STROKE_DOWN_COLOR = '#34D399'
