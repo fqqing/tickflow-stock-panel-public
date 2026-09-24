@@ -311,6 +311,55 @@ async function opRealtime(sdk, job) {
 }
 
 /**
+ * 五档盘口(FullQuote)。quotes.cn 支持单只/批量股票代码，返回含 bid/ask 的完整快照。
+ * 与 realtime(全市场 batch.cn) 不同，这里按调用方给的 symbols 逐个查，数据更全。
+ */
+async function opDepth(sdk, job) {
+  const { symbols = [], chunkSize = 60 } = job
+  if (!symbols.length) return []
+  const codes = symbols.map(fromAppSymbol)
+  const rows = []
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize)
+    const all = await fetchWithRetry(() => sdk.quotes.cn(chunk), { retries: 2, delayMs: 400, backoff: 2 })
+    for (const q of all || []) {
+      if (!q || !q.code) continue
+      // 用「本次请求的 app 符号」回填 symbol，避免 code 歧义
+      const want = chunk.find((c) => c.slice(2) === String(q.code))
+      const symbol = want
+        ? `${want.slice(2)}.${want.slice(0, 2).toUpperCase()}`
+        : toAppSymbol(q.code, q.marketId)
+      rows.push({
+        symbol,
+        name: q.name,
+        last_price: q.price,
+        prev_close: q.prevClose,
+        open: q.open,
+        high: q.high,
+        low: q.low,
+        volume: q.volume,
+        amount: q.amount,
+        change_pct: q.changePercent,
+        turnover_rate: q.turnoverRate,
+        pe: q.pe,
+        pb: q.pb,
+        total_market_cap: q.totalMarketCap,
+        circulating_market_cap: q.circulatingMarketCap,
+        limit_up: q.limitUp,
+        limit_down: q.limitDown,
+        volume_ratio: q.volumeRatio,
+        avg_price: q.avgPrice,
+        bid: q.bid || [],
+        ask: q.ask || [],
+        time: q.time,
+        timestamp: q.timestamp,
+      })
+    }
+  }
+  return rows
+}
+
+/**
  * 指数实时快照。batch.cn(全 A 股)不含指数, 指数只能按码单查 quotes.cn。
  * 返回行形状与 opRealtime 一致, 便于 Python 侧复用同一套归一化。
  */
@@ -460,6 +509,9 @@ async function main() {
         break
       case 'realtime':
         rows = await opRealtime(sdk, job)
+        break
+      case 'depth':
+        rows = await opDepth(sdk, job)
         break
       case 'indexQuotes':
         rows = await opIndexQuotes(sdk, job)

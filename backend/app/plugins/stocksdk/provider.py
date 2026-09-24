@@ -272,6 +272,24 @@ class StockSDKProvider:
             return []
         return _normalize_realtime_rows(result.get("rows") or [])
 
+    # ---- depth (五档盘口 FullQuote) ----
+    def get_depth(self, symbols: list[str]) -> list[dict]:
+        """按给定股票符号拉五档盘口(FullQuote, 含 bid/ask 五档)。
+
+        返回行形状与 get_realtime 类似, 但额外包含 bid/ask/turnover_rate/pe/pb/市值等字段。
+        """
+        syms = [s for s in (symbols or []) if s]
+        if not syms:
+            return []
+        logger.info("stock-sdk 五档盘口拉取开始(%d symbols)", len(syms))
+        try:
+            result = bridge.run_job({"op": "depth", "symbols": syms}, timeout=90)
+        except bridge.StockSDKBridgeError as e:
+            logger.warning("stock-sdk 五档盘口拉取失败: %s", e)
+            return []
+        rows = result.get("rows") or []
+        return _normalize_realtime_rows(rows)
+
     # ---- instruments (标的维表) ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
         """返回 tickflow Instrument 形状的行(symbol/name/code/exchange/region/type + ext),

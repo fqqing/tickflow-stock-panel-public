@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity, PanelRight } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { fmtPct } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { DepthPanel } from '@/components/DepthPanel'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
 import { DatePicker } from '@/components/DatePicker'
@@ -91,6 +92,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOve
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
   const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
+  const [showDepth, setShowDepth] = useState(true)
   // 缠论叠加开关：跨换股保留用户选择，所以不从 symbol 变化里重置
   const [chanOn, setChanOn] = useState(!!chanOverlay)
   const qc = useQueryClient()
@@ -363,6 +365,17 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOve
                   <RadioTower className="h-4 w-4" />
                 </button>
 
+                {/* 盘口面板开关 */}
+                <button
+                  onClick={() => setShowDepth(v => !v)}
+                  className={`p-1.5 rounded-btn transition-colors cursor-pointer ${
+                    showDepth ? 'text-accent bg-accent/10' : 'text-secondary hover:text-foreground hover:bg-elevated'
+                  }`}
+                  title={showDepth ? '隐藏盘口' : '显示盘口'}
+                >
+                  <PanelRight className="h-4 w-4" />
+                </button>
+
                 {/* 刷新 */}
                 <button
                   onClick={handleRefresh}
@@ -479,16 +492,28 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOve
             {/* 图表内容 */}
             <div className="flex-1 overflow-auto p-4">
               {view === 'daily' ? (
-                <StockPanel
-                  symbol={symbol}
-                  height={420}
-                  showIntraday
-                  dateRange={dateRange}
-                  priceLines={monitorPriceLines}
-                  chanOverlay={chanOverlay === undefined ? undefined : chanOn}
-                  onToggleChan={() => setChanOn(v => !v)}
-                  onPriceDoubleClick={openPriceAlert}
-                />
+                <div className="flex gap-3">
+                  <div className="flex-1 min-w-0">
+                    <StockPanel
+                      symbol={symbol}
+                      height={420}
+                      showIntraday
+                      dateRange={dateRange}
+                      priceLines={monitorPriceLines}
+                      chanOverlay={chanOverlay === undefined ? undefined : chanOn}
+                      onToggleChan={() => setChanOn(v => !v)}
+                      onPriceDoubleClick={openPriceAlert}
+                    />
+                  </div>
+                  {showDepth && (
+                    <div className="w-[220px] shrink-0 rounded-card border border-border bg-surface">
+                      <DepthPanel
+                        symbol={symbol}
+                        refetchIntervalMs={intradayRefetchMs}
+                      />
+                    </div>
+                  )}
+                </div>
               ) : (
                 <>
                 <StockPanel
