@@ -4,11 +4,18 @@
 盘后管道的「今天已有数据 → 只刷今天」分支会让停机日的盘中快照永久留存
 (close=停机时刻价, volume=半日累计, 技术指标全错且污染后续 lookback 类指标)。
 
-判据 (quote_ts 列, 毫秒 Unix 时间戳, 仅实时 flush 写入真实值):
+判据一 (quote_ts 列, 毫秒 Unix 时间戳, 仅实时 flush 写入真实值):
 - null              → batch 拉取 / 盘后计算写入的权威历史 → 完整
 - d < 今天 且 时刻 < d 15:00 → 盘中快照 (停机前实时写的) → 坏
 - d < 今天 且 时刻 ≥ d 15:00 → 尾盘定版 (close_final) → 完整
 - d == 今天         → 实时更新中, 属正常, 不校验
+
+判据二 (分区文件 mtime, 无列依赖的兜底):
+kline_daily 这类 batch 表**没有 quote_ts 列**, 只靠判据一会完全漏检 —— 2026-09-23
+实测: 15:30 盘后管道被长任务挤掉(见 jobs/daily_pipeline._wait_for_idle_slot),
+分区停在 09:51 的盘中快照(volume 中位数只有前一日的 0.213), 自检却报"数据完整"。
+故补一条: 分区最后一次写入就在该日 15:00 之前 ⇒ 盘中快照。盘后/修复覆盖过的分区
+mtime 必然晚于当日收盘或落到次日后, 不会误报。
 - 分区缺失的工作日  → 缺口 (工作日近似; 节假日误报的代价是一次空范围拉取,
   merge-upsert 空写, 无害)
 
@@ -97,15 +104,32 @@ def _quote_ts_max_ms(part_dir: Path) -> int | None:
     return max(values) if values else None
 
 
-def _is_snapshot(day: date, quote_ts_ms: int | None) -> bool:
-    """非空 quote_ts 且对应北京时间时刻早于当日收盘线 → 盘中快照。"""
-    if quote_ts_ms is None:
-        return False
+def _part_mtime(part_dir: Path) -> datetime | None:
+    """分区内最新 parquet 的本地写入时间 (北京时间, 无列依赖)。
+
+    os.stat 成本 ~0.05ms/分区, 与 quote_ts 的元数据扫描同量级。
+    """
+    files = sorted(part_dir.glob("*.parquet"))
+    if not files:
+        return None
     try:
-        ts = datetime.fromtimestamp(int(quote_ts_ms) / 1000, tz=CN_TZ)
-    except (OverflowError, OSError, ValueError):
+        return datetime.fromtimestamp(max(f.stat().st_mtime for f in files), tz=CN_TZ)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _is_snapshot(day: date, quote_ts_ms: int | None, mtime: datetime | None = None) -> bool:
+    """盘中快照判定: 优先 quote_ts, 缺失时回退分区 mtime。"""
+    if quote_ts_ms is not None:
+        try:
+            ts = datetime.fromtimestamp(int(quote_ts_ms) / 1000, tz=CN_TZ)
+        except (OverflowError, OSError, ValueError):
+            ts = None
+        if ts is not None:
+            return ts.date() == day and ts.time() < CLOSE_CUTOFF
+    if mtime is None:
         return False
-    return ts.date() == day and ts.time() < CLOSE_CUTOFF
+    return mtime.date() == day and mtime.time() < CLOSE_CUTOFF
 
 
 def _candidate_days(today: date, lookback_days: int) -> list[date]:
@@ -157,7 +181,7 @@ def scan_recent_integrity(
                 continue
             part_dir = base / f"date={day.isoformat()}"
             quote_ts = _quote_ts_max_ms(part_dir)
-            if _is_snapshot(day, quote_ts):
+            if _is_snapshot(day, quote_ts, _part_mtime(part_dir)):
                 issues.append(IntegrityIssue(day=day, table=table, kind="snapshot"))
 
     issues.sort(key=lambda i: (i.day, i.table))

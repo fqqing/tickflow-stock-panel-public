@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -829,10 +831,46 @@ def _push_phase_change_alert(data_dir) -> None:
     logger.info("phase change alert: %s (severity=%s)", msg, severity)
 
 
+# 定时调度撞上长任务时的等待上限/轮询间隔 (见 _wait_for_idle_slot)。
+# 2 小时: 覆盖全市场分钟同步这类手动长任务(实测 2026-09-23 一次跑了 6.9h,
+# 15:30 的日线管道被挤掉)。超上限放弃后由次日 boot 自检(含 mtime 判据)兜底修复。
+_SCHEDULED_WAIT_TIMEOUT_S = 7200.0
+_SCHEDULED_WAIT_POLL_S = 5.0
+
+
+def _wait_for_idle_slot(job_store, job_label: str) -> bool:
+    """定时调度被活跃任务挡住时等待其结束, 而不是直接跳过。
+
+    盘后管道每个交易日只有一次机会。分钟K全市场同步可达 1~2 小时, 一旦与
+    15:30 撞车, 旧的「已有活跃任务 → 跳过」会让当天收盘数据永久缺失
+    (2026-09-23 实测: 分钟同步占了整晚, 日K停在盘中 09:51 的快照,
+    volume 中位数只有前一日的 0.213)。改为等待, 期间周期性 reap_stale
+    帮助卡死任务自愈; 超过上限仍未让出则放弃本次调度(保持旧行为)。
+    """
+    deadline = time.monotonic() + _SCHEDULED_WAIT_TIMEOUT_S
+    blocking = job_store.active_id()
+    if blocking is None:
+        return True
+    logger.info(
+        "scheduled %s 等待活跃任务 %s 结束 (最多 %.0f 分钟)",
+        job_label, blocking, _SCHEDULED_WAIT_TIMEOUT_S / 60,
+    )
+    while blocking is not None:
+        time.sleep(_SCHEDULED_WAIT_POLL_S)
+        if time.monotonic() >= deadline:
+            return False
+        # 卡死任务只有在被轮询时才会 reap; 等待期间顺手驱动自愈
+        with contextlib.suppress(Exception):
+            job_store.reap_stale()
+        blocking = job_store.active_id()
+    return True
+
+
 def _run_tracked(fn, job_label: str) -> bool:
     """调度触发时包装 JobStore 跟踪，确保同步历史有记录。
 
-    单飞: 若已有活跃(pending∨running)任务(手动同步中), 本次调度直接跳过, 不并发。
+    单飞: 若已有活跃(pending∨running)任务(手动同步中), **等待**其结束再跑,
+    不并发也不跳过 —— 定时管道每天只有一次机会, 跳过等于当天数据缺失。
     重任务执行槽: 再挡一层僵尸并发(reap 后线程仍活时不得并行写 parquet)。
     返回 True 仅表示任务已成功并且执行槽已释放。
     """
@@ -840,12 +878,25 @@ def _run_tracked(fn, job_label: str) -> bool:
 
     job_id, is_new = job_store.create()
     if not is_new:
-        logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
-        return False
+        if not _wait_for_idle_slot(job_store, job_label):
+            logger.error(
+                "scheduled %s 跳过: 等待 %.0f 分钟后活跃任务 %s 仍未结束",
+                job_label, _SCHEDULED_WAIT_TIMEOUT_S / 60, job_store.active_id(),
+            )
+            return False
+        job_id, is_new = job_store.create()
+        if not is_new:
+            logger.info("scheduled %s 跳过: 等待后仍有活跃任务 (job_id=%s)", job_label, job_id)
+            return False
     if not try_acquire_run_slot(job_id):
-        logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
-        job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
-        return False
+        if not _wait_for_idle_slot(job_store, job_label):
+            logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
+            job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
+            return False
+        if not try_acquire_run_slot(job_id):
+            logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
+            job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
+            return False
 
     def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
                  skip_log: bool = False) -> None:
@@ -1089,6 +1140,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
 
     工作日 09:10 — 同步个股维表
     工作日 HH:MM — 盘后管道（时间由用户偏好决定，默认 15:30）
+    工作日 16:40 / 08:00 — 港股 / 美股日K同步(此前只有手动端点, 无定时)
     """
     from app.services import preferences
     sched = preferences.get_pipeline_schedule()
@@ -1166,6 +1218,27 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 港美股: 此前只能手动 POST /api/pipeline/run-market 触发, 没有 cron。
+    # 实测后果: 2026-09-15 起 kline_daily 分区里港美股整天消失(只剩 A 股),
+    # 因为没人手动点 —— 缺口是"没有定时"而不是"拉取失败"。按各自收盘时间补两个:
+    #   港股 16:00 收盘(收盘竞价到 16:10) → 16:40
+    #   美股北京时间凌晨收盘 → 次日 08:00 取数(此时前一交易日已定版)
+    def _market_task(market: str):
+        def _inner(on_progress=None):
+            return run_market_sync(market, repo, on_progress=on_progress)
+
+        return _inner
+
+    for _market, _hour, _minute in (("hk", 16, 40), ("us", 8, 0)):
+        scheduler.add_job(
+            lambda m=_market: _run_tracked(_market_task(m), f"market_sync_{m}"),
+            trigger=CronTrigger(day_of_week="mon-fri", hour=_hour, minute=_minute,
+                                timezone="Asia/Shanghai"),
+            id=f"market_sync_{_market}",
+            misfire_grace_time=3600,
+            replace_existing=True,
+        )
+
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
     # 只热更新 app.state.capabilities(API 端点、盘后管道 _pipeline_then_refresh 均读它);
     # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。
@@ -1207,7 +1280,8 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
                     review_sched["hour"], review_sched["minute"])
 
     scheduler.start()
-    logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
+    logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d, "
+                "market hk@16:40 us@08:00 mon-fri",
                 inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
                 depth_sched["hour"], depth_sched["minute"])
     return scheduler

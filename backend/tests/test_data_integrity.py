@@ -5,7 +5,9 @@ null); 历史交易日的 quote_ts 时刻 < 15:00 即盘中快照 → 坏。
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
@@ -16,6 +18,7 @@ from app.services.data_integrity import (
     AUTO_REPAIR_MAX_LAG_DAYS,
     IntegrityIssue,
     _is_snapshot,
+    _part_mtime,
     _quote_ts_max_ms,
     earliest_issue_day,
     prune_enriched_partitions,
@@ -81,6 +84,52 @@ def test_snapshot_predicate():
     assert _is_snapshot(FRIDAY, noon) is True
     assert _is_snapshot(FRIDAY, after_close) is False
     assert _is_snapshot(FRIDAY, None) is False  # batch 历史 → 权威
+
+
+def _touch(part: Path, day: date, t: time) -> None:
+    """把分区文件的 mtime 设为 day 的 t 时刻 (模拟该时刻最后一次写入)。"""
+    moment = datetime.combine(day, t, tzinfo=CN_TZ).timestamp()
+    os.utime(part, (moment, moment))
+
+
+def test_mtime_fallback_flags_intraday_write(tmp_path):
+    """无 quote_ts 列时回退分区 mtime: 该日盘中写入 → 盘中快照。
+
+    2026-09-23 实测事故: 15:30 盘后管道被分钟同步挤掉(见
+    jobs/daily_pipeline._wait_for_idle_slot), kline_daily 分区停在 09:51 的
+    快照, volume 中位数只有前一日的 0.213; 而 kline_daily 没有 quote_ts 列,
+    旧判据只认 quote_ts → 自检报"完整", 坏数据永久留存。
+    """
+    assert _is_snapshot(FRIDAY, None, datetime.combine(FRIDAY, time(9, 51), tzinfo=CN_TZ)) is True
+    # 收盘后写入 / 次日后写入 → 完整
+    assert _is_snapshot(FRIDAY, None, datetime.combine(FRIDAY, time(15, 30), tzinfo=CN_TZ)) is False
+    assert _is_snapshot(FRIDAY, None, datetime.combine(TODAY, time(9, 0), tzinfo=CN_TZ)) is False
+
+
+def test_mtime_fallback_partition_flagged_by_scan(tmp_path):
+    """端到端: 无 quote_ts 列的分区 + 盘中 mtime → 扫描报 snapshot。"""
+    part = tmp_path / "kline_daily" / f"date={FRIDAY.isoformat()}"
+    part.mkdir(parents=True)
+    p = part / "part.parquet"
+    pl.DataFrame({"symbol": ["600001.SH"], "close": [10.0]}).write_parquet(p)
+    _touch(p, FRIDAY, time(9, 51))
+    assert _part_mtime(part) is not None
+    _write_daily_partition(tmp_path, "kline_daily", TODAY, _ts_ms(TODAY, time(10, 0)))
+
+    issues = scan_recent_integrity(tmp_path, today=TODAY)
+    assert (FRIDAY, "kline_daily", "snapshot") in [(i.day, i.table, i.kind) for i in issues]
+
+
+def test_mtime_after_close_is_clean(tmp_path):
+    """同一张表, mtime 落在收盘后 → 不报。"""
+    part = tmp_path / "kline_daily" / f"date={FRIDAY.isoformat()}"
+    part.mkdir(parents=True)
+    p = part / "part.parquet"
+    pl.DataFrame({"symbol": ["600001.SH"], "close": [10.0]}).write_parquet(p)
+    _touch(p, FRIDAY, time(22, 12))
+    _write_daily_partition(tmp_path, "kline_daily", TODAY, _ts_ms(TODAY, time(10, 0)))
+
+    assert scan_recent_integrity(tmp_path, today=TODAY) == []
 
 
 def test_quote_ts_max_reads_partition_statistics(tmp_path):
