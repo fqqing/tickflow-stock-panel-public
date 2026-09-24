@@ -23,6 +23,8 @@ import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { TerminalHeader } from '@/components/stock-terminal/TerminalHeader'
 import { ContextRibbon, type TriggerContext } from '@/components/stock-terminal/ContextRibbon'
+import { KLinePro } from '@/components/kline/KLinePro'
+import { getKLineProFlag, setKLineProFlag } from '@/components/kline/useKLineProFlag'
 import type { ChartPriceLine } from '@/components/EChartsCandlestick'
 import { cn } from '@/lib/cn'
 
@@ -104,6 +106,7 @@ export function StockTerminal() {
 
   const [dateRange, setDateRange] = useState(() => getDefaultRange())
   const [chanOn, setChanOn] = useState(false)
+  const [useKLine, setUseKLine] = useState(() => getKLineProFlag())
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
 
@@ -179,6 +182,14 @@ export function StockTerminal() {
     setPriceLines([{ value: price, color: '#F79009', label: '触发价' }])
   }
 
+  const handleToggleKLine = () => {
+    setUseKLine(v => {
+      const next = !v
+      setKLineProFlag(next)
+      return next
+    })
+  }
+
   if (!symbol) {
     return (
       <div className="grid h-full place-items-center text-sm text-muted">
@@ -205,22 +216,54 @@ export function StockTerminal() {
 
       <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3 pt-2">
         <main className="flex min-w-0 flex-1 flex-col">
-          <RangeBar value={dateRange} onChange={setDateRange} />
+          <div className="flex shrink-0 items-center justify-between pb-1.5">
+            <RangeBar value={dateRange} onChange={setDateRange} />
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setChanOn(v => !v)}
+                className={cn(
+                  'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+                  chanOn ? 'border-accent/30 bg-accent/20 text-accent' : 'border-transparent text-muted hover:bg-elevated',
+                )}
+              >
+                缠论
+              </button>
+              <button
+                onClick={handleToggleKLine}
+                title={useKLine ? '切回 ECharts 内核' : '试用 KLineChart 内核'}
+                className={cn(
+                  'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+                  useKLine ? 'border-amber-500/30 bg-amber-500/20 text-amber-400' : 'border-transparent text-muted hover:bg-elevated',
+                )}
+              >
+                {useKLine ? 'KLinePro' : 'ECharts'}
+              </button>
+            </div>
+          </div>
           <div ref={boxRef} className="min-h-0 flex-1">
-            <StockPanel
-              symbol={symbol}
-              height={chartHeight}
-              dateRange={dateRange}
-              priceLines={priceLines}
-              chanOverlay={chanOn}
-              onToggleChan={() => setChanOn(v => !v)}
-              refetchIntervalMs={refetchMs}
-              inWatchlist={inWatchlist}
-              onAddToWatchlist={() => toggleWatchlist.mutate('add')}
-              onRemoveFromWatchlist={() => toggleWatchlist.mutate('remove')}
-              watchlistPending={toggleWatchlist.isPending}
-              liveQuote={quote}
-            />
+            {useKLine ? (
+              <KLinePro
+                symbol={symbol}
+                dateRange={dateRange}
+                chanEnabled={chanOn}
+                priceLines={priceLines}
+              />
+            ) : (
+              <StockPanel
+                symbol={symbol}
+                height={chartHeight}
+                dateRange={dateRange}
+                priceLines={priceLines}
+                chanOverlay={chanOn}
+                onToggleChan={() => setChanOn(v => !v)}
+                refetchIntervalMs={refetchMs}
+                inWatchlist={inWatchlist}
+                onAddToWatchlist={() => toggleWatchlist.mutate('add')}
+                onRemoveFromWatchlist={() => toggleWatchlist.mutate('remove')}
+                watchlistPending={toggleWatchlist.isPending}
+                liveQuote={quote}
+              />
+            )}
           </div>
         </main>
 

@@ -20,6 +20,7 @@
     "echarts": "^5.5.0",
     "echarts-for-react": "^3.0.2",
     "framer-motion": "^11.5.0",
+    "klinecharts": "10.0.3",
     "lightweight-charts": "^4.2.0",
     "lucide-react": "^0.439.0",
     "react": "^18.3.1",

@@ -463,7 +463,7 @@ export function StockDailyKChart({
                   异动
                 </button>
               )}
-              {chanEnabled !== undefined && (
+              {chanEnabled !== undefined && onToggleChan !== undefined && (
                 <button
                   onClick={onToggleChan}
                   disabled={period !== 'day'}

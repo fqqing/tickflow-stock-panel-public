@@ -38,6 +38,9 @@ importers:
       framer-motion:
         specifier: ^11.5.0
         version: 11.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      klinecharts:
+        specifier: 10.0.3
+        version: 10.0.3
       lightweight-charts:
         specifier: ^4.2.0
         version: 4.2.3
@@ -773,6 +776,9 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  klinecharts@10.0.3:
+    resolution: {integrity: sha512-phvf5CyS7oGE46nuC+nxQxl9D+8+5w8q3reExh0oNeMV1Jws4X0CMHNkOI9xlNA/XWctNS5whZ3PqIJi8YM2Tw==}
 
   lightweight-charts@4.2.3:
     resolution: {integrity: sha512-5kS/2hY3wNYNzhnS8Gb+GAS07DX8GPF2YVDnd2NMC85gJVQ6RLU6YrXNgNJ6eg0AnWPwCnvaGtYmGky3HiLQEw==}
@@ -1651,6 +1657,8 @@ snapshots:
   jsesc@3.1.0: {}
 
   json5@2.2.3: {}
+
+  klinecharts@10.0.3: {}
 
   lightweight-charts@4.2.3:
     dependencies:

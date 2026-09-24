@@ -115,3 +115,6 @@ frontend/vite.config.ts.timestamp-*.mjs
 
 # ===== 本地备份快照 (重构前的回滚点,不入库) =====
 .backup/
+
+# P1 验证临时构建产物
+frontend/.dist-verify/
