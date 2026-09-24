@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity, PanelRight } from 'lucide-react'
+import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Activity, PanelRight, ExternalLink } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -96,6 +97,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOve
   // 缠论叠加开关：跨换股保留用户选择，所以不从 symbol 变化里重置
   const [chanOn, setChanOn] = useState(!!chanOverlay)
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const backdrop = useDialogBackdrop(onClose)
 
   const watchlist = useQuery({
@@ -383,6 +385,19 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, chanOve
                   title="刷新"
                 >
                   <RefreshCw className="h-4 w-4" />
+                </button>
+
+                {/* 在全屏终端中打开(独立路由, 图表高度随窗口自适应) */}
+                <button
+                  type="button"
+                  onClick={() => symbol && navigate(`/stock/${symbol}`, {
+                    state: triggerInfo ? { trigger: { kind: 'monitor', label: triggerInfo.message ?? '监控触发', ts: triggerInfo.ts, price: triggerInfo.price, changePct: triggerInfo.changePct, signals: triggerInfo.signals, backTo: '/monitor' } } : undefined,
+                  })}
+                  className="p-1.5 rounded-btn text-secondary hover:text-foreground hover:bg-elevated transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                  title="在全屏终端中打开"
+                  aria-label="在全屏终端中打开"
+                >
+                  <ExternalLink className="h-4 w-4" />
                 </button>
 
                 {/* 放大 / 缩小 */}

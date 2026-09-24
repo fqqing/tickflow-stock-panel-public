@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { Settings2, RadioTower, Star } from 'lucide-react'
 import type { KlineRow, FinancialMetricRecord } from '@/lib/api'
-import { fmtPrice, fmtBigNum, fmtVolume } from '@/lib/format'
+import { fmtPrice, fmtBigNum, fmtVolume, fmtPct } from '@/lib/format'
+import type { UnifiedQuote } from '@/lib/useQuote'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
@@ -19,6 +20,12 @@ interface Props {
   onFieldsChange: (fields: ColumnConfig[]) => void
   /** 财务指标最新一期（来自 useFinancialMetrics，受 Cap.FINANCIAL 门控） */
   financialMetrics?: FinancialMetricRecord
+  /**
+   * 实时快照（价格单一源）。
+   * 传入时信息条主价格以它为准 —— 此前信息条取日 K 最后一根 close、盘口取实时快照,
+   * 两个源更新频率不同, 同一屏会出现两个价格。不传则保持原行为（向后兼容）。
+   */
+  liveQuote?: UnifiedQuote | null
   /** 加监控回调 (个股弹窗传入, 有值时渲染 RadioTower 图标) */
   onMonitor?: () => void
   /** 自选状态与操作（传入对应回调时渲染 Star 图标） */
@@ -102,6 +109,7 @@ export function StockInfoBar({
   fields,
   onFieldsChange,
   financialMetrics,
+  liveQuote,
   onMonitor,
   inWatchlist,
   onAddToWatchlist,
@@ -126,9 +134,14 @@ export function StockInfoBar({
 
   const latest = rows[rows.length - 1]
   const prev = rows.length >= 2 ? rows[rows.length - 2] : null
-  const close = Number(latest.close)
-  const chg = prev ? close - Number(prev.close) : 0
+  // 价格单一源: 有实时快照时以它为准。
+  // 注意单位差异 —— liveQuote.changePct 是小数(后端口径, 展示走 fmtPct),
+  // 而日 K 回算的 chgPct 已经是百分数, 两者不能混用同一个格式化函数。
+  const useLive = liveQuote != null && liveQuote.price != null
+  const close = useLive ? (liveQuote.price as number) : Number(latest.close)
+  const chg = useLive ? (liveQuote.change ?? 0) : (prev ? close - Number(prev.close) : 0)
   const chgPct = prev ? chg / Number(prev.close) * 100 : 0
+  const chgPctText = useLive ? fmtPct(liveQuote.changePct) : fmtPrice(chgPct)
   const isUp = chg >= 0
   const clr = isUp ? BULL : BEAR
 
@@ -228,7 +241,7 @@ export function StockInfoBar({
           {isUp ? '+' : ''}{fmtPrice(chg)}
         </span>
         <span style={{ color: clr }} className="tabular-nums">
-          {isUp ? '+' : ''}{fmtPrice(chgPct)}%
+          {useLive ? chgPctText : `${isUp ? '+' : ''}${chgPctText}%`}
         </span>
         {/* 右侧操作按钮：加自选 + 加监控 + 信息条配置 */}
         <div className="ml-auto self-center flex items-center gap-1">

@@ -112,3 +112,6 @@ reports/cursor_tickflow_pro_rate_limit_p0.bundle
 
 # Vite 重编译 vite.config.ts 时的临时产物 (进程异常退出会残留)
 frontend/vite.config.ts.timestamp-*.mjs
+
+# ===== 本地备份快照 (重构前的回滚点,不入库) =====
+.backup/

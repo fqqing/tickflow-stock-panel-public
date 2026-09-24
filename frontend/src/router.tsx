@@ -28,6 +28,7 @@ const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail').then(m => ({ 
 const ConceptAnalysis = lazy(() => import('./pages/ConceptAnalysis').then(m => ({ default: m.ConceptAnalysis })))
 const IndustryAnalysis = lazy(() => import('./pages/IndustryAnalysis').then(m => ({ default: m.IndustryAnalysis })))
 const StockAnalysis = lazy(() => import('./pages/StockAnalysis').then(m => ({ default: m.StockAnalysis })))
+const StockTerminal = lazy(() => import('./pages/StockTerminal').then(m => ({ default: m.StockTerminal })))
 const News = lazy(() => import('./pages/News').then(m => ({ default: m.News })))
 const Review = lazy(() => import('./pages/Review').then(m => ({ default: m.Review })))
 const LimitUpLadder = lazy(() => import('./pages/LimitUpLadder').then(m => ({ default: m.LimitUpLadder })))
@@ -122,6 +123,8 @@ export const router = createBrowserRouter([
       { path: 'concept-analysis', element: <ConceptAnalysis /> },
       { path: 'industry-analysis', element: <IndustryAnalysis /> },
       { path: 'stock-analysis', element: <StockAnalysis /> },
+      // 个股终端(全屏工作区): 从自选/监控/异动/选股点进来, 占满主区而非弹窗
+      { path: 'stock/:symbol', element: <StockTerminal /> },
       { path: 'news', element: <News /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
