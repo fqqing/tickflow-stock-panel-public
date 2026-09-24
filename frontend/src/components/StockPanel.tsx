@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { X } from 'lucide-react'
 import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
-import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import { StockDailyKChart, getDefaultRange, type KLinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -39,6 +39,9 @@ interface Props {
   /** 缠论叠加开关（受控）。传 undefined = 不启用缠论, 也不显示「缠论」按钮 */
   chanOverlay?: boolean
   onToggleChan?: () => void
+  /** K 线周期（受控，透传给 StockDailyKChart）。终端层持有，供键盘 1/2/3 跨内核生效 */
+  period?: KLinePeriod
+  onPeriodChange?: (p: KLinePeriod) => void
   /** 加监控回调 (传入后信息条显示 RadioTower 图标) */
   onMonitor?: () => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -74,6 +77,8 @@ export function StockPanel({
   showMarkerToggle = true,
   chanOverlay,
   onToggleChan,
+  period,
+  onPeriodChange,
   onMonitor,
   onPriceDoubleClick,
   inWatchlist,
@@ -202,6 +207,8 @@ export function StockPanel({
           showMarkerToggle={showMarkerToggle}
           chanEnabled={chanOverlay === undefined ? undefined : chanOverlay === true}
           onToggleChan={onToggleChan}
+          period={period}
+          onPeriodChange={onPeriodChange}
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
           onPriceDoubleClick={onPriceDoubleClick}

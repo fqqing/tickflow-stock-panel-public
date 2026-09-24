@@ -29,6 +29,8 @@
  *   Q4: removeOverlay + 重新 createOverlay（切股/切周期）是否干净
  *   Q5: 单 overlay 承载 ~40 笔 + ~10 中枢 + ~20 买卖点时的单帧绘制耗时
  *   Q6: 端点落在可视区外时 convertToPixel 的返回值（决定要不要自己裁剪）
+ *   Q7: x 轴是否为**等距索引轴**（决定 ECharts 的「逐 bar 线性插值」与 KLineChart 的
+ *       「两端点直线」是否几何等价 —— 这是 P1 对拍能否成立的前提）
  * ------------------------------------------------------------------------- */
 const KC = window.klinecharts
 const R = { version: (typeof KC.version === 'function' ? KC.version() : KC.version), checks: {}, data: {}, errs: [] }
@@ -290,6 +292,38 @@ async function main() {
       valueFarAbove: { x: r2(on.x), y: r2(on.y), finite: isFinite(on.x) && isFinite(on.y) },
       note: '只要返回有限数即可, 超出画布由 canvas 边界自然裁剪(库内无 ctx.clip)',
       pass: isFinite(off.x) && isFinite(off.y),
+    }
+  }
+
+  /* --- Q7: x 轴等距性 —— 对拍成立的前提 --- */
+  {
+    const vr = chart.getVisibleRange()
+    const from = Math.max(0, Math.floor(vr.from) + 1)
+    const to = Math.min(data.length - 1, Math.floor(vr.to) - 1)
+    const xs = []
+    for (let i = from; i <= to; i++) {
+      const p = chart.convertToPixel({ timestamp: data[i].timestamp, value: data[i].close }, { paneId: CANDLE })
+      if (p && isFinite(p.x)) xs.push(p.x)
+    }
+    const gaps = []
+    for (let k = 1; k < xs.length; k++) gaps.push(xs[k] - xs[k - 1])
+    const spread = gaps.length ? Math.max(...gaps) - Math.min(...gaps) : NaN
+    // 中点校验: 索引中点那根 bar 的像素 x, 是否等于两端点像素 x 的中点
+    const ia = from + 2, ib = Math.min(to, from + 22)
+    const im = Math.floor((ia + ib) / 2) * 2 === ia + ib ? (ia + ib) / 2 : (ia + ib - 1) / 2
+    const px = i => chart.convertToPixel({ timestamp: data[i].timestamp, value: 20 }, { paneId: CANDLE }).x
+    const xa = px(ia), xb = px(ib)
+    const xm = Number.isInteger(im) ? px(im) : (px(Math.floor(im)) + px(Math.ceil(im))) / 2
+    const midErr = Math.abs(xm - (xa + xb) / 2)
+    R.checks.Q7_indexSpacedXAxis = {
+      barsMeasured: xs.length,
+      gapMinPx: r2(Math.min(...gaps)),
+      gapMaxPx: r2(Math.max(...gaps)),
+      gapSpreadPx: r2(spread),
+      midpointErrPx: r2(midErr),
+      note: '相邻 bar 像素间距一致 => KLineChart 的 x 是等距索引轴(不留周末/停牌空隙), ' +
+            '与 ECharts category 轴等价 => 索引空间插值 == 像素空间直线, 两个内核画的笔重合',
+      pass: gaps.length > 5 && spread < 0.5 && midErr < 1,
     }
   }
 

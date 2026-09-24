@@ -118,3 +118,7 @@ frontend/vite.config.ts.timestamp-*.mjs
 
 # P1 验证临时构建产物
 frontend/.dist-verify/
+frontend/.parity-tmp/
+frontend/.ssr-tmp/
+# 真机验收截图（可重新生成）
+docs/kline-lab/terminal-*.png

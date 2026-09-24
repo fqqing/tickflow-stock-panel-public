@@ -107,6 +107,12 @@ interface Props {
    */
   chanEnabled?: boolean
   onToggleChan?: () => void
+  /**
+   * K 线周期（受控）。不传则退回组件内部状态（弹窗/预览等独立用法）。
+   * 个股终端把它提升到终端层, 这样键盘 1/2/3 在 ECharts 与 KLinePro 两个内核下都能生效。
+   */
+  period?: KLinePeriod
+  onPeriodChange?: (p: KLinePeriod) => void
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
@@ -219,6 +225,8 @@ export function StockDailyKChart({
   showMarkerToggle = true,
   chanEnabled,
   onToggleChan,
+  period: externalPeriod,
+  onPeriodChange,
   showMA = true,
   showInfoBar = true,
   visibleBars = 60,
@@ -232,7 +240,13 @@ export function StockDailyKChart({
   const [showMarkers, setShowMarkers] = useState(true)
   // K 线周期: 日/周/月。周月由后端按日 K 聚合, 并在聚合后重算指标
   // (周线 MA20 是 20 周均线, 不是日线 MA20 在周末那天的取值)。
-  const [period, setPeriod] = useState<KLinePeriod>('day')
+  // 受控优先：终端层持有周期时, 图内按钮与键盘 1/2/3 走同一份状态。
+  const [innerPeriod, setInnerPeriod] = useState<KLinePeriod>('day')
+  const period = externalPeriod ?? innerPeriod
+  const applyPeriod = useCallback((p: KLinePeriod) => {
+    if (onPeriodChange) onPeriodChange(p)
+    else setInnerPeriod(p)
+  }, [onPeriodChange])
   const [adjust, setAdjust] = useState<KLineAdjust>('qfq')
   // 手绘趋势线: 非画线模式下不拦截鼠标事件, 画线模式在 zrender 上手动拖拽
   const [drawing, setDrawing] = useState(false)
@@ -399,7 +413,7 @@ export function StockDailyKChart({
             {PERIOD_OPTIONS.map(opt => (
               <button
                 key={opt.key}
-                onClick={() => setPeriod(opt.key)}
+                onClick={() => applyPeriod(opt.key)}
                 title={opt.key === 'day' ? '日K' : opt.key === 'week' ? '周K(按周聚合并重算指标)' : '月K(按月聚合并重算指标)'}
                 className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
                   period === opt.key

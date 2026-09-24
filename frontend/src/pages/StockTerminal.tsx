@@ -20,6 +20,7 @@ import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useLayoutMode } from '@/lib/useLayoutMode'
 import { useRecentStocks } from '@/lib/useRecentStocks'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { type KLinePeriod } from '@/components/StockDailyKChart'
 import { DepthPanel } from '@/components/DepthPanel'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
@@ -122,7 +123,11 @@ export function StockTerminal() {
   const [dateRange, setDateRange] = useState(() => getDefaultRange())
   const [chanOn, setChanOn] = useState(false)
   const [useKLine, setUseKLine] = useState(() => getKLineProFlag())
-  const [period, setPeriod] = useState<'day' | 'week' | 'month'>('day')
+  // 周期提升到终端层: 键盘 1/2/3 与两个内核共用同一份状态。
+  // ECharts 支持分钟档, KLinePro 只做日/周/月 —— 切到 KLinePro 时分钟档回落到日线。
+  const [period, setPeriod] = useState<KLinePeriod>('day')
+  const klinePeriod: 'day' | 'week' | 'month' =
+    period === 'week' ? 'week' : period === 'month' ? 'month' : 'day'
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -262,6 +267,9 @@ export function StockTerminal() {
           setPaletteOpen(false)
           setHelpOpen(false)
           setShowMonitor(false)
+          // 关闭浮层后把焦点从 input 移走，否则后续键盘（如 '?'）会被输入框吞掉
+          const active = document.activeElement as HTMLElement | null
+          if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) active.blur()
         }
         return
       }
@@ -283,11 +291,11 @@ export function StockTerminal() {
         case ']':
           stepSymbol(1); break
         case '1':
-          if (useKLine) setPeriod('day'); break
+          setPeriod('day'); break
         case '2':
-          if (useKLine) setPeriod('week'); break
+          setPeriod('week'); break
         case '3':
-          if (useKLine) setPeriod('month'); break
+          setPeriod('month'); break
         case 'Escape':
           e.preventDefault(); navigate(-1); break
         default:
@@ -296,7 +304,7 @@ export function StockTerminal() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, symbol, useKLine])
+  }, [handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, symbol])
 
   if (!symbol) {
     return (
@@ -390,7 +398,7 @@ export function StockTerminal() {
               <KLinePro
                 symbol={symbol}
                 dateRange={dateRange}
-                period={period}
+                period={klinePeriod}
                 chanEnabled={chanOn}
                 priceLines={priceLines}
               />
@@ -401,6 +409,8 @@ export function StockTerminal() {
                 dateRange={dateRange}
                 priceLines={priceLines}
                 chanOverlay={chanOn}
+                period={period}
+                onPeriodChange={setPeriod}
                 refetchIntervalMs={refetchMs}
                 inWatchlist={inWatchlist}
                 onAddToWatchlist={() => toggleWatchlist.mutate('add')}
