@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type KlineRow } from '@/lib/api'
+import { api, KLINE_CHART_FIELDS, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -19,7 +19,55 @@ import {
 const SUB_INFO_H = 16
 const SUB_GAP = 4
 const MAX_DAYS = 2000
+/** 分钟周期回看多少个交易日的 1 分钟数据(30 分钟档约得 8 根/日 -> 约 960 根) */
+const MINUTE_LOOKBACK_DAYS = 120
+
+/** K 线周期: 日 / 周 / 月。周月由后端按日 K 聚合后重算指标。 */
+export type KLinePeriod = 'day' | 'week' | 'month' | '5m' | '15m' | '30m' | '60m' | '90m' | '120m'
+/** 分钟周期由后端用 1 分钟 K 聚合(依赖分钟数据是否回补), 日/周/月走 /kline/daily */
+const MINUTE_PERIODS: KLinePeriod[] = ['5m', '15m', '30m', '60m', '90m', '120m']
+export const isMinutePeriod = (p: KLinePeriod): boolean => MINUTE_PERIODS.includes(p)
+const PERIOD_OPTIONS: { key: KLinePeriod; label: string }[] = [
+  { key: 'day', label: '日' },
+  { key: 'week', label: '周' },
+  { key: 'month', label: '月' },
+  { key: '5m', label: '5分' },
+  { key: '15m', label: '15分' },
+  { key: '30m', label: '30分' },
+  { key: '60m', label: '60分' },
+  { key: '90m', label: '90分' },
+  { key: '120m', label: '120分' },
+]
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
+
+/** 复权方式: qfq(前复权, 默认) / none(不复权) / hfq(后复权) */
+export type KLineAdjust = 'qfq' | 'none' | 'hfq'
+const ADJUST_OPTIONS: { key: KLineAdjust; label: string; title: string }[] = [
+  { key: 'qfq', label: '前复权', title: '前复权: 以最新价为基准, 历史价向下调整(消除除权跳空)' },
+  { key: 'none', label: '不复权', title: '不复权: 交易所真实成交价, 除权日会保留跳空' },
+  { key: 'hfq', label: '后复权', title: '后复权: 以最早价为基准, 历史价显示为真实价' },
+]
+
+/** 用户手绘线: 端点存 (date, price), 按 symbol 存 localStorage */
+interface DrawLine { a: { date: string; price: number }; b: { date: string; price: number } }
+const DRAW_COLOR = '#F59E0B'
+const linesKey = (symbol: string) => `tickflow.kline.drawlines.${symbol}`
+function loadLines(symbol: string): DrawLine[] {
+  try {
+    const raw = localStorage.getItem(linesKey(symbol))
+    const arr = raw ? JSON.parse(raw) : []
+    return Array.isArray(arr) ? arr.filter((l: DrawLine) => l?.a?.date && l?.b?.date) : []
+  } catch {
+    return []
+  }
+}
+function saveLines(symbol: string, lines: DrawLine[]) {
+  try {
+    localStorage.setItem(linesKey(symbol), JSON.stringify(lines))
+  } catch {
+    return
+  }
+}
 /**
  * 解密公式派生指标：蛟龙出海 + 资金动能 + 主图定量结构 + MACD 定量结构，
  * 由后端按需计算（公式预热依赖长历史，前端只负责展示）
@@ -74,11 +122,20 @@ function isValidRow(r: any): boolean {
   return r && r.date != null && r.open != null && r.close != null
 }
 
+/**
+ * x 轴标签: 日/周/月是 YYYY-MM-DD; 分钟周期是完整时间戳, 必须保留到分钟,
+ * 否则同一天的多根 K 会塌成同一个类目。
+ */
+function barLabel(d: unknown): string {
+  const s = typeof d === 'string' ? d : String(d)
+  return s.length > 10 ? s.slice(0, 16).replace('T', ' ') : s
+}
+
 export function toOHLC(rows: KlineRow[]): OHLC[] {
   return rows
     .filter(isValidRow)
     .map(r => ({
-      date: typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date),
+      date: barLabel(r.date),
       open: Number(r.open),
       high: Number(r.high),
       low: Number(r.low),
@@ -122,7 +179,7 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
 function buildLimitUpMarkers(rows: KlineRow[]): ChartMarker[] {
   const markers: ChartMarker[] = []
   for (const r of rows) {
-    const date = typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date)
+    const date = barLabel(r.date)
     if (r.signal_broken_limit_up) {
       markers.push({ date, kind: 'neutral', above: true, color: '#8B5CF6', label: '炸' })
     } else if (r.signal_limit_up) {
@@ -173,27 +230,120 @@ export function StockDailyKChart({
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
+  // K 线周期: 日/周/月。周月由后端按日 K 聚合, 并在聚合后重算指标
+  // (周线 MA20 是 20 周均线, 不是日线 MA20 在周末那天的取值)。
+  const [period, setPeriod] = useState<KLinePeriod>('day')
+  const [adjust, setAdjust] = useState<KLineAdjust>('qfq')
+  // 手绘趋势线: 非画线模式下不拦截鼠标事件, 画线模式在 zrender 上手动拖拽
+  const [drawing, setDrawing] = useState(false)
+  const [drawLines, setDrawLines] = useState<DrawLine[]>([])
+  const [chartInst, setChartInst] = useState<any>(null)
+  const [preview, setPreview] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
+  const dragRef = useRef<{ x: number; y: number; date: string; price: number } | null>(null)
+  const drawingRef = useRef(drawing)
+  drawingRef.current = drawing
+  const rowsRef = useRef<OHLC[]>([])
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
     normalizeVolumeCompare(storage.stockVolumeCompare.get(DEFAULT_VOLUME_COMPARE)),
   )
   const dateRange = externalDateRange ?? getDefaultRange()
   const days = useMemo(() => rangeDays(dateRange), [dateRange])
 
-  // extColumns 纳入 query key：勾选/取消扩展字段时需重新请求（带 ext_columns 参数）
-  const kline = useQuery({
-    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns, CUSTOM_INDICATORS),
-    enabled: !!symbol,
+  const minutePeriod = isMinutePeriod(period)
+  // 分钟周期走 /kline/minute-k (1 分钟 K 聚合); 日/周/月走 /kline/daily
+  const klineMinute = useQuery({
+    queryKey: QK.klineMinuteK(symbol, period, MINUTE_LOOKBACK_DAYS),
+    queryFn: () => api.klineMinuteK(symbol, period, MINUTE_LOOKBACK_DAYS, KLINE_CHART_FIELDS),
+    enabled: !!symbol && minutePeriod,
     placeholderData: (prev) => prev,
   })
 
-  const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
-  const stockInfo = kline.data?.stock_info
-  const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
+  // extColumns 纳入 query key：勾选/取消扩展字段时需重新请求（带 ext_columns 参数）
+  const kline = useQuery({
+    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns, period, adjust),
+    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, adjust),
+    enabled: !!symbol && !minutePeriod,
+    placeholderData: (prev) => prev,
+  })
+  // 两条查询合一, 下游只读这一个(分钟周期时 kline 未启用, 数据为空)
+  const klineData = minutePeriod ? klineMinute : kline
+
+  const rows = useMemo(() => toOHLC(klineData.data?.rows ?? []), [klineData.data?.rows])
+  rowsRef.current = rows
+  const stockInfo = klineData.data?.stock_info
+  const limitMarkers = useMemo(() => buildLimitUpMarkers(klineData.data?.rows ?? []), [klineData.data?.rows])
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
     ...(showLimitMarkers ? limitMarkers : []),
   ], [limitMarkers, markers, showLimitMarkers])
+
+  // 切换个股时载入该股已保存的手绘线
+  useEffect(() => {
+    setDrawLines(symbol ? loadLines(symbol) : [])
+    setPreview(null)
+    dragRef.current = null
+  }, [symbol])
+
+  // 画线: 在 zrender 上手动拖拽。起点/终点都 snap 到最近交易日的 x 位置,
+  // 保证端点 date 一定落在当前 x 轴类目里(polylines 会丢弃不在轴上的顶点)。
+  useEffect(() => {
+    const chart = chartInst
+    if (!chart) return
+    const zr = chart.getZr()
+
+    const toData = (ev: any) => {
+      const pt = chart.convertFromPixel({ gridIndex: 0 }, [ev.offsetX, ev.offsetY])
+      const d = rowsRef.current
+      if (!pt || !d.length) return null
+      const idx = Math.max(0, Math.min(d.length - 1, Math.round(Number(pt[0]))))
+      if (!Number.isFinite(Number(pt[1]))) return null
+      return {
+        x: ev.offsetX, y: ev.offsetY,
+        date: d[idx].date,
+        price: Math.round(Number(pt[1]) * 100) / 100,
+      }
+    }
+
+    const onDown = (ev: any) => {
+      if (!drawingRef.current) return
+      const p = toData(ev)
+      if (!p) return
+      dragRef.current = p
+      setPreview({ x1: p.x, y1: p.y, x2: p.x, y2: p.y })
+    }
+    const onMove = (ev: any) => {
+      if (!drawingRef.current || !dragRef.current) return
+      setPreview(prev => (prev ? { ...prev, x2: ev.offsetX, y2: ev.offsetY } : prev))
+    }
+    const onUp = (ev: any) => {
+      const start = dragRef.current
+      dragRef.current = null
+      setPreview(null)
+      if (!drawingRef.current || !start) return
+      const p = toData(ev)
+      if (!p) return
+      // 误点(同一位置)不成线
+      if (p.date === start.date && Math.abs(p.price - start.price) < 1e-9) return
+      setDrawLines(prev => {
+        const next = [...prev, { a: { date: start.date, price: start.price }, b: { date: p.date, price: p.price } }]
+        saveLines(symbol, next)
+        return next
+      })
+    }
+    // 鼠标在画布外松开时 zrender 收不到 mouseup, 兜底挂到 window
+    const onWindowUp = () => { dragRef.current = null; setPreview(null) }
+
+    zr.on('mousedown', onDown)
+    zr.on('mousemove', onMove)
+    zr.on('mouseup', onUp)
+    window.addEventListener('mouseup', onWindowUp)
+    return () => {
+      zr.off('mousedown', onDown)
+      zr.off('mousemove', onMove)
+      zr.off('mouseup', onUp)
+      window.removeEventListener('mouseup', onWindowUp)
+    }
+  }, [chartInst, symbol])
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -207,6 +357,25 @@ export function StockDailyKChart({
     })
   }, [])
 
+  // 手绘线 -> 主图折线。非日线周期不显示: 端点 date 是日线日期, 周/月轴上找不到。
+  const userPolylines = useMemo<ChartPolyline[]>(() => {
+    if (period !== 'day') return []
+    return drawLines.map(l => {
+      const pts = [l.a, l.b].slice().sort((m, n) => (m.date < n.date ? -1 : m.date > n.date ? 1 : 0))
+      return { points: pts.map(p => ({ date: p.date, price: p.price })), color: DRAW_COLOR, width: 1.5, name: 'user' }
+    })
+  }, [drawLines, period])
+
+  const allPolylines = useMemo<ChartPolyline[]>(
+    () => [...(period === 'day' ? polylines ?? [] : []), ...userPolylines],
+    [period, polylines, userPolylines],
+  )
+
+  const clearLines = useCallback(() => {
+    setDrawLines([])
+    saveLines(symbol, [])
+  }, [symbol])
+
   const activeSubDefs = activeIndicators
     .map(key => SUB_CHARTS.find(s => s.key === key))
     .filter((d): d is typeof SUB_CHARTS[number] => !!d)
@@ -216,8 +385,8 @@ export function StockDailyKChart({
   const chartHeight = height + subExtraH
 
   useEffect(() => {
-    onDataChange?.({ rows, rawRows: kline.data?.rows ?? [], stockInfo, name: kline.data?.name })
-  }, [kline.data?.name, kline.data?.rows, onDataChange, rows, stockInfo])
+    onDataChange?.({ rows, rawRows: klineData.data?.rows ?? [], stockInfo, name: klineData.data?.name })
+  }, [klineData.data?.name, klineData.data?.rows, onDataChange, rows, stockInfo])
 
   if (!symbol) return null
 
@@ -225,6 +394,141 @@ export function StockDailyKChart({
     <div className={className} style={{ minHeight: chartHeight }}>
       {showIndicatorControls && rows.length > 0 && (
         <div className="flex items-center gap-1.5 px-1 pb-0.5">
+          {/* 周期: 日 / 周 / 月 */}
+          <div className="flex items-center gap-0.5 rounded border border-border/70 p-0.5">
+            {PERIOD_OPTIONS.map(opt => (
+              <button
+                key={opt.key}
+                onClick={() => setPeriod(opt.key)}
+                title={opt.key === 'day' ? '日K' : opt.key === 'week' ? '周K(按周聚合并重算指标)' : '月K(按月聚合并重算指标)'}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                  period === opt.key
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-secondary'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {/* 复权: 前复权 / 不复权 / 后复权 */}
+          <div className="flex items-center gap-0.5 rounded border border-border/70 p-0.5">
+            {ADJUST_OPTIONS.map(opt => (
+              <button
+                key={opt.key}
+                onClick={() => setAdjust(opt.key)}
+                title={opt.title}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                  adjust === opt.key
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-secondary'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div className="h-4 w-px bg-border/70" />
+          {/* 画线: 开启后在 K 线区按住拖出趋势线, 端点自动吸到最近交易日 */}
+          <button
+            onClick={() => { setDrawing(v => !v); setPreview(null); dragRef.current = null }}
+            title={drawing ? '退出画线模式' : '画线: 在 K 线区按住鼠标拖出趋势线'}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+              drawing ? 'bg-accent text-white' : 'bg-elevated text-muted hover:text-secondary'
+            }`}
+          >
+            {drawing ? '画线中' : '画线'}
+          </button>
+          {drawLines.length > 0 && (
+            <button
+              onClick={clearLines}
+              title={`清除本股已画的 ${drawLines.length} 条线`}
+              className="px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer bg-elevated text-muted hover:text-danger transition-colors"
+            >
+              清除({drawLines.length})
+            </button>
+          )}
+
+          {(showMarkerToggle && showLimitMarkers) || chanEnabled !== undefined ? (
+            <div className="ml-auto flex items-center gap-1.5">
+              {showMarkerToggle && showLimitMarkers && (
+                <button
+                  onClick={() => setShowMarkers(v => !v)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                    showMarkers
+                      ? 'text-[#FACC15] bg-[#FACC15]/10'
+                      : 'bg-elevated text-muted hover:text-secondary'
+                  }`}
+                >
+                  异动
+                </button>
+              )}
+              {chanEnabled !== undefined && (
+                <button
+                  onClick={onToggleChan}
+                  disabled={period !== 'day'}
+                  title={period !== 'day'
+                    ? '缠论基于日线笔/中枢, 仅在日K周期下可用'
+                    : chanEnabled ? '隐藏缠论笔/中枢/买卖点' : '显示缠论笔/中枢/买卖点'}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                    period !== 'day'
+                      ? 'bg-elevated text-muted/40 cursor-not-allowed'
+                      : chanEnabled
+                        ? 'text-accent bg-accent/15 cursor-pointer'
+                        : 'bg-elevated text-muted hover:text-secondary cursor-pointer'
+                  }`}
+                >
+                  缠论
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+      {klineData.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
+      {klineData.isError && <div className="text-sm text-danger py-2">日K加载失败</div>}
+      {!klineData.isLoading && !klineData.isError && (klineData.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
+        <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
+      )}
+      {rows.length > 0 && (
+        <div className={`relative ${drawing ? 'cursor-crosshair' : ''}`}>
+          <EChartsCandlestick
+            data={rows}
+            markers={allMarkers}
+            ranges={ranges}
+            priceLines={priceLines}
+            // 缠论的笔顶点是「日线日期」, 在周/月 K 上大部分找不到对应 x 轴位置,
+            // 强行插值会画出错误的斜线, 所以非日线周期下不叠加。
+            polylines={allPolylines}
+            height={chartHeight - 22}
+            showMA={showMA}
+            showInfoBar={showInfoBar}
+            showMarkers={showMarkers}
+            stockInfo={stockInfo}
+            symbol={symbol}
+            linkedPrice={linkedPrice}
+            // 画线模式下不派发点击日期, 避免拖线时被日期点击抢走
+            onDateClick={drawing ? undefined : onDateClick}
+            onPriceDoubleClick={onPriceDoubleClick}
+            onChartReady={setChartInst}
+            visibleBars={visibleBars}
+            activeIndicators={activeIndicators}
+            volumeCompare={volumeCompare}
+          />
+          {/* 拖拽预览: 用 SVG 覆盖层画, 不进 ECharts 避免整图重绘 */}
+          {preview && (
+            <svg className="pointer-events-none absolute inset-0 h-full w-full">
+              <line
+                x1={preview.x1} y1={preview.y1} x2={preview.x2} y2={preview.y2}
+                stroke={DRAW_COLOR} strokeWidth={1.5}
+              />
+            </svg>
+          )}
+        </div>
+      )}
+      {/* 底部指标快捷栏: 与顶部「数据口径」分开, 专管「图上显示什么」 */}
+      {showIndicatorControls && rows.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 px-1 pt-1">
           {SUB_CHARTS.map(ind => (
             <button
               key={ind.key}
@@ -238,6 +542,7 @@ export function StockDailyKChart({
               {ind.label}
             </button>
           ))}
+          <div className="h-4 w-px bg-border/70" />
           {OVERLAY_INDICATORS.map(ind => (
             <button
               key={ind.key}
@@ -282,62 +587,7 @@ export function StockDailyKChart({
               </select>
             </div>
           )}
-          {(showMarkerToggle && showLimitMarkers) || chanEnabled !== undefined ? (
-            <div className="ml-auto flex items-center gap-1.5">
-              {showMarkerToggle && showLimitMarkers && (
-                <button
-                  onClick={() => setShowMarkers(v => !v)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                    showMarkers
-                      ? 'text-[#FACC15] bg-[#FACC15]/10'
-                      : 'bg-elevated text-muted hover:text-secondary'
-                  }`}
-                >
-                  异动
-                </button>
-              )}
-              {chanEnabled !== undefined && (
-                <button
-                  onClick={onToggleChan}
-                  title={chanEnabled ? '隐藏缠论笔/中枢/买卖点' : '显示缠论笔/中枢/买卖点'}
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                    chanEnabled
-                      ? 'text-accent bg-accent/15'
-                      : 'bg-elevated text-muted hover:text-secondary'
-                  }`}
-                >
-                  缠论
-                </button>
-              )}
-            </div>
-          ) : null}
         </div>
-      )}
-      {kline.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
-      {kline.isError && <div className="text-sm text-danger py-2">日K加载失败</div>}
-      {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
-        <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
-      )}
-      {rows.length > 0 && (
-        <EChartsCandlestick
-          data={rows}
-          markers={allMarkers}
-          ranges={ranges}
-          priceLines={priceLines}
-          polylines={polylines}
-          height={chartHeight - 22}
-          showMA={showMA}
-          showInfoBar={showInfoBar}
-          showMarkers={showMarkers}
-          stockInfo={stockInfo}
-          symbol={symbol}
-          linkedPrice={linkedPrice}
-          onDateClick={onDateClick}
-          onPriceDoubleClick={onPriceDoubleClick}
-          visibleBars={visibleBars}
-          activeIndicators={activeIndicators}
-          volumeCompare={volumeCompare}
-        />
       )}
     </div>
   )

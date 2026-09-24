@@ -79,8 +79,11 @@ export const QK = {
   analysisMenu:         (id: string) => ['analysis-menu', id] as const,
 
   // Kline
-  kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
-                           ['kline', symbol, start, end, extColumns ?? ''] as const,
+  // 周期(period)纳入 key: 日/周/月 K 是不同数据, 不能共用缓存
+  kline:                (symbol: string, start: string, end: string, extColumns?: string, period?: string, adjust?: string) =>
+                           ['kline', symbol, start, end, extColumns ?? '', period ?? 'day', adjust ?? 'qfq'] as const,
+  klineMinuteK:         (symbol: string, period: string, days: number) =>
+                           ['kline-minute-k', symbol, period, days] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   // 缠论单票结构（笔/中枢/一二三买卖点），按 symbol + 回溯根数 + 笔口径缓存
   chanAnalysis:         (symbol: string, lookback: number, strict: boolean) =>

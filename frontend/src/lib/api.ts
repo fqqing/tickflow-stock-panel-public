@@ -213,6 +213,53 @@ export interface PriceLimitInfo {
   source: 'rule' | 'instrument'
 }
 
+/** 资讯: 新闻条目 */
+export interface NewsItem {
+  id: string
+  title: string
+  date: string
+  summary: string
+  url: string
+  source: string
+}
+
+/** 资讯: 公告条目 (正文需按 art_code 再取) */
+export interface AnnItem {
+  art_code: string
+  title: string
+  date: string
+  display_time: string
+  columns: string[]
+}
+
+/**
+ * K 线图绘图所需的列白名单 (传给 /api/kline/daily 的 fields 参数)。
+ *
+ * enriched 表一行有 70+ 列, 其中 20 个 signal_* 布尔列和 momentum_* 等 K 线图
+ * 完全用不到。实测 days=1000 时全量响应 1.32MB / 2.5s, 裁剪后约 0.4MB —— 传输
+ * 与 JSON 解析都是 K 线图打开慢的主要成本。
+ *
+ * 新增副图指标时, 记得把它依赖的列加进来, 否则图上会缺线。
+ */
+export const KLINE_CHART_FIELDS = [
+  // 基础 OHLCV + 信息栏
+  'date', 'open', 'high', 'low', 'close', 'volume', 'amount',
+  'turnover_rate', 'change_pct', 'prev_close', 'amplitude',
+  // 均线 / 成交量均线
+  'ma5', 'ma10', 'ma20', 'ma30', 'ma60',
+  'ema5', 'ema10', 'ema20', 'ema30', 'ema60', 'vol_ma5', 'vol_ma10',
+  // 副图指标
+  'macd_dif', 'macd_dea', 'macd_hist',
+  'boll_upper', 'boll_lower',
+  'kdj_k', 'kdj_d', 'kdj_j',
+  'rsi_6', 'rsi_14', 'rsi_24',
+  'atr_14', 'vol_ratio_5d',
+  // 解密公式派生 (indicators= 注入)
+  'td_signal', 'td_a3', 'cm_value',
+  'st_dsg', 'st_dxg', 'st_csg', 'st_cxg', 'st_icon', 'st_dn', 'st_up',
+  'ms_diff', 'ms_dea', 'ms_hist', 'ms_btext', 'ms_by', 'ms_ttext', 'ms_ty',
+].join(',')
+
 export interface KlineRow {
   symbol?: string
   date: string
@@ -2053,6 +2100,9 @@ export const api = {
     dateRange?: { start: string; end: string },
     extColumns?: string,
     indicators?: string,
+    fields?: string,
+    period?: string,
+    adjust?: string,
   ) =>
     request<{
       symbol: string
@@ -2065,13 +2115,76 @@ export const api = {
         ? `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&start_date=${dateRange.start}&end_date=${dateRange.end}`
         : `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`)
       + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : '')
-      + (indicators ? `&indicators=${encodeURIComponent(indicators)}` : ''),
+      + (indicators ? `&indicators=${encodeURIComponent(indicators)}` : '')
+      + (fields ? `&fields=${encodeURIComponent(fields)}` : '')
+      + (period && period !== 'day' ? `&period=${encodeURIComponent(period)}` : '')
+      + (adjust && adjust !== 'qfq' ? `&adjust=${encodeURIComponent(adjust)}` : ''),
+    ),
+  /** 多分钟周期 K 线 (30/60/90/120 分钟等), 由本地 1 分钟 K 聚合 + 重算指标 */
+  klineMinuteK: (symbol: string, period = '30m', days = 120, fields?: string) =>
+    request<{
+      symbol: string
+      name?: string
+      period?: string
+      stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
+      rows: KlineRow[]
+      source?: string
+    }>(
+      `/api/kline/minute-k?symbol=${encodeURIComponent(symbol)}&period=${encodeURIComponent(period)}&days=${days}`
+      + (fields ? `&fields=${encodeURIComponent(fields)}` : ''),
     ),
   klineDailyBatch: (symbols: string[], days = 12) =>
     request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
+
+  /** 资讯: 个股新闻流 (东财公开接口, 后端带 5 分钟缓存) */
+  newsStock: (symbol: string, name?: string, size = 20) =>
+    request<{ symbol: string; keyword: string; items: NewsItem[] }>(
+      `/api/news/stock?symbol=${encodeURIComponent(symbol)}&size=${size}`
+      + (name ? `&name=${encodeURIComponent(name)}` : ''),
+    ),
+  /** 资讯: 个股公告列表 (只有元信息, 正文用 newsAnnContent) */
+  newsAnn: (symbol: string, size = 20) =>
+    request<{ symbol: string; items: AnnItem[] }>(
+      `/api/news/ann?symbol=${encodeURIComponent(symbol)}&size=${size}`,
+    ),
+  /** 资讯: 公告正文 */
+  newsAnnContent: (artCode: string) =>
+    request<{ art_code: string; content: string }>(
+      `/api/news/ann-content?art_code=${encodeURIComponent(artCode)}`,
+    ),
+
+  /** 五档盘口 */
+  depthGet: (symbol: string) =>
+    request<{
+      symbol: string
+      name: string
+      last_price: number | null
+      prev_close: number | null
+      open: number | null
+      high: number | null
+      low: number | null
+      volume: number | null
+      amount: number | null
+      change_pct: number | null
+      turnover_rate: number | null
+      pe: number | null
+      pb: number | null
+      total_market_cap: number | null
+      circulating_market_cap: number | null
+      limit_up: number | null
+      limit_down: number | null
+      volume_ratio: number | null
+      avg_price: number | null
+      bid: { price: number | null; volume: number | null }[]
+      ask: { price: number | null; volume: number | null }[]
+      wb_ratio: number | null
+      wb_diff: number | null
+      time: string | null
+      timestamp: number | null
+    }>(`/api/depth/${encodeURIComponent(symbol)}`),
 
   // 缠论: 单票结构 / 批量标注 / 全市场扫描
   chanAnalysis: (symbol: string, lookback = 400, strict = true) =>

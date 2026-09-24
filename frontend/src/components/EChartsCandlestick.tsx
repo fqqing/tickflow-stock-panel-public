@@ -547,6 +547,11 @@ interface Props {
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
+  /**
+   * 图表实例就绪回调(含重建后再次就绪), 供父组件挂载 zrender 事件(如画线工具)。
+   * 组件卸载时不会回调, 调用方需自行在 chart 上解绑。
+   */
+  onChartReady?: (chart: ECharts) => void
   /** 默认可见蜡烛根数, 默认 60 */
   visibleBars?: number
   /** 已激活的子图 key 列表 (含 vol, 按点击顺序) */
@@ -1280,6 +1285,7 @@ export function EChartsCandlestick({
   linkedPrice,
   onDateClick,
   onPriceDoubleClick,
+  onChartReady,
   visibleBars = 60,
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
@@ -1292,6 +1298,8 @@ export function EChartsCandlestick({
   onDateClickRef.current = onDateClick
   const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
   onPriceDoubleClickRef.current = onPriceDoubleClick
+  const onChartReadyRef = useRef(onChartReady)
+  onChartReadyRef.current = onChartReady
   // 主题: buildOption/信息栏内部通过 CT() 动态取调色板, 这里只负责切换时触发重建
   const theme = useTheme()
 
@@ -1445,6 +1453,7 @@ export function EChartsCandlestick({
 
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
+    onChartReadyRef.current?.(chart)
 
     // 鼠标移动 → 只更新 ref + DOM，不触发 React re-render
     // 设计原则: 找不到有效数据时保持上次显示，永远不清空信息栏

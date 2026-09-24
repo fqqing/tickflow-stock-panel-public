@@ -8,7 +8,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
-import { api } from '@/lib/api'
+import { api, KLINE_CHART_FIELDS } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -178,7 +178,7 @@ export function StockAnalysis() {
 function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const kline = useQuery({
     queryKey: ['kline', symbol, ''],
-    queryFn: () => api.klineDaily(symbol, 250),
+    queryFn: () => api.klineDaily(symbol, 250, undefined, undefined, undefined, KLINE_CHART_FIELDS),
     enabled: !!symbol,
     staleTime: 60_000,
   })

@@ -348,6 +348,22 @@ def get_daily(
             "(解密公式, 按需计算)"
         ),
     ),
+    fields: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的列名白名单: 只返回这些列, 用于裁剪响应体。"
+            "K 线图场景可只取绘图所需列(实测 1000 天请求 1.32MB -> 约 0.4MB)。"
+            "不传则返回全部列(兼容既有调用方)。未知列名静默忽略。"
+        ),
+    ),
+    period: str = Query(
+        "day",
+        description="K 线周期: day(日) / week(周) / month(月)。周月由日 K 聚合并在聚合后重算指标。",
+    ),
+    adjust: str = Query(
+        "qfq",
+        description="复权方式: qfq(前复权, 数据源口径, 默认) / none(不复权) / hfq(后复权)。",
+    ),
 ):
     """读取本地 enriched 表中某只股票的日 K。
 
@@ -408,12 +424,19 @@ def get_daily(
             "source": "live",
         }
         resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
-        return _attach_ext(resp, repo, symbol, ext_columns)
+        return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
 
-    rows = df.to_dicts()
-
-    # 追加/覆盖今日实时蜡烛
-    rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
+    # 复权要在周期聚合之前做: 聚合取 last/first/max/min, 若先聚合再复权,
+    # 周末那根用的是「周期末」的价格, 与逐根缩放的结果不等价。
+    df = _apply_adjust(df, adjust, repo.store.data_dir)
+    if period in _VALID_PERIODS and period != "day":
+        # 周/月线: 聚合后直接返回, 不注入当日实时蜡烛 —— 实时蜡烛是「日」粒度,
+        # 直接追加会在周线上多出一根错误的短周期 K 线。
+        rows = _select_fields_df(_aggregate_period(df, period), fields).to_dicts()
+    else:
+        rows = _select_fields_df(df, fields).to_dicts()
+        rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
+        rows = _adjust_live_row(rows, adjust, df, repo.store.data_dir)
 
     resp = {
         "symbol": symbol,
@@ -423,7 +446,7 @@ def get_daily(
         "source": "enriched",
     }
     resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
-    return _attach_ext(resp, repo, symbol, ext_columns)
+    return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
 
 
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
@@ -464,6 +487,239 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     stock_info = dict(resp.get("stock_info") or {})
     stock_info["ext"] = ext_values
     resp["stock_info"] = stock_info
+    return resp
+
+
+_VALID_PERIODS = frozenset({"day", "week", "month"})
+_TRUNC_UNIT = {"week": "1w", "month": "1mo"}
+
+
+def _aggregate_period(df, period: str):
+    """把日 K 聚合成周/月 K, 并在聚合后**重算**技术指标。
+
+    为什么指标不能沿用: 周线的 MA20 是「20 周均线」, 不等于日线 MA20 在周末
+    那天的取值; MACD/KDJ/RSI 同理。所以只保留聚合后的 OHLCV, 其余列全部
+    交给 indicators.pipeline.compute_indicators 重算。
+
+    聚合口径(与主流行情软件一致):
+      open=周期内第一根, high=周期内最高, low=周期内最低,
+      close=周期内最后一根, volume/amount=周期内求和,
+      date=周期内最后一个交易日。
+    """
+    if period not in _TRUNC_UNIT or df.is_empty() or "date" not in df.columns:
+        return df
+    import polars as pl
+
+    from app.indicators.pipeline import compute_indicators
+
+    d = df.sort("date").with_columns(pl.col("date").cast(pl.Date))
+    base_cols = [c for c in ("symbol", "date", "open", "high", "low", "close", "volume")
+                 if c in d.columns]
+    agg_exprs = [
+        pl.col("date").max().alias("date"),
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+    ]
+    agg_exprs.extend(
+        pl.col(c).sum().alias(c) if c in ("volume", "amount") else pl.col(c).last().alias(c)
+        for c in d.columns if c not in ("date", "open", "high", "low", "close")
+    )
+    agg = (
+        d.with_columns(pl.col("date").dt.truncate(_TRUNC_UNIT[period]).alias("_p"))
+        .group_by("_p")
+        .agg(agg_exprs)
+        .sort("_p")
+        .drop("_p")
+    )
+    out = compute_indicators(agg.select(base_cols))
+    # 把聚合里保留、但指标管线不产出的列(如 amount/turnover_rate)补回来
+    extra = [c for c in agg.columns if c not in out.columns]
+    if extra:
+        out = out.join(agg.select(["date", *extra]), on="date", how="left")
+    return out
+
+
+_ADJUST_PRICE_COLS = (
+    "open", "high", "low", "close", "prev_close",
+    "ma5", "ma10", "ma20", "ma30", "ma60",
+    "ema5", "ema10", "ema20", "ema30", "ema60",
+    "high_60d", "low_60d",
+    "macd_dif", "macd_dea", "macd_hist",
+    "boll_upper", "boll_mid", "boll_lower",
+    "atr_14", "change_amount",
+)
+
+
+def _hfq_factor(df, data_dir) -> float:
+    """截至该股票最新交易日的累积除权因子。
+
+    后复权价 = 前复权价 x 本常数(推导: qfq_t = raw_t * F_t / F_last,
+    hfq_t = raw_t * F_t, 两式相除得 hfq_t = qfq_t * F_last)。
+    所以后复权不需要逐根 join 除权表, 一个常数即可。
+    """
+    if data_dir is None or "symbol" not in df.columns or df.is_empty():
+        return 1.0
+    import glob as _glob
+
+    import polars as pl
+
+    sym = df["symbol"][0]
+    # Windows 上 str(Path) 带反斜杠, glob 两种分隔符都认, 这里统一成正斜杠取巧
+    base = str(data_dir).replace("\\", "/")
+    paths = sorted(_glob.glob(f"{base}/adj_factor/**/*.parquet", recursive=True))
+    if not paths or not sym:
+        return 1.0
+    try:
+        af = pl.read_parquet(paths).filter(pl.col("symbol") == sym)
+    except Exception:
+        return 1.0
+    if af.is_empty() or "ex_factor" not in af.columns:
+        return 1.0
+    af = af.with_columns(
+        pl.col("trade_date").cast(pl.Utf8).str.to_date("%Y-%m-%d").alias("trade_date")
+    )
+    if "date" in df.columns:
+        latest = df["date"].max()
+        if latest is not None:
+            af = af.filter(pl.col("trade_date") <= latest)
+    if af.is_empty():
+        return 1.0
+    try:
+        return float(af["ex_factor"].product()) or 1.0
+    except Exception:
+        return 1.0
+
+
+def _apply_adjust(df, adjust: str, data_dir=None):
+    """按复权方式缩放价格型列。
+
+    qfq (默认, 数据源口径): 以最新价为基准把历史价向下调整 -> 原样返回
+    none (不复权):          乘 raw_close/close, 还原成交易所真实成交价
+    hfq (后复权):           乘「截至最新交易日的累积除权因子」, 让历史价显示为真实价
+
+    为什么用逐根缩放而不是整表重算指标: enriched 表里的自定义列
+    (momentum_* / signal_* / consecutive_limit_* 等) 无法在 API 层重算, 整表重算
+    会把它们全部丢掉。而除权因子是分段常数(一年一两次、分红类通常接近 1), 对
+    跨越除权点的均线窗口只带来很小误差, 视觉上无差别。
+
+    表里只有 raw_close/raw_high/raw_low 没有 raw_open: open 用同根 close 的
+    比例反推 —— open/close 这个比值在任意复权口径下都相同。
+    """
+    if adjust == "qfq" or df.is_empty():
+        return df
+    import polars as pl
+
+    if adjust == "none":
+        if "raw_close" not in df.columns or "close" not in df.columns:
+            return df
+        ratio = pl.col("raw_close") / pl.col("close")
+        # prev_close 是「前一日」的价格, 必须乘前一日的换算比例: 除权日当天
+        # close 的比例会突变, 若跟着当日比例走, 除权日的 prev_close 会被算成
+        # 除权后的价格(实测比亚迪 2025-07-29: 337.00 被算成 111.01)。
+        ratio_prev = ratio.shift(1)
+    elif adjust == "hfq":
+        # 后复权相对前复权是常数倍, 前后日比例相同, 无需 shift
+        ratio = pl.lit(_hfq_factor(df, data_dir))
+        ratio_prev = ratio
+    else:
+        return df
+
+    cols = [c for c in _ADJUST_PRICE_COLS if c in df.columns and c != "prev_close"]
+    if not cols:
+        return df
+    # 必须在同一个 with_columns 里一次算完: polars 的多个表达式同时基于原 df 求值,
+    # 若分成两步, 第二步的 close 已被改成 raw_close, ratio 会退化成 1。
+    exprs = [(pl.col(c) * ratio).alias(c) for c in cols]
+    if "prev_close" in df.columns:
+        exprs.append(
+            (pl.col("prev_close") * ratio_prev)
+            .fill_null(pl.col("prev_close") * ratio)  # 首根没有前值, 退回当日比例
+            .alias("prev_close")
+        )
+    out = df.with_columns(exprs)
+    # 涨跌幅/振幅/涨跌额是相对量, 价格缩放后按新列重算:
+    # 不复权下除权日会显示真实跳空, 前复权下则被抹平。
+    if {"close", "prev_close"}.issubset(out.columns):
+        out = out.with_columns(
+            ((pl.col("close") - pl.col("prev_close")) / pl.col("prev_close"))
+            .alias("change_pct")
+        )
+        out = out.with_columns((pl.col("close") - pl.col("prev_close")).alias("change_amount"))
+    if {"high", "low", "prev_close"}.issubset(out.columns):
+        out = out.with_columns(
+            ((pl.col("high") - pl.col("low")) / pl.col("prev_close")).alias("amplitude")
+        )
+    return out
+
+
+def _adjust_live_row(rows: list, adjust: str, df, data_dir=None) -> list:
+    """给「实时蜡烛」补上复权缩放。
+
+    实时蜡烛由 _maybe_inject_live_candle 在 df 转成 rows 之后追加/替换, 因此躲过了
+    _apply_adjust; 它来自行情服务, 是交易所真实价(等价于不复权口径), 要按目标
+    口径再缩放一次。
+
+    判据: 仅当注入值与 df 末根不同才需要补 —— 两者相等说明今日不存在除权
+    (前复权价 == 真实价), 此时补与不补结果一致, 直接跳过可避免重复缩放。
+    """
+    if adjust == "qfq" or adjust == "none" or not rows or df.is_empty():
+        return rows
+    if adjust != "hfq":
+        return rows
+    try:
+        last = df["close"][-1]
+    except Exception:
+        return rows
+    if last is None:
+        return rows
+    try:
+        if abs(float(rows[-1].get("close") or 0) - float(last)) <= 1e-9:
+            return rows
+    except (TypeError, ValueError):
+        return rows
+
+    factor = _hfq_factor(df, data_dir)
+    if abs(factor - 1.0) <= 1e-12:
+        return rows
+    patched = dict(rows[-1])
+    for c in _ADJUST_PRICE_COLS:
+        v = patched.get(c)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            patched[c] = v * factor
+    rows[-1] = patched
+    return rows
+
+
+def _select_fields_df(df, fields: str | None):
+    """在 polars 层按白名单裁列, 让 to_dicts() 只转换真正要返回的列。
+
+    实测只做 dict 层过滤(在 to_dicts 之后)只能省掉传输体积, 拿不到耗时收益:
+    664 行 x 71 列的 to_dicts() 才是大头。放到 df 层后, 响应体与耗时一起降。
+    """
+    if not fields or not fields.strip():
+        return df
+    keep = [c.strip() for c in fields.split(",") if c.strip()]
+    keep = [c for c in keep if c in df.columns]
+    return df.select(keep) if keep else df
+
+
+def _apply_fields(resp: dict, fields: str | None) -> dict:
+    """按 fields 白名单裁剪 resp['rows'] 的列。
+
+    只在最后一步过滤 dict, 不改上游 polars 处理: 实时蜡烛注入与解密指标
+    (_attach_indicators) 都在裁剪之前完成, 因此白名单里可以只包含最终要用的列。
+    不传 fields 或白名单为空时原样返回, 保证既有调用方行为不变。
+    """
+    if not fields or not fields.strip():
+        return resp
+    keep = {c.strip() for c in fields.split(",") if c.strip()}
+    if not keep:
+        return resp
+    rows = resp.get("rows") or []
+    if rows and isinstance(rows[0], dict):
+        resp["rows"] = [{k: v for k, v in row.items() if k in keep} for row in rows]
     return resp
 
 
@@ -1066,6 +1322,122 @@ def get_minute_range(
         **base_response,
         "sessions": sessions,
         "source": "local" if sessions else "none",
+    }
+
+
+_MINUTE_PERIODS = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "90m": 90, "120m": 120}
+
+
+def _aggregate_minute(df, minutes: int):
+    """把 1 分钟 K 聚合成 N 分钟 K, 并在聚合后**重算**技术指标。
+
+    聚合口径(与通达信一致): 上午(09:30-11:30)与下午(13:00-15:00)**分别连续计数**
+    再按 N 分钟切段。这样 30 分钟 = 8 根/日、60 分钟 = 4 根/日、120 分钟 = 2 根/日,
+    与主流软件一致。90 分钟不能整除 120 分钟的半天, 按 90+30 切(半天 2 根, 全天 4 根)。
+
+    指标必须重算: 30 分钟线的 MA20 是「20 根 30 分钟」均线, 不等于任何日线取值。
+    """
+    import polars as pl
+
+    from app.indicators.pipeline import compute_indicators
+
+    # 09:30 那根是集合竞价: 项目里它不计入日 K 成交量
+    # (实测 分钟求和 - 09:30那根 == 日线 volume), 留着会让每天变成 241 根,
+    # 聚合时尾部多出一根只有 1 分钟的残缺 K(30 分钟档变成 9 根/日而非 8 根)。
+    d = (
+        df.filter(
+            ~((pl.col("datetime").dt.hour() == 9) & (pl.col("datetime").dt.minute() == 30))
+        )
+        .sort("datetime")
+        .with_columns(
+            pl.when(pl.col("datetime").dt.hour() < 12).then(0).otherwise(1).alias("_sess"),
+            pl.col("datetime").dt.date().alias("_d"),
+        )
+    )
+    d = d.with_columns((pl.int_range(pl.len()).over(["_d", "_sess"]) // minutes).alias("_g"))
+    agg_exprs = [
+        pl.col("datetime").last().alias("_dt"),
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+    ]
+    agg_exprs.extend(
+        pl.col(c).sum().alias(c) if c in ("volume", "amount") else pl.col(c).first().alias(c)
+        for c in d.columns
+        if c not in ("datetime", "open", "high", "low", "close", "_d", "_sess", "_g")
+    )
+    agg = (
+        d.group_by(["_d", "_sess", "_g"])
+        .agg(agg_exprs)
+        .sort(["_d", "_sess", "_g"])
+        .with_row_index("_i")
+    )
+    base = agg.select([
+        "_i",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        pl.col("_dt").dt.date().alias("date"),
+    ])
+    out = compute_indicators(base, assume_sorted=True)
+    # 指标管线不产出的列(如 amount)按行号补回; 行号而不是 date 做 key,
+    # 因为同一天有多根分钟 K, 用 date join 会笛卡尔爆炸。
+    extra = [c for c in agg.columns if c not in out.columns]
+    if extra:
+        out = out.join(agg.select(["_i", *extra]), on="_i", how="left")
+    # 输出用「分钟时间戳」当 x 轴标签(日线用的是 date), 故丢掉临时的 date 列
+    return out.sort("_i").drop("date", "_i").rename({"_dt": "date"})
+
+
+@router.get("/minute-k")
+def get_minute_k(
+    request: Request,
+    symbol: str = Query(..., description="标的代码"),
+    period: str = Query("30m", description="分钟周期: 5m/15m/30m/60m/90m/120m"),
+    days: int = Query(120, ge=1, le=400, description="读取最近 N 个交易日的分钟数据"),
+    fields: str | None = Query(None, description="逗号分隔的列名白名单"),
+):
+    """多分钟周期 K 线 (30/60/90/120 分钟等)。
+
+    由本地 1 分钟 K 聚合而来, 因此**依赖分钟数据是否回补**:
+    默认只拉最近 N 个交易日, 若本地分钟数据不足, 返回的行数会很少。
+    """
+    minutes = _MINUTE_PERIODS.get(period)
+    if minutes is None:
+        raise HTTPException(
+            status_code=400,
+            detail="unsupported period: {} (可选 {})".format(period, ",".join(_MINUTE_PERIODS)),
+        )
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
+    end = cn_today()
+    start = end - timedelta(days=days * 2 + 30)
+    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    base_resp = {
+        "symbol": symbol,
+        "name": stock_info.get("name"),
+        "period": period,
+        "source": "none",
+        "rows": [],
+    }
+    if minute.is_empty() or "datetime" not in minute.columns:
+        return base_resp
+    agg = _aggregate_minute(minute, minutes)
+    if agg.is_empty():
+        return base_resp
+    return {
+        **base_resp,
+        "source": "local",
+        "rows": _select_fields_df(agg, fields).to_dicts(),
     }
 
 
