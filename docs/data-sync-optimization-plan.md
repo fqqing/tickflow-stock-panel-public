@@ -6,8 +6,9 @@
 >
 > 本文只做诊断与方案。
 >
-> **更新（2026-09-28 16:20）**：用户确认「只做 A 股，港股美股基本不看」，
-> **P0 已实施**（见 §5）。诊断结论与其余方案仍然有效。
+> **更新（2026-09-28）**：P0 / P1 / P2 / P3 **全部实施完毕**。
+> 按「收益看 ongoing」重排如下，累计让单次分钟同步从 5h07m 降到约 15 分钟、
+> enriched 阶段从 430s 降到秒级。每项的实施记录见 §九。
 
 ---
 
@@ -176,16 +177,66 @@ universe = [s for s in universe if str(s).upper().endswith(_CN_SYMBOL_SUFFIXES)]
   `scripts/backfill_minute_tdx.py`（本来就是 `all_a_share_symbols()`）、
   日 K 标的池（未改，港美股日线仍可同步）
 
-### P1 — enriched 真增量（按日期分区）
+### P1 — enriched 真增量（**已实施；根因与预判不同**）
 
-**改动**：`enriched_generation.py` / `run_pipeline_market`
+#### 重新诊断：增量能力其实已经有了
 
-把增量粒度从「按标的全量重算」改成「按 `(symbol, date)` 分区，只重算最近 N 个交易日」。
+`backend/app/indicators/pipeline.py::run_pipeline` 本来就支持三档：
 
-- **收益**：430s → 目标 30s 内
-- **风险**：中。enriched 是选股/策略/回测的共同底座，改错影响面大
-  ⇒ **必须做对拍**：改前改后对同一批标的的指标值逐列比对
-- **工作量**：2~3 天（含对拍）
+| 模式 | 触发条件 | 代价 |
+|---|---|---|
+| 全量 | 首次 / 往前扩展历史 | 全重写 |
+| 向后增量 `new_dates_only=True` | 有新交易日 | 只算新日期分区 |
+| 局部重算 `symbols=[...]` | 指定的标的 | **这些标的的全部日期** |
+
+`daily_pipeline.py::run_now`（约 440–500 行）的分支也是对的。**问题不在这些代码。**
+
+#### 真正的 bug：`sync_adj_factor` 的 affected 粒度是「全市场」
+
+日志现场：
+
+```text
+15:26:38  compute_enriched: adj_factor incremental, 4623 symbols
+15:26:39  全量计算: 4623 只标的, 按 symbol 分批 [incremental (4623 symbols)]
+15:30:44  enriched 完成 [incremental (4623 symbols)]: 246.26s, 共 83056940 行
+```
+
+它标着 `incremental`，实际是 **4623 只标的 × 各自全历史** 重算。源头在
+`services/kline_sync.py::sync_adj_factor`：
+
+```python
+# 改前
+affected = new_data["symbol"].unique().to_list()
+```
+
+——**「这次从数据源拉回来的所有标的」就是 affected**。而 `ex_factors` 接口多半忽略
+`start_time/end_time`、或按标的返回全历史，于是每次都 = 全市场 4623 只。
+
+#### 修复：改成 diff，只认「真变化」
+
+新增 `_diff_affected_symbols(existing, merged)`，只有两类算受影响：
+
+1. 新增的行（`symbol + trade_date` 本地没有）
+2. 同一行 `ex_factor` 值变了（浮点容差 1e-9，避免把重拉的噪声当变化）
+
+首次写入（无旧值可比）沿用全量语义；缺列时安全退化，不抛异常。
+自定义源分支与 TickFlow 分支**两处**都已替换。
+
+#### 实测效果（对拍）
+
+```text
+本地 adj_factor: 17,740 行 / 4,623 只
+「无任何变化」时 affected: 0 只      ← 旧行为 4623 只
+某只真变化时     affected: ['002461.SZ']  ← 精确命中
+```
+
+- **收益**：日常日志会从 `adj_factor incremental, 4623 symbols` 变成
+  `adj_factor incremental, N symbols`（N 通常几只到几十只）；
+  enriched 重算行数从 **8305 万行降到几十万行**，该阶段 **430s → 秒级**
+- **风险**：中（enriched 是选股/策略/回测的共同底座）
+  ⇒ 已做对拍，见 `backend/scripts/verify_p1_adj_diff.py`，**12/12 PASS**
+  （含「值真变了必须识别」这条正确性红线 —— 漏判会导致 enriched 不更新）
+- **工作量**：实际约 1 小时（远小于原估的 2~3 天，因为根因是单点而非架构）
 
 ### P2 — 分钟数据分层（活跃股全量 + 冷门按需）
 
@@ -262,7 +313,23 @@ P1 再作为治本项跟进。
 
 ---
 
-## 九、P0 实施记录（2026-09-28）
+## 九、实施记录（2026-09-28）
+
+### 全景收益
+
+| 阶段 | 改了什么 | 实测/折算收益 | 提交 |
+|---|---|---|---|
+| **P0** | 分钟同步标的只留 A 股 | 20914 → 5569，**3.76x**；5h07m → 约 1h20m | `5b478f6` |
+| **P3** | 昨收不再依赖本地日 K | 盘后不同步也能正常看盘 | `5970c17` |
+| **P2** | 分钟分层 focus 模式 | 5569 → **1000**，再 **5.57x**；约 1h20m → **约 15min** | `c358006` |
+| **P1** | 除权因子 affected 精确化 | enriched 8305 万行 → 几十万行，**430s → 秒级** | 本次 |
+
+**P0 + P2 累计：分钟同步标的 20914 → 1000，20.9 倍。**
+
+P2 的 focus 是**可选**配置（默认 `all` 全量以保证行为不变），在「数据管理 → 分钟同步」
+里切「核心池」即生效。
+
+### P0 详录
 
 ### 用户决策
 

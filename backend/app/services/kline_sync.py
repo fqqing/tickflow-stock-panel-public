@@ -324,6 +324,43 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
     return df.select(cols).drop_nulls()
 
 
+#: ex_factor 浮点比较容差。同一因子重复拉取可能有 1e-12 级噪声,
+#: 这种不算「变化」, 否则每次同步都会把所有标的判成受影响。
+_EX_FACTOR_EPS = 1e-9
+
+
+def _diff_affected_symbols(existing: pl.DataFrame, merged: pl.DataFrame) -> list[str]:
+    """对比合并前后的除权因子表, 只返回**真正发生变化**的 symbol。
+
+    原实现用 new_data["symbol"].unique(), 即「这次从数据源拉回来的所有标的」。
+    多数 ex_factors 接口会忽略 start_time/end_time、或按标的返回全历史, 于是
+    affected 每次都是全市场(实测 4623 只) —— enriched 随即对这 4623 只做
+    「全历史重算」, 单次 8305 万行 / 430s, 是盘后管道最大的耗时来源。
+
+    改为 diff: 只有「新增的行」或「同一行 ex_factor 值变了」对应的 symbol 才算
+    受影响。日常真正发生除权的标的通常只有几只到几十只。
+    """
+    key = ["symbol", "trade_date"]
+    if existing.is_empty() or "ex_factor" not in existing.columns or "ex_factor" not in merged.columns:
+        if not existing.is_empty():
+            logger.warning("adj_factor missing ex_factor column, falling back to full affected set")
+        return merged["symbol"].unique().to_list()
+
+    before = existing.select([*key, "ex_factor"]).unique(subset=key, keep="last")
+    after = merged.select([*key, "ex_factor"]).unique(subset=key, keep="last")
+    joined = after.join(before, on=key, how="left", suffix="_old")
+    changed = joined.filter(
+        pl.col("ex_factor_old").is_null()
+        | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > _EX_FACTOR_EPS)
+    )
+    symbols = changed["symbol"].unique().to_list()
+    logger.info(
+        "adj_factor diff: %d/%d symbols truly changed (old behaviour: all pulled symbols)",
+        len(symbols), after["symbol"].n_unique(),
+    )
+    return symbols
+
+
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     capset: CapabilitySet,
                     start_time: datetime | None = None,
@@ -354,6 +391,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             )
             if new_data.is_empty():
                 return 0, []
+            # 首次写入时没有可比对的旧值, 拉回来的全部算受影响
             affected = new_data["symbol"].unique().to_list()
             factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
             out = repo.store.data_dir / factor_dir / "all.parquet"
@@ -364,6 +402,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                 merged = pl.concat([existing, new_data]).unique(
                     subset=["symbol", "trade_date"], keep="last",
                 ).sort(["symbol", "trade_date"])
+                # 只有真正新增/变更的行对应的 symbol 才需要 enriched 重算
+                affected = _diff_affected_symbols(existing, merged)
                 _atomic_write_parquet(merged, out)
                 return merged.height - before, affected
             _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
@@ -419,8 +459,9 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
 
     new_data = pl.concat(all_dfs, how="diagonal_relaxed") if len(all_dfs) > 1 else all_dfs[0]
 
-    # 提取受影响的 symbol 列表(合并前)
-    affected = new_data["symbol"].unique().to_list()
+    # 注意: 受影响的 symbol 在下面与本地已有数据 diff 之后才确定,
+    # 不能在这里直接用 new_data["symbol"].unique() —— 那等于全市场
+    # (见 _diff_affected_symbols 的说明)。
 
     factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
     out = repo.store.data_dir / factor_dir / "all.parquet"
@@ -432,6 +473,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
         merged = pl.concat([existing, new_data]).unique(
             subset=["symbol", "trade_date"], keep="last",
         ).sort(["symbol", "trade_date"])
+        affected = _diff_affected_symbols(existing, merged)
         _atomic_write_parquet(merged, out)
         added = merged.height - before
         logger.info("adj_factor merged: %d total (+%d new), %d/%d symbols",
@@ -440,7 +482,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     else:
         _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
         logger.info("adj_factor synced: %d rows (%d symbols)", new_data.height, len(symbols))
-        return new_data.height, affected
+        return new_data.height, new_data["symbol"].unique().to_list()
 
 
 # ===== 分钟 K 同步 =====
