@@ -787,9 +787,25 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         logger.warning("refresh view %s failed: %s", name, e)
 
 
+# A 股标的后缀 (沪深北)。分钟 K 只同步 A 股: instruments.parquet 里 73% 是
+# 美股(.US 12439) 与港股(.HK 2906), 数据源对非 A 股返回空, 请求了也不入库。
+_CN_SYMBOL_SUFFIXES: tuple[str, ...] = (".SH", ".SZ", ".BJ")
+
+
 def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
-    """分钟 K 同步标的 — 与日K共用同一标的池。"""
-    return _resolve_universe(capset, repo)
+    """分钟 K 同步标的 — 仅 A 股 (沪深北), 与日K标的池不同。
+
+    历史行为是直接复用 _resolve_universe。free 兜底路径会并入
+    instruments.parquet 全量 20914 只 (其中 .US/.HK 占 73%), 但数据源对
+    非 A 股返回空, 实测入库仍只有 A 股 5568 只 (data/kline_minute 后缀分布
+    为 .SZ/.SH/.BJ, 无 .US/.HK)。请求量 20914 -> 5569 后, 单次同步耗时由
+    实测 5h07m 线性估算降到 ~1h20m, 且入库数据零损失。
+
+    ETF 代码同为 .SH/.SZ 后缀, 不受影响 (沿用既有的 ETF 保留行为)。
+    指数由 _resolve_universe 内部剔除, 此处无需重复处理。
+    """
+    universe = _resolve_universe(capset, repo)
+    return [s for s in universe if str(s).upper().endswith(_CN_SYMBOL_SUFFIXES)]
 
 
 def _refresh_instruments_view(repo: KlineRepository) -> None:

@@ -1672,6 +1672,11 @@ async def sync_minute(request: Request):
             # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
             index_set = repo.get_index_symbol_set()
             universe = [s for s in universe if s not in index_set]
+            # 只同步 A 股: instruments 全量里 73% 是美股(.US)/港股(.HK),
+            # 数据源对非 A 股返回空, 请求了也不入库, 白白多花 3.76 倍时间
+            from app.jobs.daily_pipeline import _CN_SYMBOL_SUFFIXES
+
+            universe = [s for s in universe if str(s).upper().endswith(_CN_SYMBOL_SUFFIXES)]
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
             days = override_days if override_days else get_minute_sync_days()
