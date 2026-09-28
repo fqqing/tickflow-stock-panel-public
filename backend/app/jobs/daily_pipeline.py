@@ -792,6 +792,82 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
 _CN_SYMBOL_SUFFIXES: tuple[str, ...] = (".SH", ".SZ", ".BJ")
 
 
+#: focus 模式下从本地成交额榜补充的活跃股数量。
+#: 与 CSI300/CSI500/SSE50 的并集去重后通常在 1000~1500 只。
+_MINUTE_FOCUS_TOP_N = 1000
+
+
+def _top_active_symbols(repo, top_n: int = _MINUTE_FOCUS_TOP_N) -> set[str]:
+    """本地 enriched 最新交易日成交额 TOP N — focus 模式的本地兜底。
+
+    TickFlow 的 CSI300/CSI500/SSE50 池要调 universes API, 没配 TickFlow key 的
+    环境一台都取不到(本机 data/pools 就是空的)。成交额榜完全基于本地数据,
+    任何环境都算得出, 而且按成交额排比按指数成份更贴合「活跃股」的定义。
+
+    实测: max(date) 0.62s + TOP1000 0.26s, 相对分钟同步本身可以忽略。
+    """
+    if repo is None or top_n <= 0:
+        return set()
+    try:
+        pattern = f"{repo.store.data_dir.as_posix()}/kline_daily_enriched/**/*.parquet"
+        latest = repo.db.execute(
+            f"SELECT max(date) FROM read_parquet('{pattern}')"
+        ).fetchone()
+        if not latest or latest[0] is None:
+            return set()
+        rows = repo.db.execute(
+            f"SELECT symbol FROM read_parquet('{pattern}') "
+            f"WHERE date = DATE '{latest[0]}' AND amount > 0 "
+            f"ORDER BY amount DESC LIMIT {int(top_n)}"
+        ).fetchall()
+    except Exception as e:
+        logger.warning("top active symbols lookup failed: %s", e)
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def apply_minute_scope(universe: list[str], repo=None) -> list[str]:
+    """按 preferences.minute_sync_scope 收窄分钟同步范围。
+
+    all   — 原样返回(A股全量, 约 5569 只), 默认
+    focus — 沪深300 + 中证500 + 上证50 + 自选 + 本地成交额 TOP1000 的并集
+
+    TickFlow 池只是锦上添花: 取不到也没关系, 成交额榜保证 focus 始终可用。
+
+    两级保险, 任何一级拿不到就退回原列表:
+      1) focus 池整体为空(本地没有 enriched / 接口也异常)
+      2) focus 池与 universe 无交集
+    宁可多拉一些, 也不能因为配置或某个池加载失败就「一只都不同步」。
+    """
+    if _prefs.get_minute_sync_scope() != "focus":
+        return universe
+
+    focus: set[str] = set()
+    # watchlist 也一并保护: 它读本地文件, 损坏/缺文件时会抛,
+    # 若不拦就会让整个分钟同步直接失败。
+    for pool_id in ("watchlist", "CSI300", "CSI500", "SSE50"):
+        try:
+            focus.update(get_pool(pool_id))
+        except Exception as e:
+            logger.warning("minute focus pool %s unavailable: %s", pool_id, e)
+    # 本地成交额榜兜底: TickFlow 池不可用时 focus 依然有意义
+    local_active = _top_active_symbols(repo)
+    if local_active:
+        focus |= local_active
+    elif not focus:
+        logger.warning("minute scope=focus resolved to empty pool, fallback to full universe")
+        return universe
+
+    narrowed = [s for s in universe if s in focus]
+    if not narrowed:
+        logger.warning(
+            "minute scope=focus matched none of %d symbols, fallback to full universe", len(universe)
+        )
+        return universe
+    logger.info("minute sync scope=focus: %d / %d symbols", len(narrowed), len(universe))
+    return narrowed
+
+
 def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
     """分钟 K 同步标的 — 仅 A 股 (沪深北), 与日K标的池不同。
 
@@ -805,7 +881,8 @@ def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
     指数由 _resolve_universe 内部剔除, 此处无需重复处理。
     """
     universe = _resolve_universe(capset, repo)
-    return [s for s in universe if str(s).upper().endswith(_CN_SYMBOL_SUFFIXES)]
+    cn_symbols = [s for s in universe if str(s).upper().endswith(_CN_SYMBOL_SUFFIXES)]
+    return apply_minute_scope(cn_symbols, repo)
 
 
 def _refresh_instruments_view(repo: KlineRepository) -> None:

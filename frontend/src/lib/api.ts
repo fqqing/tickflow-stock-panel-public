@@ -1686,6 +1686,8 @@ export interface Preferences {
   minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
+  /** 分钟同步范围: all=A股全量(~5569) / focus=核心池沪深300+中证500+上证50+自选(~1000) */
+  minute_sync_scope?: 'all' | 'focus'
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
@@ -1861,13 +1863,14 @@ export const api = {
         }),
       },
     ),
-  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number, scope?: 'all' | 'focus') =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
       body: JSON.stringify({
         minute_sync_enabled: enabled,
         minute_sync_days: days,
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
+        ...(scope != null ? { minute_sync_scope: scope } : {}),
       }),
     }),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>

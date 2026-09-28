@@ -205,6 +205,20 @@ def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
 
 
+def get_minute_sync_scope() -> str:
+    """分钟 K 同步范围。
+
+    all   — A股全量(约 5569 只), 默认, 与历史行为一致
+    focus — 沪深300 + 中证500 + 上证50 + 自选股的并集(约 1000 只),
+            比全量快约 5 倍; 范围外的标的打开个股页时走单只按需拉取
+
+    冷门股的分钟数据价值低但要付同样的拉取成本, focus 用于把同步时间压到
+    「盘前跑完也不影响开盘」的量级。
+    """
+    scope = str(load().get("minute_sync_scope", "all") or "all").strip().lower()
+    return scope if scope in ("all", "focus") else "all"
+
+
 def get_minute_sync_segment_days() -> int:
     """分钟 K 拉取的单段大小(交易日)。默认 20,范围 [5, 30]。
 

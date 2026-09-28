@@ -12,8 +12,8 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
     queryFn: api.preferences,
   })
   const update = useMutation({
-    mutationFn: ({ enabled, days, segmentDays }: { enabled: boolean; days: number; segmentDays?: number }) =>
-      api.updateMinuteSync(enabled, days, segmentDays),
+    mutationFn: (p: { enabled: boolean; days: number; segmentDays?: number; scope?: 'all' | 'focus' }) =>
+      api.updateMinuteSync(p.enabled, p.days, p.segmentDays, p.scope),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
@@ -21,11 +21,14 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
   const enabled = prefs.data?.minute_sync_enabled ?? false
   const days = prefs.data?.minute_sync_days ?? 5
   const segmentDays = prefs.data?.minute_sync_segment_days ?? 20
+  const scope = prefs.data?.minute_sync_scope ?? 'all'
   const [localDays, setLocalDays] = useState(days)
   const [localSegment, setLocalSegment] = useState(segmentDays)
+  const [localScope, setLocalScope] = useState<'all' | 'focus'>(scope)
 
   useEffect(() => { setLocalDays(days) }, [days])
   useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])
+  useEffect(() => { setLocalScope(scope) }, [scope])
 
   const handleToggle = () => {
     if (!hasMinuteCap) return
@@ -43,6 +46,13 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
     const clamped = Math.max(5, Math.min(30, v))
     setLocalSegment(clamped)
     update.mutate({ enabled, days: localDays, segmentDays: clamped })
+  }
+
+  // 同步范围: focus 只拉核心池(约 1000 只), 比全 A 股(约 5569 只)快约 5 倍;
+  // 范围外的标的打开个股页时走单只按需拉取, 看盘不受影响。
+  const setScope = (v: 'all' | 'focus') => {
+    setLocalScope(v)
+    update.mutate({ enabled, days: localDays, scope: v })
   }
 
   // 清空分钟K数据 (二次确认)
@@ -144,6 +154,39 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
       </div>
       <div className="text-[10px] text-muted leading-relaxed -mt-1">
         每段拉完即写盘,避免内存堆积。越小越省内存但越慢,默认 20 平衡。
+      </div>
+
+      {/* 同步范围: 全A股(~5569) vs 核心池(~1000)。切 focus 后同步快约 5 倍,
+          范围外标的打开个股页时走单只按需拉取。 */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-foreground font-medium">同步范围</span>
+          <span className="text-[10px] text-muted px-1 py-px rounded bg-accent/8 text-accent/80">省时</span>
+        </div>
+        <div className="flex items-center gap-1">
+          {([
+            { key: 'all' as const, label: '全A股' },
+            { key: 'focus' as const, label: '核心池' },
+          ]).map(opt => (
+            <button
+              key={opt.key}
+              onClick={() => setScope(opt.key)}
+              disabled={!hasMinuteCap}
+              className={`px-2 py-1 rounded-btn text-[11px] transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed ${
+                localScope === opt.key
+                  ? 'bg-accent/90 text-foreground'
+                  : 'bg-elevated text-secondary hover:bg-border/50'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="text-[10px] text-muted leading-relaxed -mt-1">
+        {localScope === 'focus'
+          ? '沪深300 + 中证500 + 上证50 + 自选, 约 1000 只, 同步快约 5 倍。范围外标的打开个股页时按需拉取。'
+          : '全部 A 股约 5569 只。若盘后同步太慢, 可切「核心池」。'}
       </div>
       </div>
 

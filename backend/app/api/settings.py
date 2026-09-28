@@ -391,6 +391,9 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
+    # 同步范围: all=A股全量 / focus=核心池(沪深300+中证500+上证50+自选)。
+    # None 表示不修改现有值。
+    minute_sync_scope: str | None = None
 
 
 class DataProvidersIn(BaseModel):
@@ -473,6 +476,7 @@ def get_preferences() -> dict:
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
+        "minute_sync_scope": preferences.get_minute_sync_scope(),
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
@@ -781,11 +785,16 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     }
     if req.minute_sync_segment_days is not None:
         updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
+    if req.minute_sync_scope is not None:
+        scope = str(req.minute_sync_scope).strip().lower()
+        # 非法值一律当 all: 宁可多拉也不要因为配置写错就一只不同步
+        updates["minute_sync_scope"] = scope if scope in ("all", "focus") else "all"
     preferences.save(updates)
     return {
         "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
+        "minute_sync_scope": preferences.get_minute_sync_scope(),
     }
 
 
