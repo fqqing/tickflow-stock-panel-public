@@ -98,6 +98,9 @@ _BJ_SUFFIX = ".BJ"
 
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 
+#: 这几个代码段的分钟 vol 单位是「股」而非「手」(见 parse_bars 的量纲说明)。
+_VOL_IN_SHARES_PREFIXES = ("688", "689")
+
 
 def _ssl_context() -> ssl.SSLContext:
     """弱化校验的 SSL context。
@@ -161,7 +164,14 @@ def _to_float(raw: object) -> float | None:
 
 
 def parse_bars(rows: list[list], symbol: str) -> list[dict]:
-    """原始行 -> 内部 schema(dict 列表)。amount 由 vol x 100 x close 估算。"""
+    """原始行 -> 内部 schema(dict 列表)。amount 由 vol x 100 x close 估算。
+
+    ⚠️ 量纲陷阱: 科创板(688xxx)的 vol 单位是**股**, 其余板块是**手**。
+    实测 2026-09-28 分钟合计 / 日 K volume 的比值:
+        600519.SH(主板) = 1.0   300750.SZ(创业板) = 1.0   688788.SH(科创板) = 100.0
+    不处理的话科创板约 500 只标的的分钟 volume / amount 会整体放大 100 倍。
+    """
+    vol_div = 100.0 if symbol[:3] in _VOL_IN_SHARES_PREFIXES else 1.0
     out: list[dict] = []
     for row in rows:
         if not isinstance(row, (list, tuple)) or len(row) < 6:
@@ -189,10 +199,10 @@ def parse_bars(rows: list[list], symbol: str) -> list[dict]:
                 "high": high_,
                 "low": low_,
                 "close": close_,
-                "volume": vol,
+                "volume": vol / vol_div,
                 # 腾讯不给成交额(第 7 位是换手率基点, 不是 amount)。
                 # 用 成交量(手) x 100 x 收盘价 估算, 实测与本地日 K amount 相对差 ~0.06%。
-                "amount": vol * 100.0 * close_,
+                "amount": vol / vol_div * 100.0 * close_,
             }
         )
     return out
