@@ -333,6 +333,68 @@ def _get_previous_closes(
     return result
 
 
+def _realtime_prev_close(symbol: str) -> float | None:
+    """从实时快照取昨收, 用于本地日K未同步时的兜底。
+
+    「盘后没跑同步, 第二天开盘就看不了」的症结之一: _get_previous_closes 只读
+    本地 kline_daily, 本地停在更早交易日时昨收为 None, 分时图的涨跌幅与参考
+    基准全部失效。实时快照直连数据源, 不依赖本地历史, 是最可靠的兜底来源。
+
+    口径差异: 本地值是前复权 close, 快照值通常是未复权昨收。除权日两者会有偏
+    差, 但「有近似基准」远好于「完全没有」; 且本函数只在本地缺失时才被调用。
+    """
+    try:
+        from app.data_providers.custom import loader as custom_loader
+
+        provider = custom_loader.get_provider("stocksdk")
+        rows = provider.get_depth([symbol])
+    except Exception as e:
+        logger.debug("realtime prev_close unavailable for %s: %s", symbol, e)
+        return None
+    if not rows:
+        return None
+
+    target = str(symbol).upper()
+    row = rows[0]
+    for candidate in rows:
+        if str(candidate.get("symbol", "")).upper() == target:
+            row = candidate
+            break
+    try:
+        value = float(row.get("prev_close"))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _prev_close_with_fallback(
+    repo,
+    symbol: str,
+    trade_dates: list[date],
+    asset_type: str,
+) -> tuple[dict[date, float | None], dict[date, str]]:
+    """取昨收并在本地缺失时用实时快照兜底。
+
+    返回 (值字典, 来源字典)。来源取值:
+      local    — 本地日K算出(前复权, 最准)
+      realtime — 本地缺失, 用实时快照兜底(未复权口径)
+      none     — 两者都没有, 调用方应按「数据未就绪」处理而不是当成 0
+    """
+    local = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    values: dict[date, float | None] = {}
+    sources: dict[date, str] = {}
+    for trade_date in trade_dates:
+        value = local.get(trade_date)
+        if value is not None:
+            values[trade_date] = value
+            sources[trade_date] = "local"
+            continue
+        fallback = _realtime_prev_close(symbol)
+        values[trade_date] = fallback
+        sources[trade_date] = "realtime" if fallback is not None else "none"
+    return values, sources
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -1491,12 +1553,13 @@ def get_minute(
             asset_type,
             stock_name,
         )
-        prev_close = _get_previous_closes(
+        _pc_map, _pc_src = _prev_close_with_fallback(
             repo,
             symbol,
             [trade_date],
             asset_type,
-        ).get(trade_date)
+        )
+        prev_close = _pc_map.get(trade_date)
         return {
             "symbol": symbol,
             "name": stock_name,
@@ -1507,14 +1570,16 @@ def get_minute(
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
+            "prev_close_source": _pc_src.get(trade_date, "none"),
         }
 
-    prev_close = _get_previous_closes(
+    _pc_map, _pc_src = _prev_close_with_fallback(
         repo,
         symbol,
         [trade_date],
         asset_type,
-    ).get(trade_date)
+    )
+    prev_close = _pc_map.get(trade_date)
     price_limit = _get_price_limit_info(
         repo,
         symbol,
@@ -1554,6 +1619,7 @@ def get_minute(
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
+            "prev_close_source": _pc_src.get(trade_date, "none"),
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
@@ -1568,6 +1634,7 @@ def get_minute(
         "asset_type": asset_type,
         "price_limit": price_limit,
         "prev_close": prev_close,
+        "prev_close_source": _pc_src.get(trade_date, "none"),
     }
 
 

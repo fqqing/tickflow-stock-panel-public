@@ -2228,6 +2228,8 @@ export const api = {
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
+      /** 昨收来源: local=本地日K(前复权) / realtime=实时快照兜底 / none=都拿不到 */
+      prev_close_source?: 'local' | 'realtime' | 'none'
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),

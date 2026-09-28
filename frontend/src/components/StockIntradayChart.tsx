@@ -51,6 +51,10 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  // 昨收优先用 /kline/minute 自己算好的: 后端在本地日K缺失时会用实时快照兜底,
+  // 而父组件传入的 prevClose 是按本地日K rows 推算的 —— 盘后没同步时后者为
+  // undefined, 导致分时图完全没有涨跌幅基准线。这里有值优先, 没有再回落。
+  const effectivePrevClose = minute.data?.prev_close ?? prevClose
   // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
   // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
   const sourceIsNone = minute.data?.source === 'none'
@@ -123,7 +127,7 @@ export function StockIntradayChart({
         <EChartsIntraday
           data={minuteRows}
           height={height}
-          prevClose={prevClose}
+          prevClose={effectivePrevClose}
           date={date}
           priceLimit={minute.data?.price_limit ?? undefined}
           onPriceHover={onPriceHover}
