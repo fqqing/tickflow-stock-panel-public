@@ -826,6 +826,108 @@ python backend/scripts/verify_source_units.py --source stocksdk --dataset realti
 
 ---
 
+## 十五、实时行情源选型与腾讯 qt 接入（2026-09-29）
+
+### 15.1 症状
+
+「今天启动项目发现实时行情还是不管用」。开关是开的（`realtime_quotes_enabled: true`），
+但页面价格不动 / 日志报无行情。
+
+### 15.2 根因（三条叠加）
+
+1. **唯一声明 `realtime` 的数据源插件是 `stocksdk`（东财）**，而东财链路已在分钟场景
+   确认失效（§十），实时快照同样不可用。
+2. **内置 `tickflow` 的实时走付费端点**：`app/tickflow/client.py::get_paid_realtime_client()`
+   在没有 key 时直接返回 `None`，`quote_service` 打日志「实时行情拉取失败:未配置付费服务器 API Key」。
+3. **档位门槛**：`quote_service.realtime_mode()` 在 `realtime_data_provider == "tickflow"`
+   时按档位判定 —— 无 key 即 `tier=none` → `mode=none` → `is_realtime_allowed()=False`
+   → 设置页保存开关时被**强制回弹为 false**。
+
+### 15.3 关键发现：选第三方源可绕开档位
+
+```python
+# backend/app/services/quote_service.py:466
+@classmethod
+def realtime_mode(cls) -> str:
+    if preferences.get_realtime_data_provider() != "tickflow":
+        return "full_market"      # ← 不看档位, 直接全市场
+    tier = cls._current_tier()
+    ...
+```
+
+即：**只要把「实时行情数据源」选成任何非 tickflow 的源，就不再受 TickFlow 档位限制**，
+无付费 key 也能开全市场实时。此前唯一的非 tickflow 选项是 stocksdk（已死），所以这条路
+实际上是断的 —— 补一个可用的免费源即可打通。
+
+### 15.4 免费实时源横向实测（2026-09-29 收盘后）
+
+| 源 | 端点 | 结论 |
+|---|---|---|
+| **腾讯 qt** | `qt.gtimg.cn/q=sh600519,...` | ✅ **采用**。0.13s/批，批量 500 只仍 200，覆盖沪深+北交所+ETF+指数，零鉴权 |
+| 新浪 | `hq.sinajs.cn/list=` | 可用但需 Referer、字段少、分页拿全市场很慢，作为次选 |
+| 东财 | `push2.eastmoney.com` | ❌ 已封 IP（§十 实测，秒级 BLOCKED） |
+| Tushare | `api.tushare.pro` | ❌ 实时需单独付费，不在积分体系内 |
+| pytdx / mootdx | 通达信协议 | ❌ 2026-09-10 起服务端改协议，已被拒 |
+
+腾讯 qt 实测（`backend/app/plugins/tencent/provider.py`）：
+
+| 项目 | 结果 |
+|---|---|
+| 全市场（7300 只 = A 股 5569 + ETF 1731） | **1.11s**，返回 7244 行，覆盖 **99.2%** |
+| 批量上限 | 50/100/200/500 只均 200；**1000 只 → HTTP 414**（URI 过长）⇒ 取 100 只/批 |
+| 北交所 | ✅ `bj920002` 有数据（与 mkline 不同，mkline 不支持北交所） |
+| 指数 | ✅ `sh000001` / `sz399001` / `sh000300` |
+| ETF | ✅ `sh510300` / `sz159915` / `sh588000` |
+| 成交额 | ✅ 直接提供（万元），不必像 mkline 那样估算 |
+
+### 15.5 量纲坑（与分钟同源）
+
+腾讯 qt 对 **688/689 的 `vol` 单位是「股」**，其余板块是「手」。实测比值
+`amount/(volume*100)/close`：688981 = **0.0100**、689009 = **0.0101**，其余 ≈ 1.000。
+已在 `parse_quote_line` 用 `_VOL_IN_SHARES_PREFIXES` 修正。
+
+其余换算：amount 万元→元 `*10000`；`change_pct` / `amplitude` / `turnover_rate`
+百分数→小数 `/100`（后者 `quote_service._build_quote_extra` 会再 `*100` 存百分数）。
+
+自检（§十四 的脚本，本次同时修了它的两处盲区，见 15.7）：
+
+```
+python backend/scripts/verify_source_units.py --source tencent --dataset realtime --limit 60
+→ 14 个板块全部 OK（含 688 / 689 / 920），全局中位 1.0004
+```
+
+负向验证（清空 `_VOL_IN_SHARES_PREFIXES` 模拟漏修）：**精确 FAIL 688 与 689**，
+且全局中位仍是 0.9996 —— 又一次验证「只看聚合值会漏报」。
+
+### 15.6 切换方式
+
+`data/user_data/preferences.json`：
+
+```json
+"realtime_quotes_enabled": true,
+"realtime_data_provider": "tencent"
+```
+
+或在设置页 → 数据源 → 「实时行情数据源」选「腾讯行情(分钟K+实时)」。
+改 provider **必须重启后端**（插件能力在启动时注册），改开关本身可热重读。
+
+注意：实时快照需要**本地标的维表**（`data/instruments/*.parquet`）来枚举代码 ——
+qt 必须显式传代码清单，不像东财 `batch.cn` 那样一次给全市场。维表为空时
+provider 会告警并返回空。
+
+### 15.7 本次顺带修掉的自检脚本盲区
+
+`backend/scripts/verify_source_units.py`：
+
+1. `get_realtime` 调用签名写成 `get_realtime(symbols=...)`，而项目契约是**无参**
+   全市场 ⇒ 原先一跑就 TypeError。改为 `inspect.signature` 判定后回退无参 + 按抽样过滤。
+2. `check_frame` 用 `close` 列做价格基准，而 realtime 行契约用 `last_price`
+   ⇒ **核心的量纲检查被整段静默跳过**（表现为「全部通过」的假绿灯）。已加归一化。
+3. `turnover_rate` 判定不分数据集：realtime 入口契约是**小数**，daily/minute 是百分数，
+   一刀切会让 realtime 永远 FAIL。已按 dataset 区分。
+
+---
+
 ## 八、附：关键代码位置索引
 
 | 关注点 | 位置 |

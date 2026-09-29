@@ -164,6 +164,11 @@ def check_frame(df: pl.DataFrame, dataset: str) -> int:
         print(f"  [FAIL] 返回缺少必需列: {sorted(missing)}")
         return 1
 
+    # realtime 的行契约用 last_price 而不是 close。不归一化的话下面第 2) 项的
+    # 核心量纲检查会被整段跳过(静默放行) —— 自检脚本自身的盲区等于漏报。
+    if "close" not in df.columns and "last_price" in df.columns:
+        df = df.with_columns(pl.col("last_price").alias("close"))
+
     print(f"  返回 {df.height} 行 / {df['symbol'].n_unique()} 只")
     failures = 0
 
@@ -244,18 +249,52 @@ def check_frame(df: pl.DataFrame, dataset: str) -> int:
                 print(f"  [OK]   change_pct 为小数口径 (max={mx:.4f})")
 
     # ---- 4) turnover_rate 百分数 vs 小数 ----
+    # ⚠️ 口径随数据集不同, 不能一刀切:
+    #   daily/minute -> 落盘即百分数 (5.0 = 5%)
+    #   realtime     -> **入口契约是小数** (0.05 = 5%), quote_service._build_quote_extra
+    #                   会再 *100 存成百分数。若这里按百分数返, 换手率会被放大 100 倍。
     if "turnover_rate" in df.columns:
         vals = df["turnover_rate"].drop_nulls()
         if vals.len():
             med = float(vals.median())
-            if med is not None and med < 0.01:
+            if med is None:
+                pass
+            elif dataset == "realtime":
+                if med > 1.0:
+                    print(f"  [FAIL] turnover_rate 疑似百分数口径 (中位={med:.3f}) "
+                          "-- realtime 入口约定为小数 (0.05 = 5%)")
+                    failures += 1
+                else:
+                    print(f"  [OK]   turnover_rate 为小数口径 (中位={med:.5f})")
+            elif med < 0.01:
                 print(f"  [FAIL] turnover_rate 疑似小数口径 (中位={med:.5f}) "
                       "-- 内部约定应为百分数")
                 failures += 1
-            elif med is not None:
+            else:
                 print(f"  [OK]   turnover_rate 为百分数口径 (中位={med:.3f}%)")
 
     return failures
+
+
+def _fetch_realtime(pv, symbols: list[str]) -> pl.DataFrame:
+    """实时快照。provider 契约以**无参** get_realtime() 为主(全市场)。
+
+    无参 provider 拉全市场后再按抽样清单过滤 —— 否则 60 只抽样会被 5500 行全市场
+    结果淹没, 失去抽样意义(也更慢)。接受 symbols 的 provider 直接按码单拉。
+    """
+    import inspect
+
+    getter = pv.get_realtime
+    try:
+        takes_symbols = "symbols" in inspect.signature(getter).parameters
+    except (TypeError, ValueError):
+        takes_symbols = False
+    if takes_symbols:
+        rows = getter(symbols=symbols)
+    else:
+        want = set(symbols)
+        rows = [r for r in (getter() or []) if str(r.get("symbol")) in want]
+    return pl.DataFrame(rows or [])
 
 
 def run(args: argparse.Namespace) -> int:
@@ -291,7 +330,7 @@ def run(args: argparse.Namespace) -> int:
         elif args.dataset == "daily":
             df = pv.get_daily(symbols, start, end, "stock")
         else:
-            df = pv.get_realtime(symbols=symbols)
+            df = _fetch_realtime(pv, symbols)
     except Exception as exc:
         print(f"[FAIL] provider 抛异常: {type(exc).__name__}: {exc}")
         return 1
