@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.market_time import CN_TZ
+from app.market_time import CN_TZ, cn_today
 from app.services.data_integrity import (
     AUTO_REPAIR_MAX_LAG_DAYS,
     IntegrityIssue,
@@ -50,7 +50,7 @@ def _recent_weekdays(anchor: date, count: int) -> list[date]:
     return days
 
 
-TODAY = datetime.now(CN_TZ).date()
+TODAY = cn_today()
 FRIDAY, THURSDAY = _recent_weekdays(TODAY, 2)
 
 
@@ -423,7 +423,7 @@ def test_boot_check_launches_repair_within_window(tmp_path, monkeypatch):
         lambda state, day, reason: (launched.append(day) or ("job-x", True)),
     )
 
-    real_today = datetime.now(CN_TZ).date()
+    real_today = cn_today()
     probe = real_today - timedelta(days=1)
     while probe.weekday() >= 5:
         probe -= timedelta(days=1)
@@ -462,7 +462,7 @@ def test_pipeline_self_heals_snapshot_day(tmp_path, monkeypatch):
     from app.services import instrument_sync, kline_sync
     from app.tickflow.repository import DataStore, KlineRepository
 
-    today = datetime.now(CN_TZ).date()
+    today = cn_today()
     yesterday = today - timedelta(days=1)
     while yesterday.weekday() >= 5:
         yesterday -= timedelta(days=1)

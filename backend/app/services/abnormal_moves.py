@@ -22,7 +22,6 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 import polars as pl
@@ -170,7 +169,8 @@ def build_overview(
 
     bench_rt = _bench_rt_pct(quote_service) if quote_service is not None else 0.0
     # enriched 已含今日收盘 (盘后已同步) 时, 今日涨跌已计入历史偏离, 不再叠加
-    includes_today = cache_date is not None and cache_date >= date.today().isoformat()
+    from app.market_time import cn_today
+    includes_today = cache_date is not None and cache_date >= cn_today().isoformat()
 
     out_rows: list[dict[str, Any]] = []
     for symbol, base in hist_rows.items():

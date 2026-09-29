@@ -68,14 +68,18 @@ def _quote_ts_max_ms(part_dir: Path) -> int | None:
     """读单个日期分区的 max(quote_ts); 列不存在/全 null/无统计 → None。
 
     优先走 parquet 元数据 row-group statistics (不解压数据页),
-    statistics 缺失时回退 polars 列扫描。
+    再尝试 polars 列扫描单个文件; 若全部失败, 最后扫描整个分区。
+
+    不同平台(polars/rust parquet writer vs pyarrow reader)对 statistics
+    的写入/读取行为存在差异, 多层回退保证跨平台一致性。
     """
     import pyarrow.parquet as pq
 
-    candidates: list[int | None] = []
     files = sorted(part_dir.glob("*.parquet"))
     if not files:
         return None
+
+    candidates: list[int] = []
     for path in files:
         try:
             meta = pq.read_metadata(path)
@@ -97,11 +101,27 @@ def _quote_ts_max_ms(part_dir: Path) -> int | None:
                     .collect()
                     .item()
                 )
-            candidates.append(file_max)
+            if file_max is not None:
+                candidates.append(file_max)
         except Exception as e:  # noqa: BLE001
-            logger.debug("quote_ts scan skipped %s: %s", path, e)
-    values = [v for v in candidates if v is not None]
-    return max(values) if values else None
+            logger.debug("quote_ts metadata scan skipped %s: %s", path, e)
+
+    if candidates:
+        return max(candidates)
+
+    # 元数据/单文件扫描均未产出有效值 → 扫描整个分区作为最后手段
+    try:
+        value = (
+            pl.scan_parquet(str(part_dir / "*.parquet"))
+            .select(pl.col("quote_ts").max())
+            .collect()
+            .item()
+        )
+        if value is not None:
+            return int(value)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("quote_ts partition scan skipped %s: %s", part_dir, e)
+    return None
 
 
 def _part_mtime(part_dir: Path) -> datetime | None:

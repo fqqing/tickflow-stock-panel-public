@@ -14,6 +14,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -23,6 +24,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import run_pipeline, run_pipeline_market
+from app.market_time import cn_today
 from app.services import (
     index_sync,
     industry_sync,
@@ -186,7 +188,7 @@ def run_now(
     repo: KlineRepository,
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
-    override_start_date: _date | None = None,
+    override_start_date: date | None = None,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
@@ -233,7 +235,7 @@ def run_now(
     #   无任何数据 → batch K-line API 拉首次 1 年
     from datetime import date as _date, timedelta as _td, datetime as _dt
     latest_daily = repo.latest_daily_date()
-    today = _date.today()
+    today = cn_today()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
 

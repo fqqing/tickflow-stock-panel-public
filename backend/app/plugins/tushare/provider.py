@@ -69,7 +69,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -77,6 +77,7 @@ import polars as pl
 
 from app.data_providers.custom.provider import _token_from_env
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
+from app.market_time import cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,7 @@ def _pace() -> None:
 
 def _recent_open_dates(days_back: int = 20) -> list[str]:
     """返回最近 ``days_back`` 天内的开市日, **降序** (最新在前)。"""
-    today = date.today()
+    today = cn_today()
     start = today - timedelta(days=days_back)
     key = f"{start.isoformat()}_{today.isoformat()}"
     if key in _CAL_CACHE:
@@ -643,7 +644,7 @@ def _collect_per_symbol(
 
 
 def _report_window() -> tuple[str, str]:
-    today = date.today()
+    today = cn_today()
     return f"{today.year - _REPORT_YEARS}0101", today.strftime("%Y%m%d")
 
 

@@ -4,10 +4,11 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.services import industry_sync
 
 
@@ -49,7 +50,7 @@ def test_sync_writes_long_table_with_as_of(tmp_path, monkeypatch):
     for col in industry_sync.INDUSTRY_COLUMNS:
         assert col in df.columns
     assert "as_of" in df.columns
-    assert df["as_of"].max() == date.today()
+    assert df["as_of"].max() == cn_today()
     # 一只票可以命中多个板块 —— 这是刻意的(东财板块分层), 不能被去重掉。
     assert df["symbol"].n_unique() == 2
     assert df["board_code"].n_unique() == 2
@@ -93,7 +94,7 @@ def test_sync_refreshes_when_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(industry_sync, "_fetch_via_provider", lambda: _ok_payload())
     industry_sync.sync_industry_members(tmp_path)
 
-    stale = date.today() - timedelta(days=industry_sync.INDUSTRY_REFRESH_DAYS + 1)
+    stale = cn_today() - timedelta(days=industry_sync.INDUSTRY_REFRESH_DAYS + 1)
     # 手动把 as_of 改旧, 模拟表放了一段时间。
     out = industry_sync.industry_members_path(tmp_path)
     (

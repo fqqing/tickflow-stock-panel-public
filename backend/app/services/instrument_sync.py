@@ -8,11 +8,11 @@ Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
 from __future__ import annotations
 
 import logging
-from datetime import date
 from pathlib import Path
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ def sync_instruments(data_dir: Path, markets: list[str] | None = None) -> int:
         return 0
 
     df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,7 @@ from app.indicators.pipeline import (
     benchmark_momentum_today,
     load_benchmark_momentum,
 )
+from app.market_time import cn_today
 from app.services.abnormal_moves import (
     _hist_cache,
     _hist_cache_lock,
@@ -105,7 +106,7 @@ def test_benchmark_momentum_today_math(tmp_path) -> None:
 
 def test_benchmark_momentum_today_excludes_today_rows(tmp_path) -> None:
     # 指数监控盘写入的今日行不能当昨收 (否则实时涨跌被重复叠加)
-    today = date.today()
+    today = cn_today()
     rows = [("000001.SH", d, 10.0 + i) for i, d in enumerate(_BENCH_DAYS)]
     rows.append(("000001.SH", today, 99.0))  # 今日脏行
     _write_index_daily(tmp_path, rows)
@@ -245,7 +246,7 @@ def test_build_overview_cache_date_today_no_double_count() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {
@@ -270,7 +271,7 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {

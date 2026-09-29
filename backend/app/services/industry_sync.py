@@ -24,6 +24,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.market_time import cn_today
+
 logger = logging.getLogger(__name__)
 
 # 维表落盘位置与列契约(消费方按这些名字取值)。
@@ -106,7 +108,7 @@ def industry_members_age_days(data_dir: Path) -> int | None:
         latest = latest.date()
     if not isinstance(latest, date):
         return None
-    return (date.today() - latest).days
+    return (cn_today() - latest).days
 
 
 def sync_industry_members(data_dir: Path, *, force: bool = False) -> int:
@@ -165,7 +167,7 @@ def sync_industry_members(data_dir: Path, *, force: bool = False) -> int:
 
     # 上游偶有重复行; 同一 (symbol, board_code) 只留最后一次。
     df = df.unique(subset=["symbol", "board_code"], keep="last")
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
     ordered = [c for c in INDUSTRY_COLUMNS if c in df.columns]
     extra = [c for c in df.columns if c not in ordered and c != "as_of"]
     df = df.select([*ordered, *extra, "as_of"]).sort(["board_code", "symbol"])

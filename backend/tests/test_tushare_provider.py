@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 
 from app.data_providers import custom as cs
+from app.market_time import cn_today
 from app.plugins.tushare import provider as tp
 
 # ---------------------------------------------------------------- 注册与声明
@@ -607,7 +608,7 @@ def test_report_type_and_window_constants_are_sane():
     start_s, end_s = tp._report_window()
     assert len(start_s) == len(end_s) == 8
     assert start_s < end_s
-    assert end_s == date.today().strftime("%Y%m%d")
+    assert end_s == cn_today().strftime("%Y%m%d")
 
 
 # ---------------------------------------------------------------- instruments 多市场合并
