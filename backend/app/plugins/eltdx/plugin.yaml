@@ -32,10 +32,10 @@
 # runtime: python —— 需要 pip 包 eltdx (见 requirements.txt)。
 
 name: eltdx
-display_name: "通达信行情(分钟K·含真实成交额)"
+display_name: "通达信行情(分钟K·实时快照)"
 runtime: python
 entry: app.plugins.eltdx.provider:EltdxMinuteProvider
 check: app.plugins.eltdx.provider:availability
-datasets: [minute]
-description: "通达信 7709 协议(eltdx 3.1.7)。分钟K 提供真实 OHLC 与真实成交额, 1m 历史约 94 个交易日(远超腾讯 mkline 的 2 天), 覆盖沪深/创业板/科创板/北交所/指数/ETF。支持批量(100 只/请求)与 anchor_date 按日精确取窗口, 全市场约 15s。实测与本地日K对拍: volume ratio 1.0000, amount ratio 0.999999, OHLC 违例 0。"
+datasets: [minute, realtime]
+description: "通达信 7709 协议(eltdx 3.1.7)。分钟K 提供真实 OHLC 与真实成交额, 1m 历史约 94 个交易日(远超腾讯 mkline 的 2 天), 覆盖沪深/创业板/科创板/北交所/指数/ETF; 实测与本地日K对拍 volume ratio 1.0000 / amount ratio 0.999999。实时快照(quotes.get_snapshots) 80 只/批, 全市场约 2s, 含五档/内外盘/现手; 相比腾讯 qt 的关键优势是**没有科创板 688/689 vol 单位是股的板块差异**(分板块实测 amount/(vol*100)/close 均落在 0.99~1.03)。指数需按码单查(已声明 supports_index_realtime)。"
 install_hint: "需要 Python 包 eltdx==3.1.7(含 Rust 原生扩展, 支持 Python 3.10~3.14)。在设置页点击「安装」自动装进后端虚拟环境, 或手动执行: uv pip install --python <backend/.venv/Scripts/python.exe> eltdx==3.1.7。选中它作为「分钟数据源」即可; 无需 token, 但需要能访问通达信行情主站(7709 端口)。"

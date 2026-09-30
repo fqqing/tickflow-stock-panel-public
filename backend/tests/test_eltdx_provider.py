@@ -271,3 +271,147 @@ def test_bars_per_day_matches_a_share_session():
     assert _BARS_PER_DAY["15m"] == 16
     assert _BARS_PER_DAY["30m"] == 8
     assert _BARS_PER_DAY["60m"] == 4
+
+
+# ---- realtime (quotes.get_snapshots) ----
+
+class _FakeSnap:
+    """QuoteSnapshot 的最小替身。change_pct 按**百分数**给(上游实测口径)。"""
+
+    def __init__(self, exchange, code, **kw):
+        self.exchange = exchange
+        self.code = code
+        self.last_price = kw.get("last_price", 10.0)
+        self.pre_close_price = kw.get("pre_close_price", 10.0)
+        self.open_price = kw.get("open_price", 10.0)
+        self.high_price = kw.get("high_price", 10.2)
+        self.low_price = kw.get("low_price", 9.8)
+        self.total_hand = kw.get("total_hand", 1000)
+        self.amount = kw.get("amount", 10.0 * 1000 * 100)
+        self.change_pct = kw.get("change_pct", 1.5)
+        self.change = kw.get("change", 0.15)
+        self.time_raw = kw.get("time_raw", 15174239)
+
+
+class _FakeQuotes:
+    """记录每次批量调用; 含 fail 集合里的代码时整批抛错(模拟老三板拖垮整批)。"""
+
+    def __init__(self, snaps, fail=()):
+        self.snaps = {f"{s.exchange}{s.code}": s for s in snaps}
+        self.fail = set(fail)
+        self.calls: list[list[str]] = []
+
+    def get_snapshots(self, codes):
+        self.calls.append(list(codes))
+        if any(c in self.fail for c in codes):
+            raise RuntimeError("snapshot record marker not found")
+        return [self.snaps[c] for c in codes if c in self.snaps]
+
+
+class _FakeSnapClient:
+    def __init__(self, quotes):
+        self.quotes = quotes
+
+
+def test_datasets_declare_realtime():
+    assert "realtime" in eltdx_mod._DATASETS
+    assert "minute" in eltdx_mod._DATASETS
+    assert EltdxMinuteProvider.supports_index_realtime is True
+
+
+def test_parse_snap_normalizes_units():
+    """change_pct 上游是百分数(1.5) => 契约要小数(0.015); volume=手 / amount=元。"""
+    snap = _FakeSnap("sh", "600519", last_price=10.0, total_hand=1000, amount=1_000_000.0)
+    row = eltdx_mod._parse_snap(snap, {"name": "贵州茅台", "float_shares": 100_000_000})
+    assert row is not None
+    assert row["symbol"] == "600519.SH"
+    assert row["name"] == "贵州茅台"
+    assert row["change_pct"] == pytest.approx(0.015)
+    assert row["volume"] == 1000.0
+    assert row["amount"] == 1_000_000.0
+    # 换手率: volume(手) x 100 / 流通股本(股)
+    assert row["turnover_rate"] == pytest.approx(1000 * 100 / 100_000_000)
+    assert row["amplitude"] == pytest.approx((10.2 - 9.8) / 10.0)
+    assert row["timestamp"] > 0
+
+
+def test_parse_snap_suspended_and_invalid():
+    """停牌(last=0)用前收补; 前收也为 0 时整行丢弃。"""
+    row = eltdx_mod._parse_snap(_FakeSnap("sz", "000001", last_price=0.0, pre_close_price=8.0))
+    assert row is not None and row["last_price"] == 8.0
+    assert eltdx_mod._parse_snap(_FakeSnap("sz", "000001", last_price=0.0, pre_close_price=0.0)) is None
+    assert eltdx_mod._parse_snap(_FakeSnap("xx", "000001")) is None  # 未知市场
+
+
+def test_snap_timestamp_bounds():
+    assert eltdx_mod._snap_timestamp(15174239) is not None
+    assert eltdx_mod._snap_timestamp(0) is None
+    assert eltdx_mod._snap_timestamp(None) is None
+    assert eltdx_mod._snap_timestamp("x") is None
+    assert eltdx_mod._snap_timestamp(99999999) is None  # 小时越界
+
+
+def test_fetch_snap_batch_splits_around_bad_code():
+    """整批失败时二分降级: 4 只里有 1 只坏代码, 其余 3 只必须都拿到。
+
+    实测 bj830799(老三板)会让整批 ProtocolError —— 无法预先枚举黑名单, 只能二分。
+    """
+    snaps = [_FakeSnap("sh", f"60000{i}") for i in range(4)]
+    quotes = _FakeQuotes(snaps, fail={"sh600002"})
+    monkeypatch_client = _FakeSnapClient(quotes)
+    import app.plugins.eltdx.provider as mod
+
+    original = mod._client
+    mod._client = lambda: monkeypatch_client
+    try:
+        got = mod._fetch_snap_batch([f"sh60000{i}" for i in range(4)])
+    finally:
+        mod._client = original
+    assert len(got) == 3
+    assert {"sh600000", "sh600001", "sh600003"} == {f"{s.exchange}{s.code}" for s in got}
+
+
+def test_get_realtime_excludes_index(monkeypatch):
+    """get_realtime 枚举全市场时不能混入指数(指数由 get_index_realtime 按码单拉)。"""
+    snaps = [_FakeSnap("sh", "600519"), _FakeSnap("sh", "000001")]
+    quotes = _FakeQuotes(snaps)
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeSnapClient(quotes))
+    monkeypatch.setattr(
+        eltdx_mod,
+        "_local_market_meta",
+        lambda: {
+            "600519.SH": {"name": "贵州茅台", "float_shares": 1.0, "is_index": False},
+            "000001.SH": {"name": "上证指数", "float_shares": None, "is_index": True},
+        },
+    )
+    rows = EltdxMinuteProvider().get_realtime()
+    assert [r["symbol"] for r in rows] == ["600519.SH"]
+
+
+def test_get_realtime_empty_without_dim_table(monkeypatch):
+    monkeypatch.setattr(eltdx_mod, "_local_market_meta", lambda: {})
+    assert EltdxMinuteProvider().get_realtime() == []
+
+
+def test_index_realtime_by_code_list(monkeypatch):
+    quotes = _FakeQuotes([_FakeSnap("sh", "000001"), _FakeSnap("sz", "399001")])
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeSnapClient(quotes))
+    monkeypatch.setattr(
+        eltdx_mod, "_local_market_meta",
+        lambda: {"000001.SH": {"name": "上证指数", "is_index": True},
+                 "399001.SZ": {"name": "深证成指", "is_index": True}},
+    )
+    rows = EltdxMinuteProvider().get_index_realtime(["000001.SH", "399001.SZ"])
+    assert {r["symbol"] for r in rows} == {"000001.SH", "399001.SZ"}
+    assert all(r["name"] for r in rows)
+    assert EltdxMinuteProvider().get_index_realtime([]) == []
+
+
+def test_test_dataset_realtime(monkeypatch):
+    quotes = _FakeQuotes([_FakeSnap("sh", "600519"), _FakeSnap("sh", "000001")])
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeSnapClient(quotes))
+    monkeypatch.setattr(eltdx_mod, "_local_market_meta", lambda: {})
+    info = EltdxMinuteProvider().test_dataset("realtime")
+    assert info["dataset"] == "realtime"
+    assert info["rows"] == 2
+    assert info["columns"] == eltdx_mod._RT_COLUMNS

@@ -66,15 +66,43 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import polars as pl
 
 from app.data_providers.base import AssetType
-from app.market_time import cn_today
+from app.market_time import CN_TZ, cn_today
 
 logger = logging.getLogger(__name__)
 
-_DATASETS = ("minute",)
+_DATASETS = ("minute", "realtime")
+
+#: realtime 行契约, 与 quote_service._build_daily 消费的列一致。
+#: 量纲: volume=手 / amount=元 / change_pct,amplitude,turnover_rate 均为**小数**。
+_RT_COLUMNS = [
+    "symbol",
+    "name",
+    "last_price",
+    "prev_close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+    "change_pct",
+    "change_amount",
+    "amplitude",
+    "turnover_rate",
+    "timestamp",
+]
+
+#: 单批快照数。**80 是硬上限**: 实测 100/200/400 只请求都只回 80 只, 800 只
+#: 直接 ConnectionClosedError(7709 TCP stream closed)。
+_SNAP_BATCH = 80
+
+#: 二分降级的深度上限。80 -> 40 -> ... -> 1, 6 层足够。
+_SNAP_MAX_SPLIT = 6
 
 #: freq -> eltdx period。eltdx 只认这几档, 传别的会 ValueError(invalid kline period)。
 _FREQ_TO_PERIOD: dict[str, str] = {
@@ -228,12 +256,197 @@ def _fetch_one(task: tuple[date, list[tuple[str, str]], str, int]) -> list[dict]
     return out
 
 
+#: eltdx 市场前缀 -> 面板后缀(快照回包用 exchange + code 表达代码)。
+_PREFIX_TO_SUFFIX: dict[str, str] = {"sh": "SH", "sz": "SZ", "bj": "BJ"}
+
+#: 本地标的维表缓存: (mtime, {symbol: meta})。get_realtime() 是**无参**的全市场
+#: 契约, 而 eltdx 快照必须显式传代码列表, 故从本地维表枚举(盘中每轮都重读 parquet 太浪费)。
+_META_CACHE: tuple[float, dict[str, dict]] | None = None
+
+
+def _local_market_meta() -> dict[str, dict]:
+    """读本地维表, 返回 ``{symbol: {"name":..., "float_shares":...}}``。
+
+    只保留沪深北(其余市场 eltdx 查不了)。快照回包**不含名称**, 换手率也需要
+    流通股本, 两者都只能从维表补。
+    """
+    from app.config import settings
+
+    root = Path(settings.data_dir)
+    # (路径, 是否指数)。指数**要读名称**用于 get_index_realtime 回包, 但**不能**
+    # 混进 get_realtime 的全市场枚举(指数由 quote_service 按码单单独补拉)。
+    paths = [
+        (root / "instruments" / "instruments.parquet", False),
+        (root / "instruments_etf" / "instruments_etf.parquet", False),
+        (root / "instruments_index" / "instruments_index.parquet", True),
+    ]
+    exists = [(p, is_idx) for p, is_idx in paths if p.exists()]
+    if not exists:
+        return {}
+    global _META_CACHE
+    stamp = max(p.stat().st_mtime for p, _ in exists)
+    if _META_CACHE is not None and _META_CACHE[0] == stamp:
+        return _META_CACHE[1]
+
+    meta: dict[str, dict] = {}
+    for path, is_index in exists:
+        cols = ["symbol"] + [c for c in ("name", "float_shares") if c in pl.read_parquet_schema(path)]
+        try:
+            df = pl.read_parquet(path, columns=cols)
+        except Exception as e:
+            logger.warning("eltdx 实时: 读取标的维表失败 %s: %s", path.name, e)
+            continue
+        for row in df.to_dicts():
+            sym = str(row.get("symbol") or "").strip()
+            if not sym.endswith((".SH", ".SZ", ".BJ")):
+                continue
+            meta[sym] = {
+                "name": row.get("name"),
+                "float_shares": row.get("float_shares"),
+                "is_index": is_index,
+            }
+    _META_CACHE = (stamp, meta)
+    return meta
+
+
+def _local_market_symbols() -> list[str]:
+    """get_realtime() 要枚举的标的: 本地维表里的 A 股 + ETF(**不含指数**)。"""
+    return sorted(s for s, m in _local_market_meta().items() if not m.get("is_index"))
+
+
+def _snap_symbol(snap: Any) -> str | None:
+    """快照对象 -> 面板格式代码(600519.SH)。"""
+    suffix = _PREFIX_TO_SUFFIX.get(str(getattr(snap, "exchange", "") or "").lower())
+    code = str(getattr(snap, "code", "") or "")
+    return code + "." + suffix if suffix and code else None
+
+
+def _snap_timestamp(time_raw: object) -> int | None:
+    """``time_raw``(HHMMSScc, 如 15174239 = 15:17:42.39) -> 当日 epoch 毫秒。"""
+    try:
+        raw = int(time_raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if raw <= 0:
+        return None
+    hh, rem = divmod(raw, 1_000_000)
+    mm, rem2 = divmod(rem, 10_000)
+    ss, cc = divmod(rem2, 100)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        return None
+    day = cn_today()
+    try:
+        moment = datetime(day.year, day.month, day.day, hh, mm, ss, tzinfo=CN_TZ)
+    except ValueError:
+        return None
+    return int(moment.timestamp() * 1000) + cc * 10
+
+
+def _parse_snap(snap: Any, meta: Any = None) -> dict | None:
+    """单条快照 -> realtime 行(量纲归一到内部口径)。
+
+    已实测(2026-09-30, 覆盖 600/000/300/301/688/920/ETF):
+    ``amount / (total_hand * 100) / last_price`` = 0.994 ~ 1.03 => **volume 就是手、
+    amount 就是元, 且没有腾讯系那种"科创板 vol 单位是股"的板块差异**。
+    ``change_pct`` 是**百分数**(1.86 表示 1.86%), 契约要小数 => /100。
+    """
+    symbol = _snap_symbol(snap)
+    if not symbol:
+        return None
+    prev = _f(getattr(snap, "pre_close_price", None))
+    last = _f(getattr(snap, "last_price", None))
+    if last is None or last <= 0:
+        last = prev  # 停牌/无成交: 上游给 0, 用前收补
+    if last is None or last <= 0 or prev is None or prev <= 0:
+        return None
+
+    volume = float(getattr(snap, "total_hand", 0) or 0)
+    amount = float(getattr(snap, "amount", 0.0) or 0.0)
+    high = _f(getattr(snap, "high_price", None)) or last
+    low = _f(getattr(snap, "low_price", None)) or last
+    open_ = _f(getattr(snap, "open_price", None)) or last
+
+    turnover = None
+    shares = (meta or {}).get("float_shares") if isinstance(meta, dict) else None
+    if shares and float(shares) > 0:
+        turnover = volume * 100.0 / float(shares)
+
+    return {
+        "symbol": symbol,
+        "name": (meta or {}).get("name") if isinstance(meta, dict) else None,
+        "last_price": last,
+        "prev_close": prev,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "volume": volume,
+        "amount": amount,
+        "change_pct": (_f(getattr(snap, "change_pct", None)) or 0.0) / 100.0,
+        "change_amount": _f(getattr(snap, "change", None)) or (last - prev),
+        "amplitude": (high - low) / prev if prev else None,
+        "turnover_rate": turnover,
+        # time_raw 口径不稳定(同一批里既有 8 位也有 9 位, 部分解析出来是非法时间),
+        # 解析不出就退回抓取时刻 —— quote_ts 的语义本就是"这条快照何时拿到的"。
+        "timestamp": _snap_timestamp(getattr(snap, "time_raw", None))
+        or int(datetime.now(CN_TZ).timestamp() * 1000),
+    }
+
+
+def _fetch_snap_batch(codes: list[str], depth: int = 0) -> list[Any]:
+    """拉一批快照; **整批失败时二分降级**。
+
+    实测某些代码(如 bj830799, 老三板)会让整批抛
+    ``ProtocolError(snapshot record marker not found)``, 而同批的 bj920002 是好的
+    —— 无法预先枚举黑名单, 只能二分把坏代码隔离掉。
+    """
+    try:
+        return list(_client().quotes.get_snapshots(codes))
+    except Exception as exc:
+        if len(codes) == 1 or depth >= _SNAP_MAX_SPLIT:
+            logger.debug("eltdx 快照跳过 %d 只: %s: %s", len(codes), type(exc).__name__, exc)
+            return []
+        mid = len(codes) // 2
+        out = _fetch_snap_batch(codes[:mid], depth + 1)
+        out.extend(_fetch_snap_batch(codes[mid:], depth + 1))
+        return out
+
+
+def _snap_fetch(symbols: list[str]) -> list[dict]:
+    """按 80 只一批并发拉快照, 返回 realtime 行列表。"""
+    meta = _local_market_meta()
+    codes = [c for c in (app_to_eltdx(s) for s in symbols) if c]
+    if not codes:
+        return []
+    batches = [codes[i : i + _SNAP_BATCH] for i in range(0, len(codes), _SNAP_BATCH)]
+
+    snaps: list[Any] = []
+    t0 = time.perf_counter()
+    workers = min(_MAX_WORKERS, max(1, len(batches)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for part in pool.map(_fetch_snap_batch, batches):
+            snaps.extend(part)
+
+    rows: list[dict] = []
+    for snap in snaps:
+        symbol = _snap_symbol(snap)
+        if not symbol:
+            continue
+        row = _parse_snap(snap, meta.get(symbol))
+        if row:
+            rows.append(row)
+    logger.info(
+        "eltdx 实时快照: %d 只请求 / %d 只返回, %d 批, %.2fs",
+        len(codes), len(rows), len(batches), time.perf_counter() - t0,
+    )
+    return rows
+
+
 @dataclass
 class _EltdxConfig:
     """轻量 config shim, 让 custom loader 的 list_sources/provider_has_dataset 能识别本 provider。"""
 
     name: str = "eltdx"
-    display_name: str = "通达信行情(分钟K)"
+    display_name: str = "通达信行情(分钟K/实时快照)"
     datasets: dict = field(default_factory=lambda: dict.fromkeys(_DATASETS))
     path: None = None
     builtin: bool = True
@@ -252,6 +465,32 @@ class EltdxMinuteProvider:
     def close(self) -> None:  # loader.load_all 会对每个 provider 调 close
         return None
 
+    # ---- realtime (quotes.get_snapshots) ----
+    # 与腾讯 qt 一样, 快照不含指数(指数要按码单查), 故声明该能力让
+    # quote_service 走 _fetch_plugin_index_quotes 补拉。
+    supports_index_realtime = True
+
+    def get_realtime(self) -> list[dict]:
+        """全市场(A 股股票 + ETF)实时快照。
+
+        返回行与 quote_service 的 realtime record 契约一致(见 _RT_COLUMNS);
+        量纲已在 _parse_snap 归一。相比腾讯 qt 的优势: **没有"科创板 688/689
+        vol 单位是股"的板块差异**(2026-09-30 分板块实测 r 均落在 0.99~1.03)。
+        """
+        symbols = _local_market_symbols()
+        if not symbols:
+            logger.warning("eltdx 实时: 本地标的维表为空, 无法枚举全市场(请先跑一次标的同步)")
+            return []
+        rows = _snap_fetch(symbols)
+        if not rows:
+            logger.warning("eltdx 实时: 全市场快照返回 0 行(可能未连通达信主站)")
+        return rows
+
+    def get_index_realtime(self, symbols: list[str]) -> list[dict]:
+        """按码单拉指数实时快照(返回行与 get_realtime 同 schema)。"""
+        syms = [s for s in (symbols or []) if s]
+        return _snap_fetch(syms) if syms else []
+
     # ---- 测试(设置页试拉) ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
         if dataset == "minute":
@@ -262,6 +501,15 @@ class EltdxMinuteProvider:
                 "rows": df.height,
                 "columns": df.columns,
                 "preview": df.head(5).to_dicts() if not df.is_empty() else [],
+            }
+        if dataset == "realtime":
+            rows = _snap_fetch(["600519.SH", "000001.SZ", "300750.SZ", "688981.SH", "000001.SH"])
+            return {
+                "provider": self.name,
+                "dataset": "realtime",
+                "rows": len(rows),
+                "columns": _RT_COLUMNS,
+                "preview": rows[:5],
             }
         raise ValueError(f"通达信行情不支持数据集: {dataset}")
 
