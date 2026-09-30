@@ -1491,9 +1491,10 @@ def _finalize_preagg(df):
 def get_minute_k(
     request: Request,
     symbol: str = Query(..., description="标的代码"),
-    period: str = Query("30m", description="分钟周期: 5m/15m/30m/60m/90m/120m"),
+    period: str = Query("30m", description="分钟周期: 1m/5m/15m/30m/60m/90m/120m"),
     days: int = Query(120, ge=1, le=400, description="读取最近 N 个交易日的分钟数据"),
     fields: str | None = Query(None, description="逗号分隔的列名白名单"),
+    limit: int = Query(0, ge=0, le=20000, description="只返回最近 N 根 K (0=不限)"),
 ):
     """多分钟周期 K 线 (5/15/30/60/90/120 分钟)。
 
@@ -1502,6 +1503,10 @@ def get_minute_k(
       可回溯到 2025-01 起约 423 个交易日 —— 长周期历史只能靠它。
     - ``local``: 由本地 1 分钟 K 现场聚合。1m 表只覆盖最近 2 天 (腾讯 mkline 限制),
       故仅用于 1m/90m/120m, 或预聚合目录缺该标的时回退。
+
+    ``limit`` 只截断**返回**的行数(取最近 N 根), 指标仍在完整数据上算好之后再截,
+    所以 MA60 之类的前置窗口不会因为截断而失真。图只需要最近若干根时用它省流量:
+    5m/120 交易日实测 8640 根 ≈ 1MB, 截断到 800 根后 ≈ 80KB。
     """
     minutes = _MINUTE_PERIODS.get(period)
     if minutes is None:
@@ -1545,6 +1550,9 @@ def get_minute_k(
         source = "local"
     if agg.is_empty():
         return base_resp
+    if limit and agg.height > limit:
+        # 尾部截断: 指标已在完整数据上算完(见 docstring), 这里只省传输量
+        agg = agg.tail(limit)
     return {
         **base_resp,
         "source": source,

@@ -124,10 +124,8 @@ export function StockTerminal() {
   const [chanOn, setChanOn] = useState(false)
   const [useKLine, setUseKLine] = useState(() => getKLineProFlag())
   // 周期提升到终端层: 键盘 1/2/3 与两个内核共用同一份状态。
-  // ECharts 支持分钟档, KLinePro 只做日/周/月 —— 切到 KLinePro 时分钟档回落到日线。
+  // S1 起 KLinePro 也支持分钟档(1m/5m/15m/30m/60m), 不再降级成日线。
   const [period, setPeriod] = useState<KLinePeriod>('day')
-  const klinePeriod: 'day' | 'week' | 'month' =
-    period === 'week' ? 'week' : period === 'month' ? 'month' : 'day'
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -398,9 +396,11 @@ export function StockTerminal() {
               <KLinePro
                 symbol={symbol}
                 dateRange={dateRange}
-                period={klinePeriod}
+                period={period}
+                onPeriodChange={setPeriod}
                 chanEnabled={chanOn}
                 priceLines={priceLines}
+                refetchIntervalMs={refetchMs}
               />
             ) : (
               <StockPanel

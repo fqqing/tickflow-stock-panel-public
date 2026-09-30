@@ -22,10 +22,14 @@ const MAX_DAYS = 2000
 /** 分钟周期回看多少个交易日的 1 分钟数据(30 分钟档约得 8 根/日 -> 约 960 根) */
 const MINUTE_LOOKBACK_DAYS = 120
 
-/** K 线周期: 日 / 周 / 月。周月由后端按日 K 聚合后重算指标。 */
-export type KLinePeriod = 'day' | 'week' | 'month' | '5m' | '15m' | '30m' | '60m' | '90m' | '120m'
-/** 分钟周期由后端用 1 分钟 K 聚合(依赖分钟数据是否回补), 日/周/月走 /kline/daily */
-const MINUTE_PERIODS: KLinePeriod[] = ['5m', '15m', '30m', '60m', '90m', '120m']
+/** K 线周期: 日 / 周 / 月 + 分钟档。周月由后端按日 K 聚合后重算指标。 */
+export type KLinePeriod = 'day' | 'week' | 'month' | '1m' | '5m' | '15m' | '30m' | '60m' | '90m' | '120m'
+/**
+ * 分钟周期由后端用 1 分钟 K 聚合(依赖分钟数据是否回补), 日/周/月走 /kline/daily。
+ * 1m 在类型与判定里存在(KLinePro 工具条会用它), 但 ECharts 工具条不列 ——
+ * 1 分钟档行数太大(单日 240 根), ECharts 渲染会明显掉帧。
+ */
+const MINUTE_PERIODS: KLinePeriod[] = ['1m', '5m', '15m', '30m', '60m', '90m', '120m']
 export const isMinutePeriod = (p: KLinePeriod): boolean => MINUTE_PERIODS.includes(p)
 const PERIOD_OPTIONS: { key: KLinePeriod; label: string }[] = [
   { key: 'day', label: '日' },

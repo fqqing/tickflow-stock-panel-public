@@ -82,8 +82,9 @@ export const QK = {
   // 周期(period)纳入 key: 日/周/月 K 是不同数据, 不能共用缓存
   kline:                (symbol: string, start: string, end: string, extColumns?: string, period?: string, adjust?: string) =>
                            ['kline', symbol, start, end, extColumns ?? '', period ?? 'day', adjust ?? 'qfq'] as const,
-  klineMinuteK:         (symbol: string, period: string, days: number) =>
-                           ['kline-minute-k', symbol, period, days] as const,
+  // limit 纳入 key: 同一周期不同截断长度是不同数据(虽然尾部子集, 但缓存分开更安全)
+  klineMinuteK:         (symbol: string, period: string, days: number, limit = 0) =>
+                           ['kline-minute-k', symbol, period, days, limit] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   // 缠论单票结构（笔/中枢/一二三买卖点），按 symbol + 回溯根数 + 笔口径缓存
   chanAnalysis:         (symbol: string, lookback: number, strict: boolean) =>

@@ -2123,8 +2123,13 @@ export const api = {
       + (period && period !== 'day' ? `&period=${encodeURIComponent(period)}` : '')
       + (adjust && adjust !== 'qfq' ? `&adjust=${encodeURIComponent(adjust)}` : ''),
     ),
-  /** 多分钟周期 K 线 (30/60/90/120 分钟等), 由本地 1 分钟 K 聚合 + 重算指标 */
-  klineMinuteK: (symbol: string, period = '30m', days = 120, fields?: string) =>
+  /**
+   * 多分钟周期 K 线 (1/5/15/30/60/90/120 分钟)。
+   * 后端两级数据源: preagg(预聚合目录, 可回溯到 2025-01) / local(1m 现场聚合),
+   * 响应里的 source 标明实际走了哪条。
+   * limit>0 时只返回最近 N 根(指标仍在完整数据上算好之后再截)。
+   */
+  klineMinuteK: (symbol: string, period = '30m', days = 120, fields?: string, limit = 0) =>
     request<{
       symbol: string
       name?: string
@@ -2134,7 +2139,8 @@ export const api = {
       source?: string
     }>(
       `/api/kline/minute-k?symbol=${encodeURIComponent(symbol)}&period=${encodeURIComponent(period)}&days=${days}`
-      + (fields ? `&fields=${encodeURIComponent(fields)}` : ''),
+      + (fields ? `&fields=${encodeURIComponent(fields)}` : '')
+      + (limit > 0 ? `&limit=${limit}` : ''),
     ),
   klineDailyBatch: (symbols: string[], days = 12) =>
     request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {
