@@ -559,7 +559,8 @@ def write_ext_parquet(
             try:
                 existing = pl.read_parquet(out_path)
                 key = "symbol" if "symbol" in df.columns else df.columns[0]
-                df = pl.concat([existing, df]).unique(subset=[key], keep="last")
+                # maintain_order=True: keep="last" 才确定留下新数据
+                df = pl.concat([existing, df]).unique(subset=[key], keep="last", maintain_order=True)
             except Exception as e:
                 # schema 不一致 (列不同) 时 concat 失败 → 直接用新 df 覆盖。
                 # 记日志而非静默吞掉, 便于排查"数据结构错乱"类问题。
@@ -575,7 +576,8 @@ def write_ext_parquet(
             try:
                 existing = pl.read_parquet(out_path)
                 key = "symbol" if "symbol" in df.columns else df.columns[0]
-                df = pl.concat([existing, df]).unique(subset=[key], keep="last")
+                # maintain_order=True: keep="last" 才确定留下新数据
+                df = pl.concat([existing, df]).unique(subset=[key], keep="last", maintain_order=True)
             except Exception as e:
                 logger.warning("扩展表 %s 合并去重失败, 将覆盖写入: %s", config.id, e)
 

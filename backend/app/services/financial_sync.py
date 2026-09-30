@@ -170,7 +170,8 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     # 同一 (symbol, period_end) 多条时保留 announce_date 最新一条 (业绩修正以最新公告为准)。
     if "announce_date" in merged.columns:
         merged = merged.sort(["symbol", "period_end", "announce_date"], nulls_last=True)
-    return merged.unique(subset=["symbol", "period_end"], keep="last").sort(
+    # maintain_order=True: 上面的 sort 才有意义, 否则 keep="last" 是哈希序不保证最新
+    return merged.unique(subset=["symbol", "period_end"], keep="last", maintain_order=True).sort(
         ["symbol", "period_end"]
     )
 

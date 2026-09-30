@@ -399,8 +399,9 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             if out.exists():
                 existing = pl.read_parquet(out)
                 before = existing.height
+                # maintain_order=True: keep="last" 才确定是新数据(见 _write_minute_partition 注释)
                 merged = pl.concat([existing, new_data]).unique(
-                    subset=["symbol", "trade_date"], keep="last",
+                    subset=["symbol", "trade_date"], keep="last", maintain_order=True,
                 ).sort(["symbol", "trade_date"])
                 # 只有真正新增/变更的行对应的 symbol 才需要 enriched 重算
                 affected = _diff_affected_symbols(existing, merged)
@@ -470,8 +471,9 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if out.exists():
         existing = pl.read_parquet(out)
         before = existing.height
+        # maintain_order=True: keep="last" 才确定是新数据
         merged = pl.concat([existing, new_data]).unique(
-            subset=["symbol", "trade_date"], keep="last",
+            subset=["symbol", "trade_date"], keep="last", maintain_order=True,
         ).sort(["symbol", "trade_date"])
         affected = _diff_affected_symbols(existing, merged)
         _atomic_write_parquet(merged, out)
@@ -566,8 +568,10 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
             existing = pl.read_parquet(out)
             if "datetime" in existing.columns:
                 existing = existing.filter(pl.col("datetime").is_not_null())
+            # maintain_order=True 保证 keep="last" 留下的是 concat 靠后的新数据;
+            # 默认 False 时是哈希序, 可能留下旧脏行(实测丢过新数据)
             day_df = pl.concat([existing, day_df.drop("_trade_date")]).unique(
-                subset=["symbol", "datetime"], keep="last",
+                subset=["symbol", "datetime"], keep="last", maintain_order=True,
             )
         else:
             day_df = day_df.drop("_trade_date")
@@ -1016,7 +1020,7 @@ def _migrate_symbol_to_date_partition(repo: KlineRepository) -> None:
         return
 
     combined = pl.concat(all_frames, how="diagonal_relaxed")
-    combined = combined.unique(subset=["symbol", "datetime"], keep="last")
+    combined = combined.unique(subset=["symbol", "datetime"], keep="last", maintain_order=True)
 
     # 按日期写新分区
     combined = combined.with_columns(pl.col("datetime").dt.date().alias("_trade_date"))

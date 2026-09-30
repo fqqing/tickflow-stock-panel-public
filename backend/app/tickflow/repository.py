@@ -2368,8 +2368,9 @@ class KlineRepository:
                 existing = pl.DataFrame()
                 if out.exists():
                     existing = pl.read_parquet(out)
+                    # maintain_order=True: keep="last" 才确定留下 concat 靠后的新数据
                     date_df = pl.concat([existing, date_df], how="diagonal_relaxed").unique(
-                        subset=["symbol", "date"], keep="last"
+                        subset=["symbol", "date"], keep="last", maintain_order=True
                     )
                 date_df = date_df.sort(["symbol", "date"])
                 if not existing.is_empty() and existing.equals(date_df):
@@ -2401,8 +2402,9 @@ class KlineRepository:
             date_df = df.sort(["symbol", "date"])
             if out.exists():
                 existing = pl.read_parquet(out)
+                # maintain_order=True: keep="last" 才确定留下新数据
                 date_df = pl.concat([existing, date_df], how="diagonal_relaxed").unique(
-                    subset=["symbol", "date"], keep="last"
+                    subset=["symbol", "date"], keep="last", maintain_order=True
                 )
             self._atomic_write_parquet(date_df.sort(["symbol", "date"]), out)
 
@@ -2444,8 +2446,9 @@ class KlineRepository:
         cache_df = self._with_instrument_metadata(asset_type, df)
         merged_cache = cache_df
         if existing_cache is not None and not existing_cache.is_empty():
+            # maintain_order=True: keep="last" 才确定留下新数据
             merged_cache = pl.concat([existing_cache, cache_df], how="diagonal_relaxed").unique(
-                subset=["symbol", "date"], keep="last"
+                subset=["symbol", "date"], keep="last", maintain_order=True
             )
         merged_cache = merged_cache.sort(["symbol"])
 
@@ -2465,8 +2468,9 @@ class KlineRepository:
             existing = pl.DataFrame()
             if out.exists():
                 existing = pl.read_parquet(out)
+                # maintain_order=True: keep="last" 才确定留下新数据
                 df_storage = pl.concat([existing, df_storage], how="diagonal_relaxed").unique(
-                    subset=["symbol", "date"], keep="last"
+                    subset=["symbol", "date"], keep="last", maintain_order=True
                 )
             df_storage = df_storage.sort(["symbol"])
             if existing.is_empty() or not existing.equals(df_storage):
