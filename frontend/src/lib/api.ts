@@ -3603,6 +3603,77 @@ export const api = {
     }
     return request<SignalLabAttribution>(`/api/signallab/attribution?${q.toString()}`)
   },
+
+  // ===== Pulse (盘中脉搏: 资金流/竞价/力道/题材/梯队/逐笔) =====
+  pulseMoneyflow: (symbols: string[], days = 5) =>
+    request<PulseMoneyflowResp>(
+      `/api/pulse/moneyflow?symbols=${encodeURIComponent(symbols.join(','))}&days=${days}`,
+    ),
+
+  pulseMoneyflowRank: (params: { limit?: number; days?: number; scan?: number; ascending?: boolean }) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseMoneyflowRankResp>(`/api/pulse/moneyflow/rank?${q.toString()}`)
+  },
+
+  pulseAuction: (symbol: string) =>
+    request<PulseAuction>(`/api/pulse/auction?symbol=${encodeURIComponent(symbol)}`),
+
+  pulseStrength: (symbol: string) =>
+    request<PulseStrength>(`/api/pulse/strength?symbol=${encodeURIComponent(symbol)}`),
+
+  pulseTopics: (symbol: string) =>
+    request<PulseTopics>(`/api/pulse/topics?symbol=${encodeURIComponent(symbol)}`),
+
+  pulseTopicRank: (params: { include_pseudo?: boolean; force?: boolean } = {}) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseTopicRank>(`/api/pulse/topics/rank?${q.toString()}`)
+  },
+
+  pulseLadder: (params: { min_level?: number; only_sealed?: boolean; limit?: number; force?: boolean } = {}) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseLadder>(`/api/pulse/ladder?${q.toString()}`)
+  },
+
+  pulseTicks: (symbol: string, params: { day?: string; limit?: number; force?: boolean } = {}) => {
+    const q = new URLSearchParams({ symbol })
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseTicks>(`/api/pulse/ticks?${q.toString()}`)
+  },
+
+  pulseOrderflow: (symbol: string, params: { day?: string; force?: boolean } = {}) => {
+    const q = new URLSearchParams({ symbol })
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseOrderflow>(`/api/pulse/orderflow?${q.toString()}`)
+  },
+
+  pulseFootprint: (symbol: string, params: { day?: string; rows?: number; bucket?: number; force?: boolean } = {}) => {
+    const q = new URLSearchParams({ symbol })
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseFootprint>(`/api/pulse/footprint?${q.toString()}`)
+  },
+
+  pulseTickDays: () => request<{ days: string[] }>('/api/pulse/tick-days'),
 }
 
 // ===== Pipeline =====
@@ -3815,4 +3886,211 @@ export interface AnalysisMenu {
   created_at?: string | null
   updated_at?: string | null
   builtin?: boolean
+}
+
+// ===== Pulse (盘中脉搏) 类型 =====
+// 统一量纲: 金额=元, 比率=小数(0.0968 即 9.68%), 成交量=手。
+
+/** M1 资金流逐日记录。 */
+export interface PulseMoneyflowRow {
+  symbol: string
+  date: string
+  total_amount: number | null
+  main_net: number | null
+  main_ratio: number | null
+  super_large_net: number | null
+  large_net: number | null
+  medium_net: number | null
+  small_net: number | null
+  buy_net: number | null
+  buy_ratio: number | null
+  buckets?: number[]
+}
+
+export interface PulseMoneyflowResp {
+  symbols: string[]
+  days: number
+  rows: PulseMoneyflowRow[]
+}
+
+/** M1 排行行: 多日压缩后的一行。 */
+export interface PulseMoneyflowRankRow {
+  symbol: string
+  date: string
+  main_net: number | null
+  main_ratio: number | null
+  total_amount: number | null
+  super_large_net: number | null
+  large_net: number | null
+  medium_net: number | null
+  small_net: number | null
+  sum_main_net: number | null
+  inflow_days: number
+  days: number
+}
+
+export interface PulseMoneyflowRankResp {
+  scanned: number
+  days: number
+  rows: PulseMoneyflowRankRow[]
+}
+
+/** M2 集合竞价。 */
+export interface PulseAuction {
+  symbol: string
+  date: string
+  pre_close: number | null
+  open_price: number | null
+  open_volume: number | null
+  open_amount: number | null
+  open_change_pct: number | null
+  points: { time: string; price: number | null; matched: number | null; unmatched: number | null }[]
+  score: {
+    total: number
+    accel: number | null
+    cancel_rate: number | null
+    stability: number | null
+    open_turnover_bp: number | null
+    parts: { accel: number; cancel: number; stability: number; volume: number }
+  } | null
+}
+
+/** M3 分时买卖力道。 */
+export interface PulseStrength {
+  symbol: string
+  points: { minute: string; buy: number; sell: number; delta: number; cum_delta: number }[]
+  summary: {
+    buy_total: number
+    sell_total: number
+    net: number
+    strength_ratio: number
+    tail_net: number
+    peak_minute: string
+    peak_delta: number
+    minutes: number
+  } | null
+}
+
+/** M4 个股题材。 */
+export interface PulseTopics {
+  symbol: string
+  topics: {
+    topic_id: string
+    topic_name: string
+    relation_level: number | null
+    selected_date: string
+    reason: string
+  }[]
+}
+
+/** M4 题材强度排行。stale=true 表示返回的是旧值(后端正在后台刷新)。 */
+export interface PulseTopicRank {
+  trade_date: string | null
+  rows: {
+    rank: number | null
+    topic_id: string
+    topic_name: string
+    limit_up_count: number | null
+    highest_ladder_level: number | null
+    lianban_count: number | null
+    total_seal_amount: number | null
+    leader_symbol: string | null
+    leader_name: string | null
+    leader_ladder_level: number | null
+  }[]
+  stale: boolean
+  stamp: number | null
+  filtered_pseudo: boolean
+}
+
+/** M5 涨停梯队。 */
+export interface PulseLadder {
+  trade_date: string | null
+  rows: {
+    symbol: string
+    name: string | null
+    limit_status: string
+    ladder_level: number | null
+    limit_board_text: string
+    limit_up_streak_days: number | null
+    year_limit_up_days: number | null
+    open_price: number | null
+    pre_close: number | null
+    open_change_pct: number | null
+    open_amount: number | null
+    open_volume_hand: number | null
+    seal_amount: number | null
+    seal_to_amount_ratio: number | null
+    seal_to_float_ratio: number | null
+    pe_ttm: number | null
+    beta_60d: number | null
+    float_market_value: number | null
+  }[]
+  total: number
+  stale: boolean
+  stamp: number | null
+  stats: {
+    count: number
+    sealed: number
+    seal_total_amount: number
+    max_level: number
+    by_level: Record<string, number>
+  }
+}
+
+/** M6 逐笔明细。 */
+export interface PulseTicks {
+  symbol: string
+  day: string
+  total: number
+  rows: {
+    index: number | null
+    time: string
+    price: number
+    volume: number
+    order_count: number | null
+    side: string
+    kind: string
+  }[]
+  updated: string | null
+}
+
+/** M6 订单流。 */
+export interface PulseOrderflow {
+  symbol: string
+  day: string
+  points: {
+    minute: string
+    buy: number
+    sell: number
+    delta: number
+    cum_delta: number
+    volume: number
+    price: number
+    trades: number
+  }[]
+  summary: {
+    trades: number
+    buy_volume: number
+    sell_volume: number
+    neutral_volume: number
+    delta: number
+    delta_ratio: number
+    avg_price: number
+  } | null
+}
+
+/** M6 足迹图: 价格(纵) x 时间(横) 的买卖量网格。 */
+export interface PulseFootprint {
+  symbol: string
+  day: string
+  price_levels: number[]
+  time_buckets: string[]
+  cells: { t: string; p: number; buy: number; sell: number; delta: number; volume: number }[]
+  poc: number | null
+  vwap: number | null
+  low: number
+  high: number
+  step: number
+  bucket_minutes: number
 }

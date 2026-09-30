@@ -21,6 +21,7 @@ import {
 } from '@/lib/useSharedMutations'
 import { QK } from '@/lib/queryKeys'
 import {
+  Activity,
   Siren,
   FlaskConical,
   Star,
@@ -96,6 +97,7 @@ const nav = [
   { to: '/regime', label: '市场环境', icon: Gauge },
   { to: '/abnormal', label: '异动监控', icon: Siren },
   { to: '/signal-lab', label: '信号实验室', icon: FlaskConical },
+  { to: '/pulse', label: '盘中脉搏', icon: Activity },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },
