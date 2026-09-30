@@ -15,8 +15,12 @@
  * ★ klinecharts v10 不做周期聚合(源码里没有 aggregate): setPeriod 只影响
  *   轴标签/十字线的时间格式。所以聚合必须由后端完成, 前端只负责喂数。
  *
- * 当前能力: 多周期 K + 成交量 + MA + 缠论叠加(仅日线档) + 监控价位水平线 + 暗色主题(红涨绿跌)。
- * 未做: 复权切换、副图指标自选、涨停标记、手绘线、分时(均价)图。
+ * S2: 主副图窗格 + 指标管理 —— 指标清单持久化在 localStorage(换股不换指标),
+ *   主图指标挂 candle_pane, 副图自动开新窗格; 窗格分隔条可拖动, 高度同样持久化。
+ *   指标参数**不硬编码**: 创建时不传 calcParams, 再从 getIndicators() 回读库内默认值。
+ *
+ * 当前能力: 多周期 K + 指标自选(27 个内置) + 缠论叠加(仅日线档) + 监控价位水平线 + 暗色主题(红涨绿跌)。
+ * 未做: 复权切换、涨停标记、手绘线、分时(均价)图。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -28,6 +32,15 @@ import type { ChartPriceLine } from '@/lib/chart-primitives'
 import { isMinutePeriod, type KLinePeriod } from '@/components/StockDailyKChart'
 import { registerChanOverlay } from './chan-overlay-kline'
 import { registerPriceLineOverlay } from './price-line-overlay'
+import { IndicatorManager } from './IndicatorManager'
+import {
+  MAIN_PANE_ID,
+  loadIndicators,
+  loadPaneHeights,
+  saveIndicators,
+  savePaneHeights,
+  type IndicatorConfig,
+} from '@/lib/klineIndicators'
 import { cn } from '@/lib/cn'
 
 const BULL = '#F04438' // --bull 红涨
@@ -100,6 +113,26 @@ function parseRows(rows: KlineRow[]): kc.KLineData[] {
   return rows.map(rowToKLine).filter((d): d is kc.KLineData => d !== null)
 }
 
+/** 从已创建的指标回读库内默认参数(避免硬编码, 见 klineIndicators 顶部说明) */
+function readRealParams(ind: kc.Indicator | undefined): number[] | null {
+  const cp = ind?.calcParams
+  if (!Array.isArray(cp) || cp.length === 0) return null
+  const nums = cp.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+  return nums.length === cp.length ? nums : null
+}
+
+/** 恢复上次拖动过的副图窗格高度(按副图顺序, paneId 是库内自增的, 不能当 key) */
+function applyPaneHeights(chart: kc.Chart): void {
+  const saved = loadPaneHeights()
+  if (saved.length === 0) return
+  const opts = chart.getPaneOptions()
+  if (!Array.isArray(opts)) return
+  opts.slice(1).forEach((p, i) => {
+    const h = saved[i]
+    if (h) chart.setPaneOptions({ id: p.id, height: h, dragEnabled: true })
+  })
+}
+
 function toChartPeriod(p: KLinePeriod): kc.Period {
   const span = MINUTE_SPAN[p]
   if (span) return { type: 'minute', span }
@@ -136,6 +169,12 @@ export function KLinePro({
   const chartRef = useRef<kc.Chart | null>(null)
   const rowsRef = useRef<kc.KLineData[]>([])
   const [ready, setReady] = useState(false)
+
+  // ── S2 指标清单(持久化在 localStorage, 换股不换指标) ──
+  const [indicators, setIndicators] = useState<IndicatorConfig[]>(() => loadIndicators())
+  const [managerOpen, setManagerOpen] = useState(false)
+  /** key -> 图表内指标 id / 所在窗格 */
+  const indRefs = useRef(new Map<string, { id: string; paneId: string }>())
 
   const [innerPeriod, setInnerPeriod] = useState<KLinePeriod>('day')
   const period = periodProp ?? innerPeriod
@@ -179,6 +218,10 @@ export function KLinePro({
   useEffect(() => {
     const el = containerRef.current
     if (!el || chartRef.current) return
+    // 换股会重建图表: 先把 ready 打回 false, 否则 setReady(true) 同值不触发重渲染,
+    // 指标 diff 的 effect 不会重跑, 新图上就一个指标都没有。
+    setReady(false)
+    indRefs.current.clear()
     registerChanOverlay()
     registerPriceLineOverlay()
 
@@ -213,8 +256,6 @@ export function KLinePro({
     })
     chart.setSymbol({ ticker: symbol, pricePrecision: 2, volumePrecision: 0 })
     chart.setPeriod(toChartPeriod(period))
-    chart.createIndicator('MA')
-    chart.createIndicator('VOL')
     setReady(true)
 
     return () => {
@@ -286,6 +327,72 @@ export function KLinePro({
     }
   }, [priceLines, ready])
 
+  // ── S2: 指标清单 diff 到图表 ──
+  // 增删改一律走增量, 不做「全量重建」 —— 重建窗格会把用户拖动过的高度一起丢掉。
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    const refs = indRefs.current
+    const alive = new Set(indicators.map(c => c.key))
+    const defaults: IndicatorConfig[] = []
+
+    for (const [key, ref] of Array.from(refs.entries())) {
+      if (alive.has(key)) continue
+      chart.removeIndicator({ id: ref.id })
+      refs.delete(key)
+    }
+
+    for (const c of indicators) {
+      const ref = refs.get(c.key)
+      if (!ref) {
+        const payload: kc.IndicatorCreate = { name: c.name }
+        // 主图指标显式挂到 K 线窗格; 副图不传 paneId, 库会自动新开一个窗格
+        if (c.group === 'main') payload.paneId = MAIN_PANE_ID
+        if (c.params.length > 0) payload.calcParams = c.params
+        const id = chart.createIndicator(payload)
+        if (!id) continue
+        const ind = chart.getIndicators({ id })[0]
+        refs.set(c.key, { id, paneId: ind?.paneId ?? '' })
+        if (c.params.length === 0) {
+          const real = readRealParams(ind)
+          if (real) defaults.push({ ...c, params: real })
+        }
+      } else if (c.params.length > 0) {
+        chart.overrideIndicator({ id: ref.id, name: c.name, calcParams: c.params })
+      }
+    }
+
+    // 首次创建时把库内默认参数回写进状态(这样管理面板才显示得出输入框)
+    if (defaults.length > 0) {
+      setIndicators(prev => prev.map(c => defaults.find(d => d.key === c.key) ?? c))
+    }
+    applyPaneHeights(chart)
+  }, [indicators, ready])
+
+  // 指标清单落盘。默认清单也要写 —— 否则 store 只有用户改过之后才有值,
+  // 排查时看到的是空 localStorage, 与图上实际有指标对不上。
+  useEffect(() => { saveIndicators(indicators) }, [indicators])
+
+  // 拖动副图分隔条 -> 持久化高度(防抖 200ms)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    let timer: number | undefined
+    const onDrag = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const opts = chart.getPaneOptions()
+        if (!Array.isArray(opts)) return
+        savePaneHeights(opts.slice(1).map(p => p.height))
+      }, 200)
+    }
+    chart.subscribeAction('onPaneDrag', onDrag)
+    return () => {
+      window.clearTimeout(timer)
+      chart.unsubscribeAction('onPaneDrag', onDrag)
+    }
+  }, [ready])
+
   return (
     <div className={cn('relative flex h-full w-full flex-col', className)}>
       <div className="flex shrink-0 items-center gap-1 px-1 py-1">
@@ -304,6 +411,19 @@ export function KLinePro({
             {t.label}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => setManagerOpen(v => !v)}
+          title="指标设置(主图 / 副图、参数、窗格高度可拖动)"
+          className={cn(
+            'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+            managerOpen
+              ? 'border-accent/30 bg-accent/20 font-medium text-accent'
+              : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
+          )}
+        >
+          指标{indicators.length > 0 ? ` ${indicators.length}` : ''}
+        </button>
         {minutePeriod && (
           <span className="ml-auto pr-1 text-[10px] text-muted/60" title="分钟K数据源: preagg=预聚合目录 / local=1m现场聚合">
             {period} · {active.data?.source ?? '…'}
@@ -323,6 +443,13 @@ export function KLinePro({
           </div>
         )}
         <div ref={containerRef} className="h-full w-full" />
+        {managerOpen && (
+          <IndicatorManager
+            configs={indicators}
+            onChange={setIndicators}
+            onClose={() => setManagerOpen(false)}
+          />
+        )}
       </div>
     </div>
   )
