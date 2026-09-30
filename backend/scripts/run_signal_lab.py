@@ -15,6 +15,9 @@
 - 成交 = 信号次日开盘价(``--entry-delay 1``); 一字涨停与停牌顺延, 顺延失败记为未成交。
 - 收益分母是实际成交价, 小数制(0.0366 = +3.66%)。
 
+编排逻辑在 ``app/signallab/lab.py``(API 与本脚本共用同一份实现), 本文件只负责
+命令行参数解析与打印。
+
 用法
 ----
     # 复盘「定量底部结构选股」最近一年, 限制 300 只标的(先跑通用)
@@ -41,25 +44,9 @@ if str(ROOT) not in sys.path:
 
 import polars as pl  # noqa: E402
 
-from app.backtest.engine import BacktestEngine  # noqa: E402
-from app.backtest.matrix import (  # noqa: E402
-    MatrixPipelineConfig,
-    MatrixStrategyPipeline,
-    slice_market_data_matrix,
-    slice_signal_matrix,
-)
-from app.backtest.strategy import (  # noqa: E402
-    StrategyBacktestConfig,
-    StrategyBacktestService,
-)
-from app.signallab.outcome import (  # noqa: E402
-    OutcomeConfig,
-    build_signal_outcomes,
-    compute_market_baseline,
-)
+from app.signallab.lab import LabRunConfig, run_lab  # noqa: E402
 from app.signallab.summary import summarize_outcomes  # noqa: E402
 from app.strategy.engine import StrategyEngine  # noqa: E402
-from app.strategy.scoring import effective_scoring, effective_scoring_directions  # noqa: E402
 from app.tickflow.repository import DataStore, KlineRepository  # noqa: E402
 
 _DEFAULT_HORIZONS = (1, 3, 5, 10, 20, 60)
@@ -104,12 +91,6 @@ def _resolve_symbols(repo: KlineRepository, args: argparse.Namespace) -> list[st
     return None
 
 
-def _write_parquet(frame: pl.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.write_parquet(path)
-    print(f"  -> 台账已写入 {path}")
-
-
 def _print_summary(frame: pl.DataFrame, strategy_id: str, horizons: tuple[int, ...]) -> None:
     if frame.is_empty():
         print(f"[{strategy_id}] 区间内没有产生任何信号")
@@ -144,7 +125,7 @@ def _print_summary(frame: pl.DataFrame, strategy_id: str, horizons: tuple[int, .
 
 
 def _run_one(
-    service: StrategyBacktestService,
+    repo: KlineRepository,
     strategy_engine: StrategyEngine,
     strategy_id: str,
     symbols: list[str] | None,
@@ -163,71 +144,32 @@ def _run_one(
         print(f"[{strategy_id}] 不是 matrix_native 策略, 暂不支持 Signal Lab 复盘")
         return
 
-    params = StrategyEngine.resolve_params(strategy)
-    config = StrategyBacktestConfig(
+    config = LabRunConfig(
         strategy_id=strategy_id,
-        symbols=symbols,
         start=start,
         end=end,
-        params=params,
+        symbols=tuple(symbols) if symbols else None,
+        limit=args.limit,
+        horizons=horizons,
+        entry_delay=args.entry_delay,
+        stop_loss=args.stop_loss,
+        take_profit=args.take_profit,
+        drop_warmup=args.drop_warmup,
+        matrix_cache_mb=args.matrix_cache_mb,
+        write=not args.no_write,
     )
-    prepared = service.prepare_matrix_optimization(
-        [config],
-        matrix_cache_max_bytes=int(args.matrix_cache_mb) * 1024 * 1024,
-    )
+
+    def progress(stage: str, pct: int, msg: str) -> None:
+        print(f"  [{pct:3d}%] {msg}")
+
     try:
-        pipeline_config = MatrixPipelineConfig(
-            basic_filter=StrategyBacktestService._effective_basic_filter(strategy, {}),
-            scoring=effective_scoring(strategy.meta.get("scoring"), {}),
-            scoring_directions=effective_scoring_directions({}),
-            order_by=strategy.meta.get("order_by"),
-            descending=bool(strategy.meta.get("descending", True)),
-        )
-        with prepared.compute_cache.activate(prepared.market_data):
-            signals = MatrixStrategyPipeline().run(
-                strategy.matrix_strategy,
-                prepared.market_data,
-                params,
-                pipeline_config,
-            )
-        market = slice_market_data_matrix(
-            prepared.market_data, prepared.start_id, prepared.stop_id
-        )
-        window = slice_signal_matrix(signals, prepared.start_id, prepared.stop_id)
-
-        warmup = args.drop_warmup
-        if warmup is None:
-            warmup = int(
-                strategy_engine.required_history_bars(
-                    [strategy_id], params_map={strategy_id: params}
-                )
-                or 0
-            )
-        entry = window.entry
-        if warmup and warmup < entry.shape[0]:
-            entry = entry.copy()
-            entry[:warmup, :] = False
-
-        baseline = compute_market_baseline(market, horizons=horizons)
-        frame = build_signal_outcomes(
-            market,
-            entry,
-            exit_signals=window.exit,
-            entry_signal_code=window.entry_signal_code,
-            baseline=baseline,
-            config=OutcomeConfig(
-                horizons=horizons,
-                entry_delay=args.entry_delay,
-                stop_loss=args.stop_loss,
-                take_profit=args.take_profit,
-            ),
-        )
-        _print_summary(frame, strategy_id, horizons)
-        if not args.no_write and not frame.is_empty():
-            target = data_dir / "signal_lab" / strategy_id / f"events_{start}_{end}.parquet"
-            _write_parquet(frame, target)
-    finally:
-        prepared.compute_cache.close()
+        frame = run_lab(repo, strategy_engine, config, data_dir=data_dir, on_progress=progress)
+    except Exception as exc:
+        print(f"[{strategy_id}] 复盘失败: {exc}")
+        return
+    if not args.no_write and not frame.is_empty():
+        print(f"  -> 台账已写入 {data_dir / 'signal_lab' / strategy_id / config.dataset_name}")
+    _print_summary(frame, strategy_id, horizons)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -258,12 +200,11 @@ def main(argv: list[str] | None = None) -> int:
             data_dir / "strategies" / "composite",
         ]
     )
-    service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
 
     print(f"区间 {start} ~ {end} | 标的 {len(symbols) if symbols else '全部'} | 持有期 {horizons}")
     for strategy_id in args.strategy:
         _run_one(
-            service, strategy_engine, strategy_id, symbols, args,
+            repo, strategy_engine, strategy_id, symbols, args,
             horizons, start, end, data_dir,
         )
     return 0
