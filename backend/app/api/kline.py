@@ -896,7 +896,12 @@ def _attach_indicators(
         logger.debug("指标预热取历史 %s 失败: %s", symbol, exc)
 
     for row in rows:
-        history[_date_key(row.get("date"))] = row
+        # 合并而不是覆盖: fields 过滤后的请求行可能缺 OHLC (如 fields=date,cm_value),
+        # 直接覆盖会把仓库历史里的 close 抹成 NaN, 资金动能等指标链全 null (2026-09-30 实测)。
+        # 行里带 close 时(实时蜡烛)仍以行内值为准。
+        key = _date_key(row.get("date"))
+        base = history.get(key)
+        history[key] = {**base, **row} if base else row
 
     ordered = sorted(history.items())
     days = [day for day, _ in ordered]
