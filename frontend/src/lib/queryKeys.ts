@@ -92,6 +92,8 @@ export const QK = {
   // 缠论全市场买点扫描，按买点类型 + 新鲜度 + 笔口径缓存（后端侧也有结果缓存）
   chanScan:             (kinds: string, recentBars: number, strict: boolean) =>
                            ['chan-scan', kinds, recentBars, strict] as const,
+  // 信号实验室：复盘任务与台账查询共用一个前缀，复盘完成后整体失效即可
+  signalLab:            ['signal-lab'] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>

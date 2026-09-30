@@ -22,6 +22,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import {
   Siren,
+  FlaskConical,
   Star,
   ScanSearch,
   Newspaper,
@@ -94,6 +95,7 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/regime', label: '市场环境', icon: Gauge },
   { to: '/abnormal', label: '异动监控', icon: Siren },
+  { to: '/signal-lab', label: '信号实验室', icon: FlaskConical },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },

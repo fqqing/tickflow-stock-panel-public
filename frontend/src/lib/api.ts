@@ -1762,6 +1762,124 @@ export interface StrategyAlertEvent {
 }
 
 // ===== API surface =====
+// ===== Signal Lab (信号实验室) =====
+export interface SignalLabStrategy {
+  id: string
+  name: string
+  execution_backend: string | null
+  supported: boolean
+  warmup_bars: number | null
+  category: string | null
+}
+
+export interface SignalLabStrategies {
+  strategies: SignalLabStrategy[]
+  context_features: string[]
+}
+
+export interface SignalLabDataset {
+  strategy_id: string
+  start: string | null
+  end: string | null
+  path: string
+  rows: number | null
+  mtime: number | null
+  size_bytes: number | null
+  columns?: string[]
+  horizons?: number[]
+}
+
+export interface SignalLabRunRequest {
+  strategy_id: string
+  start?: string
+  end?: string
+  lookback_days?: number
+  limit?: number
+  symbols?: string[]
+  horizons?: number[]
+  entry_delay?: number
+  max_delay_days?: number
+  stop_loss?: number | null
+  take_profit?: number | null
+  drop_warmup?: number | null
+  matrix_cache_mb?: number
+  with_features?: boolean
+}
+
+export interface SignalLabRunStart {
+  run_id: string
+  reused: boolean
+  strategy_id?: string
+  start?: string
+  end?: string
+  symbols?: number | null
+}
+
+export interface SignalLabRunResult {
+  strategy_id: string
+  start: string
+  end: string
+  rows: number
+  columns: string[]
+  horizons: number[]
+  n_filled: number | null
+}
+
+export interface SignalLabRun {
+  id: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  stage: string
+  progress: number
+  log: { ts: number; stage: string; msg: string }[]
+  request: Record<string, unknown>
+  created_at?: number | null
+  started_at?: number | null
+  finished_at?: number | null
+  duration_s?: number | null
+  result: SignalLabRunResult | null
+  error: string | null
+}
+
+export interface SignalLabOutcomes {
+  dataset: SignalLabDataset
+  total: number
+  offset: number
+  limit: number
+  columns: string[]
+  rows: Record<string, unknown>[]
+}
+
+export interface SignalLabSummary {
+  dataset: SignalLabDataset
+  horizons: number[]
+  n_signals: number
+  overall: Record<string, number | null>
+  groups: Record<string, unknown>[]
+}
+
+export interface SignalLabAttributionRow {
+  feature: string
+  bucket: string
+  n_buckets: number
+  mean_spread: number | null
+  ret_n: number
+  ret_wins: number
+  ret_win_rate: number | null
+  ret_mean: number | null
+  ret_median: number | null
+  ret_std: number | null
+  ret_profit_factor: number | null
+}
+
+export interface SignalLabAttribution {
+  dataset: SignalLabDataset
+  horizon: number
+  requested_horizon: number | null
+  features: string[]
+  skipped_features: string[]
+  rows: SignalLabAttributionRow[]
+}
+
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
@@ -3416,6 +3534,75 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId, code, name: meta?.name ?? '', description: meta?.description ?? '' }),
     }),
+
+  // ===== Signal Lab (信号实验室) =====
+  signalLabStrategies: () =>
+    request<SignalLabStrategies>('/api/signallab/strategies'),
+
+  signalLabDatasets: (strategyId?: string) =>
+    request<{ datasets: SignalLabDataset[] }>(
+      `/api/signallab/datasets${strategyId ? `?strategy_id=${encodeURIComponent(strategyId)}` : ''}`,
+    ),
+
+  signalLabRun: (payload: SignalLabRunRequest) =>
+    request<SignalLabRunStart>('/api/signallab/runs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  signalLabRunStatus: (runId: string) =>
+    request<SignalLabRun>(`/api/signallab/runs/${encodeURIComponent(runId)}`),
+
+  signalLabOutcomes: (params: {
+    strategy_id: string
+    start?: string
+    end?: string
+    symbol?: string
+    filled_only?: boolean
+    limit?: number
+    offset?: number
+    sort?: 'signal_date' | 'fill_date' | 'symbol'
+    descending?: boolean
+  }) => {
+    const q = new URLSearchParams({ strategy_id: params.strategy_id })
+    for (const [k, v] of Object.entries(params)) {
+      if (k === 'strategy_id' || v == null) continue
+      q.set(k, String(v))
+    }
+    return request<SignalLabOutcomes>(`/api/signallab/outcomes?${q.toString()}`)
+  },
+
+  signalLabSummary: (params: {
+    strategy_id: string
+    start?: string
+    end?: string
+    horizons?: string
+    group_by?: string
+  }) => {
+    const q = new URLSearchParams({ strategy_id: params.strategy_id })
+    for (const [k, v] of Object.entries(params)) {
+      if (k === 'strategy_id' || v == null) continue
+      q.set(k, String(v))
+    }
+    return request<SignalLabSummary>(`/api/signallab/summary?${q.toString()}`)
+  },
+
+  signalLabAttribution: (params: {
+    strategy_id: string
+    start?: string
+    end?: string
+    features?: string
+    horizon?: number
+    min_samples?: number
+    buckets?: number
+  }) => {
+    const q = new URLSearchParams({ strategy_id: params.strategy_id })
+    for (const [k, v] of Object.entries(params)) {
+      if (k === 'strategy_id' || v == null) continue
+      q.set(k, String(v))
+    }
+    return request<SignalLabAttribution>(`/api/signallab/attribution?${q.toString()}`)
+  },
 }
 
 // ===== Pipeline =====
