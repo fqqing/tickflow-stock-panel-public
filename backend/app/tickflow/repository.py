@@ -222,6 +222,17 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/kline_etf_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_minute AS
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
+            # 多周期分钟K (free-stockdb 导入, 2025-01 起)。kline_minute 是 1m 表且无
+            # freq 列, 多周期必须独立目录, 混在一起会破坏 1m 语义。
+            # 目录为空时下面这些会走 try/except 降级为 debug, 不影响启动。
+            f"""CREATE OR REPLACE VIEW kline_minute_5m AS
+                SELECT * FROM read_parquet('{d}/kline_minute_5m/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_minute_15m AS
+                SELECT * FROM read_parquet('{d}/kline_minute_15m/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_minute_30m AS
+                SELECT * FROM read_parquet('{d}/kline_minute_30m/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_minute_60m AS
+                SELECT * FROM read_parquet('{d}/kline_minute_60m/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor AS
                 SELECT * FROM read_parquet('{d}/adj_factor/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor_etf AS
@@ -1719,6 +1730,62 @@ class KlineRepository:
     def _minute_glob_for(self, asset_type: str) -> str:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
+
+    def _minute_period_glob(self, period: str) -> str | None:
+        """多周期分钟K的 parquet glob。不支持的周期返回 None (调用方回退 1m 聚合)。
+
+        这些目录由 free-stockdb 导入 (2025-01 起, 约 423 个交易日), 与 1m 表
+        kline_minute (只覆盖最近 2 天) 互补: 长周期历史必须走这里。
+        """
+        dirs = {
+            "5m": "kline_minute_5m",
+            "15m": "kline_minute_15m",
+            "30m": "kline_minute_30m",
+            "60m": "kline_minute_60m",
+        }
+        d = dirs.get(period)
+        # 注意是 self.store.data_dir, KlineRepository 本身没有 data_dir 属性
+        return str(self.store.data_dir / d / "**" / "*.parquet") if d else None
+
+    def get_minute_period(
+        self,
+        symbols: list[str],
+        period: str,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame:
+        """预聚合多周期分钟K查询 (5m/15m/30m/60m)。
+
+        与 get_minute_range 的区别: 后者读 1m 表再聚合, 而 1m 表只覆盖最近 2 天;
+        本方法直接读已经聚合好的周期目录, 可回溯到 2025-01。
+        目录不存在/无该周期/查询失败都返回空 DataFrame, 由调用方回退。
+
+        返回列: symbol, datetime, open, high, low, close, volume, amount。
+        """
+        glob = self._minute_period_glob(period)
+        if not glob or not symbols:
+            return pl.DataFrame()
+        try:
+            lf = pl.scan_parquet(glob)
+            available = set(lf.collect_schema().names())
+            select_cols = [
+                c
+                for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+                if c in available
+            ]
+            return (
+                lf.select(select_cols)
+                .filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("datetime").dt.date() >= start)
+                    & (pl.col("datetime").dt.date() <= end)
+                )
+                .sort(["symbol", "datetime"])
+                .collect(streaming=True)
+            )
+        except Exception as e:
+            logger.warning("多周期分钟K查询失败 (period=%s): %s", period, e)
+            return pl.DataFrame()
 
     def get_minute(
         self,

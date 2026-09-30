@@ -1455,6 +1455,38 @@ def _aggregate_minute(df, minutes: int):
     return out.sort("_i").drop("date", "_i").rename({"_dt": "date"})
 
 
+def _finalize_preagg(df):
+    """预聚合多周期K收尾: 补行号/日期后**重算指标**, 与 _aggregate_minute 同口径。
+
+    预聚合数据本身已是目标周期(如 30m), 不需要再切段, 但指标必须重算:
+    30 分钟线的 MA20 是「20 根 30 分钟」均线, 不等于任何日线取值。
+    """
+    import polars as pl
+
+    from app.indicators.pipeline import compute_indicators
+
+    d = df.sort("datetime").with_row_index("_i").with_columns(
+        pl.col("datetime").dt.date().alias("_day")
+    )
+    base = d.select([
+        "_i",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        pl.col("_day").alias("date"),
+    ])
+    out = compute_indicators(base, assume_sorted=True)
+    # 指标管线不产出的列(如 amount/datetime)按行号补回, 用行号而非 date 做 key
+    # (同一天有多根分钟K, 用 date join 会笛卡尔爆炸)
+    extra = [c for c in d.columns if c not in out.columns and c not in ("_i", "_day")]
+    if extra:
+        out = out.join(d.select(["_i", *extra]), on="_i", how="left")
+    return out.sort("_i").drop(["date", "_i"]).rename({"datetime": "date"})
+
+
 @router.get("/minute-k")
 def get_minute_k(
     request: Request,
@@ -1463,10 +1495,13 @@ def get_minute_k(
     days: int = Query(120, ge=1, le=400, description="读取最近 N 个交易日的分钟数据"),
     fields: str | None = Query(None, description="逗号分隔的列名白名单"),
 ):
-    """多分钟周期 K 线 (30/60/90/120 分钟等)。
+    """多分钟周期 K 线 (5/15/30/60/90/120 分钟)。
 
-    由本地 1 分钟 K 聚合而来, 因此**依赖分钟数据是否回补**:
-    默认只拉最近 N 个交易日, 若本地分钟数据不足, 返回的行数会很少。
+    数据源两级, 响应里的 source 字段标明实际走了哪条:
+    - ``preagg``: 预聚合多周期K (free-stockdb 导入的 5m/15m/30m/60m 目录),
+      可回溯到 2025-01 起约 423 个交易日 —— 长周期历史只能靠它。
+    - ``local``: 由本地 1 分钟 K 现场聚合。1m 表只覆盖最近 2 天 (腾讯 mkline 限制),
+      故仅用于 1m/90m/120m, 或预聚合目录缺该标的时回退。
     """
     minutes = _MINUTE_PERIODS.get(period)
     if minutes is None:
@@ -1483,7 +1518,6 @@ def get_minute_k(
     )
     end = cn_today()
     start = end - timedelta(days=days * 2 + 30)
-    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
     base_resp = {
         "symbol": symbol,
         "name": stock_info.get("name"),
@@ -1491,14 +1525,29 @@ def get_minute_k(
         "source": "none",
         "rows": [],
     }
-    if minute.is_empty() or "datetime" not in minute.columns:
-        return base_resp
-    agg = _aggregate_minute(minute, minutes)
+
+    # 数据源两级:
+    #   1) 预聚合多周期K (source=preagg): free-stockdb 导入的 5m/15m/30m/60m 目录,
+    #      可回溯到 2025-01, 是长周期历史的唯一来源 (1m 表只有最近 2 天)。
+    #   2) 1m 现场聚合 (source=local): 用于 1m/90m/120m, 以及预聚合缺失时的回退。
+    source = "none"
+    agg = None
+    if asset_type == "stock":
+        pre = repo.get_minute_period([symbol], period, start, end)
+        if not pre.is_empty() and "datetime" in pre.columns:
+            agg = _finalize_preagg(pre)
+            source = "preagg"
+    if agg is None or agg.is_empty():
+        minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+        if minute.is_empty() or "datetime" not in minute.columns:
+            return base_resp
+        agg = _aggregate_minute(minute, minutes)
+        source = "local"
     if agg.is_empty():
         return base_resp
     return {
         **base_resp,
-        "source": "local",
+        "source": source,
         "rows": _select_fields_df(agg, fields).to_dicts(),
     }
 
