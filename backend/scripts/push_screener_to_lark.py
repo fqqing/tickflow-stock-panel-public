@@ -1,8 +1,8 @@
 """B2: 每日选股结果推送飞书多维表格。
 
-从**运行中的后端** HTTP API 取三个矩阵原生策略的最新选股结果
-(底部结构 / 向上趋势并突破 / 趋势擒龙), 按各表字段映射后经 lark_bitable 通道推送,
-按 (代码, 信号日期) 去重, 同一天重复运行安全。
+从**运行中的后端** HTTP API 取矩阵原生策略与异动监控的最新结果
+(底部结构 / 向上趋势并突破 / 趋势擒龙 / 异动预警), 按各表字段映射后经
+lark_bitable 通道推送, 按 (代码, 日期) 去重, 同一天重复运行安全。
 
 为什么走 HTTP 而不是离线自举 repo+engine:
   后端进程里 enriched 缓存 / 策略引擎都已预热, 离线脚本重走一遍既慢又容易口径漂移;
@@ -39,7 +39,10 @@ from app.services import lark_bitable as lb
 logger = logging.getLogger("push_screener_to_lark")
 
 # ---------------------------------------------------------------------------
-# 策略 -> 目标表 映射 (沿用 qushiqinlong 三表; 启动策略暂无表, 后续加表后在此登记)
+# 数据源 -> 目标表 映射
+#   前三个沿用 qushiqinlong 三表 (走 /api/screener/run_preset);
+#   abnormal 走 /api/abnormal/overview (交易所异动规则口径), 表字段各不相同,
+#   故 key_fields / date_fields 按表配置而非常量。
 # ---------------------------------------------------------------------------
 STRATEGY_TABLES: dict[str, dict] = {
     "bottom_structure": {
@@ -57,10 +60,20 @@ STRATEGY_TABLES: dict[str, dict] = {
         "base_token": "S4lKbOf6TaQ7A2sFw4hcDbyanFE",
         "table_id": "tbl8ZWQKMgGqyawK",
     },
+    "abnormal": {
+        "label": "异动预警",
+        "base_token": "G5pgbvQSIaJHu6sJibNcK43Inkb",
+        "table_id": "tbllEDcfkJ6JR06M",
+        "key_fields": ("代码", "日期"),
+        "date_fields": ("日期",),
+    },
 }
 
 _KEY_FIELDS = ("代码", "信号日期")
 _DATE_FIELDS = ("信号日期",)
+
+# 板块 -> 单日涨跌幅上限 (判断「下一日是否可能触发」时用它封顶)
+_LIMIT_UP_BY_BOARD = {"主板": 0.10, "创业板/科创板": 0.20, "北交所": 0.30}
 
 
 # 本机调用必须绕过代理: 沙箱/终端常设 HTTP_PROXY, 后端重启间隙代理会返 502
@@ -91,6 +104,23 @@ def _fetch_strategy_rows(backend: str, strategy_id: str, as_of: str | None) -> t
         payload["as_of"] = as_of
     resp = _http_json(f"{backend}/api/screener/run_preset", payload)
     return str(resp.get("as_of") or ""), resp.get("rows") or []
+
+
+def _fetch_abnormal_rows(backend: str, min_closeness: float = 0.7) -> tuple[str, list[dict]]:
+    """调 /api/abnormal/overview, 返回 (as_of, rows)。
+
+    行结构: symbol / name / board / close / windows{3d,10d,30d:{value,threshold,closeness}}
+    / max_closeness / status。value 是「N日累计涨跌幅偏离值」(小数)。
+
+    min_closeness 是「接近度」下限 (|偏离|/阈值): 0.5 观察 / 0.7 边缘 / 1.0 已触发。
+    默认 0.7 —— 0.5 会把「才刚过半程」的一起拉进来, 实测全市场 187 行(过滤后仍有
+    106 条), 与该表历史每天几条的量级不符; 0.7 时约 59 条。
+    """
+    resp = _http_json(
+        f"{backend}/api/abnormal/overview?min_closeness={min_closeness}&limit=500", timeout=120
+    )
+    as_of = str(resp.get("cache_date") or "")[:10]
+    return as_of, resp.get("rows") or []
 
 
 def _fetch_capital_momentum(backend: str, symbol: str) -> float | None:
@@ -133,6 +163,8 @@ def build_records(
     momentum_map: dict[str, float | None] | None = None,
 ) -> list[dict]:
     """把 screener 行映射成目标表记录 (各表字段对齐 qushiqinlong 源脚本)。"""
+    if strategy_id == "abnormal":
+        return _abnormal_records(rows, as_of)
     records: list[dict] = []
     for r in rows:
         symbol = str(r.get("symbol") or "")
@@ -165,6 +197,68 @@ def build_records(
     return records
 
 
+def _abnormal_records(rows: list[dict], as_of: str, only_actionable: bool = True) -> list[dict]:
+    """异动边缘行 -> 异动预警表记录。
+
+    口径(与表内历史数据对齐, 由表内既有记录反推):
+      - 所需最小涨幅 = 目标窗口阈值 - 当前偏离值 (线性近似, 非复利)。
+      - 目标等级 = 未触发窗口里「所需涨幅最小」的那个; 全触发则取偏离最大的窗口。
+      - 下一日可能触发 = 所需涨幅 <= 该板块单日涨跌幅上限。
+      - 是否异动类型 = 已触发窗口的列举, 形如 "10日涨跌幅异常(53.49%)"。
+
+    only_actionable=True (默认) 时只留「明日可能触发」或「已触发」的行 ——
+    否则会把「还需涨 133% 才够」这类无行动价值的噪音一起推 (实测默认口径下有
+    近 200 条, 有效 actionable 只有几十条)。
+    """
+    records: list[dict] = []
+    for r in rows:
+        symbol = str(r.get("symbol") or "")
+        code, _, market = symbol.partition(".")
+        prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(market, market.lower())
+        windows = r.get("windows") or {}
+
+        triggered: list[tuple[int, float]] = []
+        pending: dict[int, float] = {}
+        for key, w in windows.items():
+            try:
+                n = int(str(key).rstrip("d"))
+            except ValueError:
+                continue
+            val = lb.to_num(w.get("value")) or 0.0
+            thr = lb.to_num(w.get("threshold")) or 0.0
+            if (lb.to_num(w.get("closeness")) or 0.0) >= 1.0:
+                triggered.append((n, val))
+            else:
+                pending[n] = thr - val
+
+        if pending:
+            target_n = min(pending, key=lambda k: pending[k])
+            need = pending[target_n]
+        elif triggered:
+            target_n = max(triggered, key=lambda t: t[1])[0]
+            need = 0.0
+        else:
+            continue
+
+        limit_up = _LIMIT_UP_BY_BOARD.get(str(r.get("board") or ""), 0.10)
+        if only_actionable and need > limit_up and not triggered:
+            continue
+        desc = ", ".join(f"{n}日涨跌幅异常({v * 100:.2f}%)" for n, v in sorted(triggered))
+        records.append({
+            "代码": f"{prefix}{code}",
+            "名称": str(r.get("name") or ""),
+            "日期": as_of,
+            "收盘价": lb.to_num(r.get("close")),
+            "触发信号次数": len(triggered),
+            "所需最小涨幅": round(need, 6),
+            "是否异动类型": desc or None,
+            "预警信息": f"明日若涨 {need * 100:.2f}% 将触发{target_n}日异动" if need > 0 else None,
+            "目标等级": f"{target_n}日异动",
+            "下一日可能触发": "True" if need <= limit_up else "False",
+        })
+    return records
+
+
 def run(args: argparse.Namespace) -> int:
     backend = args.backend.rstrip("/")
     only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else list(STRATEGY_TABLES)
@@ -179,7 +273,12 @@ def run(args: argparse.Namespace) -> int:
         cfg = STRATEGY_TABLES[sid]
         label = cfg["label"]
         try:
-            as_of, rows = _fetch_strategy_rows(backend, sid, args.as_of)
+            if sid == "abnormal":
+                as_of, rows = _fetch_abnormal_rows(
+                    backend, getattr(args, "abnormal_min_closeness", 0.7)
+                )
+            else:
+                as_of, rows = _fetch_strategy_rows(backend, sid, args.as_of)
         except RuntimeError as e:
             logger.error("[%s] %s", label, e)
             exit_code = 1
@@ -202,7 +301,9 @@ def run(args: argparse.Namespace) -> int:
 
         result = lb.push_records(
             cfg["base_token"], cfg["table_id"], records,
-            key_fields=_KEY_FIELDS, force=args.force, date_fields=_DATE_FIELDS,
+            key_fields=cfg.get("key_fields", _KEY_FIELDS),
+            force=args.force,
+            date_fields=cfg.get("date_fields", _DATE_FIELDS),
         )
         for d in result.details:
             logger.info("[%s] %s", label, d)
@@ -225,6 +326,10 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="只打印记录不推送")
     p.add_argument("--force", action="store_true", help="跳过去重, 强制全量推送")
     p.add_argument("--no-enrich", action="store_true", help="不逐只补资金动能 (更快)")
+    p.add_argument(
+        "--abnormal-min-closeness", type=float, default=0.7,
+        help="异动接近度下限 0.5/0.7/1.0 (观察/边缘/已触发), 默认 0.7",
+    )
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     return run(args)
