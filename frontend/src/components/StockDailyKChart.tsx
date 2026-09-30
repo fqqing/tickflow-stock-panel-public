@@ -31,6 +31,8 @@ export type KLinePeriod = 'day' | 'week' | 'month' | '1m' | '5m' | '15m' | '30m'
  */
 const MINUTE_PERIODS: KLinePeriod[] = ['1m', '5m', '15m', '30m', '60m', '90m', '120m']
 export const isMinutePeriod = (p: KLinePeriod): boolean => MINUTE_PERIODS.includes(p)
+/** 这两个主图叠加指标的开关放顶部工具条(与缠论同组), 不占底部副图指标栏 */
+const TOP_TOOLBAR_OVERLAYS = ['tdragon', 'structure']
 const PERIOD_OPTIONS: { key: KLinePeriod; label: string }[] = [
   { key: 'day', label: '日' },
   { key: 'week', label: '周' },
@@ -467,8 +469,34 @@ export function StockDailyKChart({
             </button>
           )}
 
-          {(showMarkerToggle && showLimitMarkers) || chanEnabled !== undefined ? (
-            <div className="ml-auto flex items-center gap-1.5">
+          {/* 右侧: 主图叠加开关 (蛟龙出海/主图定量结构画在 K 线上, 与缠论/异动同组),
+              分钟周期下禁用(这两组信号只有日/周/月口径) */}
+          <div className="ml-auto flex items-center gap-1.5">
+            {OVERLAY_INDICATORS.filter(ind => TOP_TOOLBAR_OVERLAYS.includes(ind.key)).map(ind => {
+              const minuteDisabled = isMinutePeriod(period)
+              const active = activeIndicators.includes(ind.key)
+              return (
+                <button
+                  key={ind.key}
+                  onClick={() => toggleIndicator(ind.key)}
+                  disabled={minuteDisabled}
+                  title={minuteDisabled
+                    ? `${ind.label}仅在日/周/月周期下可用`
+                    : active ? `隐藏${ind.label}` : `显示${ind.label}`}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                    minuteDisabled
+                      ? 'bg-elevated text-muted/40 cursor-not-allowed'
+                      : active
+                        ? 'text-accent bg-accent/15 cursor-pointer'
+                        : 'bg-elevated text-muted hover:text-secondary cursor-pointer'
+                  }`}
+                >
+                  {ind.label}
+                </button>
+              )
+            })}
+            {(showMarkerToggle && showLimitMarkers) || chanEnabled !== undefined ? (
+              <>
               {showMarkerToggle && showLimitMarkers && (
                 <button
                   onClick={() => setShowMarkers(v => !v)}
@@ -499,8 +527,9 @@ export function StockDailyKChart({
                   缠论
                 </button>
               )}
-            </div>
-          ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
       )}
       {klineData.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
@@ -561,7 +590,8 @@ export function StockDailyKChart({
             </button>
           ))}
           <div className="h-4 w-px bg-border/70" />
-          {OVERLAY_INDICATORS.map(ind => (
+          {/* 蛟龙出海/主图定量结构已上移到顶部工具条, 这里只剩 BOLL 等主图叠加 */}
+          {OVERLAY_INDICATORS.filter(ind => !TOP_TOOLBAR_OVERLAYS.includes(ind.key)).map(ind => (
             <button
               key={ind.key}
               onClick={() => toggleIndicator(ind.key)}
