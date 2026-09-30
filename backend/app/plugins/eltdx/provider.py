@@ -150,6 +150,26 @@ def _client() -> object:
     return _CLIENT
 
 
+def shared_client() -> object:
+    """对外暴露进程共享的 eltdx client(盘中增强模块与插件共用同一连接池)。"""
+    return _client()
+
+
+def market_meta() -> dict[str, dict]:
+    """本地标的维表快照: ``{symbol: {"name","float_shares","is_index"}}``。
+
+    盘中增强模块(题材/涨停梯队/竞价)要靠它补名称与流通股本 —— 上游这些接口
+    只回代码。带 mtime 缓存, 可以放心在请求路径上调用。
+    """
+    return _local_market_meta()
+
+
+def eltdx_to_app(exchange: str, code: str) -> str | None:
+    """``sh`` + ``600519`` -> ``600519.SH``。未知市场返回 None。"""
+    suffix = _PREFIX_TO_SUFFIX.get(str(exchange or "").lower())
+    return code + "." + suffix if suffix and code else None
+
+
 def app_to_eltdx(sym: str) -> str | None:
     """600519.SH -> sh600519。非沪深北交易所返回 None(不可用)。
 
