@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
@@ -591,6 +591,77 @@ const STRUCTURE_MARK_COLORS: Record<number, string> = {
 const INFO_BAR_H = 16
 /** 子图之间的间距 (px) */
 const SUB_GAP_PX = 4
+/** 主图最小高度 (px) —— 拖拽时不可再压 */
+const MIN_MAIN_H = 120
+/** 单个副图最小图表高度 (px) */
+const MIN_SUB_H = 40
+/** 拖拽分隔条命中高度 (px) */
+const DIVIDER_HIT_PX = 6
+/** 主图上方留白 (px) */
+const TOP_PAD = 8
+/** 主图下方留给 x 轴标签的高度 (px) */
+const CANDLE_BOTTOM_PAD = 22
+/** 用户拖拽过的窗格高度持久化 key（跨股票/跨会话保留） */
+const PANE_H_STORAGE_KEY = 'tickflow.klinePaneHeights'
+
+/** 窗格高度布局: 主图 + 各副图(顺序与 activeSubDefs 一致) */
+interface PaneLayout {
+  mainH: number
+  subH: number[]
+}
+
+function loadPaneHeights(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(PANE_H_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function savePaneHeights(value: Record<string, number>): void {
+  try {
+    localStorage.setItem(PANE_H_STORAGE_KEY, JSON.stringify(value))
+  } catch {
+    // localStorage 不可用(隐私模式/配额)时静默降级为内存态
+  }
+}
+
+/**
+ * 解析窗格高度: 用户拖过的优先, 否则取默认; 总高超出容器时先等比压副图, 再压主图。
+ *
+ * ⚠️ 关键修正: 旧实现把 subTotalH 直接加进 chartHeight(把容器撑高), 副图一多就
+ *    溢出父容器被裁掉 —— 也就是「副图全挤在最下方看不见」。这里改成容器高度固定,
+ *    所有窗格只在容器内部分配, 永不溢出。
+ */
+function resolvePaneHeights(
+  keys: string[],
+  defaults: number[],
+  avail: number,
+  stored: Record<string, number>,
+): PaneLayout {
+  const n = keys.length
+  const fixed = n * (INFO_BAR_H + SUB_GAP_PX)
+  let subH = keys.map((k, i) => Math.max(MIN_SUB_H, stored[k] ?? defaults[i]))
+  const subSum = () => subH.reduce((acc, h) => acc + h, 0)
+  let mainH = stored['main'] ?? 0
+
+  // 没拖过主图: 主图吃掉剩余空间
+  if (!mainH) mainH = Math.max(avail - fixed - subSum(), MIN_MAIN_H)
+
+  let total = mainH + subSum() + fixed
+  if (total > avail) {
+    // 1) 副图等比压缩(但不低于 MIN_SUB_H)
+    const room = Math.max(subSum() - (total - avail), n * MIN_SUB_H)
+    const scale = room / Math.max(subSum(), 1)
+    subH = subH.map(h => Math.max(MIN_SUB_H, Math.floor(h * scale)))
+    total = mainH + subSum() + fixed
+    // 2) 仍超出: 压主图
+    if (total > avail) mainH = Math.max(MIN_MAIN_H, avail - fixed - subSum())
+  }
+  return { mainH, subH }
+}
 
 /** 主图定量结构的信息栏片段 (双轨数值 + 交叉图标 + 九转数字)。 */
 function structureInfoParts(d: OHLC | null, active: boolean): string[] {
@@ -622,14 +693,19 @@ function buildSubInfoGraphics(
   activeIndicators: string[],
   subStartTop: number,
   volumeCompare: VolumeCompareConfig,
+  subHeights?: number[],
 ): any[] {
   const d = infoIdx >= 0 && infoIdx < data.length ? data[infoIdx] : null
   const graphics: any[] = []
   let curTop = subStartTop
+  // 副图序号: 用于取用户拖拽后的实际高度(activeIndicators 里可能混着主图叠加项)
+  let si = 0
 
   activeIndicators.forEach((key) => {
     const def = SUB_CHARTS.find(s => s.key === key)
     if (!def) return
+    const paneH = subHeights?.[si] ?? def.height
+    si += 1
 
     const items = def.buildInfo(d)
     if (def.key === 'vol' && d) {
@@ -704,7 +780,7 @@ function buildSubInfoGraphics(
       silent: true, z: 10,
     })
 
-    curTop += INFO_BAR_H + def.height + SUB_GAP_PX
+    curTop += INFO_BAR_H + paneH + SUB_GAP_PX
   })
 
   return graphics
@@ -721,7 +797,7 @@ function buildOption(
   showMA: boolean,
   compact: boolean,
   activeIndicators: string[],
-  containerHeight: number,
+  layout: PaneLayout,
   infoIdx: number,
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
@@ -803,20 +879,18 @@ function buildOption(
   // ====== 布局计算 ======
   const left = 60
   const right = 20
-  const topPad = 8
-  const candleBottomPad = 22
+  const topPad = TOP_PAD
+  const candleBottomPad = CANDLE_BOTTOM_PAD
 
-  let subTotalH = 0
   const activeSubDefs: SubChartDef[] = []
   activeIndicators.forEach(key => {
     const def = SUB_CHARTS.find(s => s.key === key)
     if (!def) return
     activeSubDefs.push(def)
-    subTotalH += INFO_BAR_H + def.height
   })
-  if (activeSubDefs.length > 0) subTotalH += activeSubDefs.length * SUB_GAP_PX
 
-  const candleAvail = Math.max(containerHeight - topPad - candleBottomPad - subTotalH, 100)
+  // 主图/副图高度由上层按「可拖拽布局」算好传入; 这里只消费, 不再自己撑高容器
+  const candleAvail = Math.max(layout.mainH, MIN_MAIN_H)
 
   const grids: any[] = []
   const xAxes: any[] = []
@@ -1156,10 +1230,11 @@ function buildOption(
     const yAxisIdx = i + 1
 
     const chartTop = curTop + INFO_BAR_H
+    const paneH = layout.subH[i] ?? def.height
     grids.push({
       left, right,
       top: chartTop,
-      height: def.height,
+      height: paneH,
       show: true,
       borderColor: CT().grid,
       borderWidth: 1,
@@ -1193,12 +1268,12 @@ function buildOption(
       series.push({ ...s, xAxisIndex: xAxisIdx, yAxisIndex: yAxisIdx })
     })
 
-    curTop += INFO_BAR_H + def.height + SUB_GAP_PX
+    curTop += INFO_BAR_H + paneH + SUB_GAP_PX
   })
 
   // 子图信息栏 graphic
   const subStartTop = topPad + candleAvail + candleBottomPad
-  const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare)
+  const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare, layout.subH)
 
   return {
     animation: false,
@@ -1281,8 +1356,8 @@ export function EChartsCandlestick({
   activeIndicatorsRef.current = activeIndicators
   const volumeCompareRef = useRef(volumeCompare)
   volumeCompareRef.current = volumeCompare
-  const chartHeightRef = useRef(300)
-  const subTotalHRef = useRef(0)
+  const subStartTopRef = useRef(0)
+  const layoutRef = useRef<PaneLayout>({ mainH: 300, subH: [] })
   const getInfoBarHTMLRef = useRef<() => string>(() => '')
 
   // 强制刷新信息栏 DOM 的回调
@@ -1294,34 +1369,95 @@ export function EChartsCandlestick({
     if (!d) return
     const chart = chartRef.current
     if (!chart) return
-    const subStartTop = chartHeightRef.current - subTotalHRef.current
     const infoGraphics = buildSubInfoGraphics(
       curData,
       idx,
       activeIndicatorsRef.current,
-      subStartTop,
+      subStartTopRef.current,
       volumeCompareRef.current,
+      layoutRef.current.subH,
     )
     if (infoGraphics.length > 0) {
       chart.setOption({ graphic: infoGraphics }, { lazyUpdate: true })
     }
   }).current
 
-  // 计算子图总高度
+  // 副图定义(顺序 = 图上从上到下)
   const activeSubDefs = activeIndicators
     .map(key => SUB_CHARTS.find(s => s.key === key))
     .filter((d): d is SubChartDef => !!d)
 
-  let subTotalH = 0
-  activeSubDefs.forEach(def => { subTotalH += INFO_BAR_H + def.height })
-  if (activeSubDefs.length > 0) subTotalH += activeSubDefs.length * SUB_GAP_PX
-
   const mainInfoBarH = showInfoBar ? 40 : 0
-  const minCandleH = 120
 
-  const chartHeight = Math.max(height - mainInfoBarH, 8 + minCandleH + 14 + subTotalH)
-  chartHeightRef.current = chartHeight
-  subTotalHRef.current = subTotalH
+  // ⚠️ 容器高度固定 = 可用高度, 不再把副图总高加进来。
+  //    旧实现 `Math.max(..., 8+120+14+subTotalH)` 会把容器撑高、溢出父容器,
+  //    于是副图一多就被裁在下面看不见 —— 也就是「副图全挤在最下方」。
+  const chartHeight = Math.max(height - mainInfoBarH, TOP_PAD + MIN_MAIN_H + 14)
+
+  // 窗格高度: 用户拖过的值持久化(localStorage), 空间不足时自动等比压缩 ⇒ 永不溢出
+  const [storedH, setStoredH] = useState<Record<string, number>>(() => loadPaneHeights())
+  const [dragIdx, setDragIdx] = useState<number | null>(null)
+  const layout = useMemo(() => {
+    const defs = activeIndicators
+      .map(key => SUB_CHARTS.find(s => s.key === key))
+      .filter((d): d is SubChartDef => !!d)
+    return resolvePaneHeights(
+      defs.map(d => d.key),
+      defs.map(d => d.height),
+      chartHeight - TOP_PAD - CANDLE_BOTTOM_PAD,
+      storedH,
+    )
+  }, [activeIndicators, chartHeight, storedH])
+  layoutRef.current = layout
+  // 副图区起始 y = 顶部留白 + 主图高 + x 轴标签高度
+  subStartTopRef.current = TOP_PAD + layout.mainH + CANDLE_BOTTOM_PAD
+
+  // 分隔条位置: dividers[i] 位于「窗格 i」与「窗格 i+1」之间(窗格 0 = 主图)
+  const dividers = useMemo(() => {
+    const out: { key: string; y: number }[] = []
+    let y = TOP_PAD + layout.mainH + CANDLE_BOTTOM_PAD
+    activeSubDefs.forEach((def, i) => {
+      out.push({ key: def.key, y })
+      y += INFO_BAR_H + (layout.subH[i] ?? def.height) + SUB_GAP_PX
+    })
+    return out
+  }, [layout, activeSubDefs])
+
+  const startDrag = useCallback((idx: number, event: { preventDefault: () => void; clientY: number }) => {
+    event.preventDefault()
+    const startY = event.clientY
+    const heights = [layout.mainH, ...layout.subH]
+    const a0 = heights[idx]
+    const b0 = heights[idx + 1]
+    const aMin = idx === 0 ? MIN_MAIN_H : MIN_SUB_H
+    const bMin = MIN_SUB_H
+    const keys = ['main', ...activeSubDefs.map(d => d.key)]
+    setDragIdx(idx)
+
+    const onMove = (ev: MouseEvent) => {
+      let a = a0 + (ev.clientY - startY)
+      let b = b0 - (ev.clientY - startY)
+      // 触底时把多出来的量让给另一侧, 保证总高不变
+      if (a < aMin) { b -= aMin - a; a = aMin }
+      if (b < bMin) { a -= bMin - b; b = bMin }
+      setStoredH(prev => {
+        const next = {
+          ...prev,
+          [keys[idx]]: Math.max(aMin, Math.round(a)),
+          [keys[idx + 1]]: Math.max(bMin, Math.round(b)),
+        }
+        savePaneHeights(next)
+        return next
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      setDragIdx(null)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [layout, activeSubDefs])
 
   // 预计算 date→index Map (O(1) 查找)
   const dates = useMemo(() => data.map(d => d.date), [data])
@@ -1589,11 +1725,18 @@ export function EChartsCandlestick({
       priceLines,
       polylines,
       showMA, compactRef.current,
-      activeIndicators, chartHeight,
+      activeIndicators, layout,
       infoIdxRef.current,
       linkedPrice,
       volumeCompare,
     )
+
+    if (dragIdx !== null) {
+      // 拖拽调整窗格高度时只提交 grid + 信息栏位置, 不重建 series
+      // —— 每帧全量 setOption 会明显卡顿
+      chart.setOption({ grid: option.grid, graphic: option.graphic }, { lazyUpdate: true })
+      return
+    }
 
     chart.setOption(option, true)
 
@@ -1610,7 +1753,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, polylines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, polylines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, layout, dragIdx, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {
@@ -1679,8 +1822,23 @@ export function EChartsCandlestick({
           dangerouslySetInnerHTML={{ __html: initialHTML }} />
       )}
 
-      {/* ECharts canvas */}
-      <div ref={containerRef} className="w-full" style={{ height: chartHeight }} />
+      {/* ECharts canvas + 可拖拽分隔条 */}
+      <div className="relative w-full" style={{ height: chartHeight }}>
+        <div ref={containerRef} className="h-full w-full" />
+        {dividers.map((d, i) => (
+          <div
+            key={d.key}
+            role="separator"
+            aria-orientation="horizontal"
+            title="上下拖动调整窗格高度"
+            onMouseDown={event => startDrag(i, event)}
+            className={`absolute inset-x-0 z-10 cursor-row-resize transition-colors ${
+              dragIdx === i ? 'bg-accent/60' : 'bg-transparent hover:bg-accent/30'
+            }`}
+            style={{ top: d.y, height: DIVIDER_HIT_PX, transform: 'translateY(-50%)' }}
+          />
+        ))}
+      </div>
     </div>
   )
 }
