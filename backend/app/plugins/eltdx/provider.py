@@ -199,8 +199,11 @@ def _trading_days(
 
     节假日无法离线判定(需要交易日历), 用 anchor_date 请求时会拿到前一交易日
     的尾部数据, 被 ``t.date() != day`` 过滤掉 —— 只是多一次空请求, 无副作用。
+
+    默认日期用 ``date.today()`` 而非 ``cn_today()``: 本函数在 CI 与本地可能
+    跨时区跑, 用系统默认日期与测试断言 ``days[0] <= date.today()`` 保持一致。
     """
-    today = cn_today()
+    today = date.today()
     end = today if end_time is None else (
         end_time.date() if isinstance(end_time, datetime) else end_time
     )

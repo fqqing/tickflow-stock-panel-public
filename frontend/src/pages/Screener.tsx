@@ -100,6 +100,8 @@ export function Screener() {
   const [filter, setFilter] = useState<ScreenerFilterType>(defaultFilter)
   const filterMap = useRef<Map<string, ScreenerFilterType>>(new Map())
   const runAllDateRef = useRef<string | null>(null)
+  /** 首屏是否已自动跑过一次 run_all; 切换日期不再自动跑全部策略。 */
+  const autoRunOnceRef = useRef(false)
   const qc = useQueryClient()
 
   // 结果列配置 — 默认内置列，异步合并后端/localStorage 偏好
@@ -548,10 +550,14 @@ export function Screener() {
     // 缓存已覆盖当前策略池 → 秒加载, 不触发 runAll
     if (cacheCoversPool) {
       runAllDateRef.current = runKey
+      autoRunOnceRef.current = true
       return
     }
-    // 未覆盖: 受系统开关控制
-    if (!screenerAutoRun) return
+    // 未覆盖: 受系统开关控制; 且只在首屏自动跑一次 run_all。
+    // 切换日期不再自动跑全部策略 —— 避免每次切日期都重算整个池子,
+    // 用户点击具体策略时按需单跑即可。
+    if (!screenerAutoRun || autoRunOnceRef.current) return
+    autoRunOnceRef.current = true
     runAllDateRef.current = runKey
     requestRunAll({ date: asOf, strategyIds: missingStrategyIds })
   }, [asOf, strategyPresets.length, summaryQuery.isSuccess, visiblePool, cacheCoversPool, missingStrategyIds, screenerAutoRun, assetType, runAll.isPending, requestRunAll])
@@ -567,6 +573,15 @@ export function Screener() {
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
     },
   })
+
+  // 切换日期后, 若当前正展示的策略没有缓存, 只单跑它(不算全部策略池)。
+  useEffect(() => {
+    if (assetType !== 'stock') return
+    if (!activeStrategy || !asOf || run.isPending || runAll.isPending) return
+    const cached = summaryQuery.data?.results[activeStrategy]
+    if (cached?.as_of === asOf) return
+    run.mutate({ id: activeStrategy, date: asOf })
+  }, [asOf, activeStrategy, assetType, run, run.isPending, runAll.isPending, summaryQuery.data])
 
   const handleRun = (s: ScreenerStrategy) => {
     handleStrategySwitch(s.id)
