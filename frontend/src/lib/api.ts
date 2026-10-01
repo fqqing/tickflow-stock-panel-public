@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import { BUILTIN_SIGNAL_DEFINITIONS } from './signals'
 
 const BASE = ''
 
@@ -276,6 +277,20 @@ export const KLINE_CHART_FIELDS = [
   'st_dsg', 'st_dxg', 'st_csg', 'st_cxg', 'st_icon', 'st_dn', 'st_up',
   'ms_diff', 'ms_dea', 'ms_hist', 'ms_btext', 'ms_by', 'ms_ttext', 'ms_ty',
 ].join(',')
+
+/**
+ * 策略信号列(signal_*): 只有打开信号标记时才随 fields 下发。
+ *
+ * 不放进 KLINE_CHART_FIELDS 是因为它们是布尔列, 1000 根会多出两万多个 key
+ * (未压缩约 +300KB), 而多数时候用户只看 K 线不看信号 —— 按需下发更划算。
+ * 清单直接从 signals.ts 取, 避免后端加信号时两处维护漂移。
+ */
+export const KLINE_SIGNAL_FIELDS = BUILTIN_SIGNAL_DEFINITIONS.map((d) => d.id).join(',')
+
+/** K 线图请求的 fields: 打开信号标记时追加信号列 */
+export function klineChartFields(withSignals: boolean): string {
+  return withSignals ? `${KLINE_CHART_FIELDS},${KLINE_SIGNAL_FIELDS}` : KLINE_CHART_FIELDS
+}
 
 export interface KlineRow {
   symbol?: string

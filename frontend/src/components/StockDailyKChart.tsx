@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, KLINE_CHART_FIELDS, type KlineRow } from '@/lib/api'
+import { api, KLINE_CHART_FIELDS, klineChartFields, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -113,6 +113,12 @@ interface Props {
    */
   structureOverlay?: boolean
   onStructureChange?: (v: boolean) => void
+  /**
+   * 策略信号标记开关(受控, 可选)。与 KLinePro 侧同一套口径(共用中文名/配色)。
+   * 打开会在 fields 里追加 signal_* 列(1000 根约 +300KB 未压缩), 默认关。
+   * 只有日线档有意义 —— 周/月线是聚合结果, 分钟档没有这些列。
+   */
+  signalsEnabled?: boolean
   /**
    * true = 隐藏图内的叠加层开关(主图定量结构 / 缠论)。
    * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是「割裂」观感,
@@ -241,6 +247,7 @@ export function StockDailyKChart({
   onPeriodChange,
   structureOverlay,
   onStructureChange,
+  signalsEnabled = false,
   hideOverlayToggles = false,
   adjust: adjustProp,
   onAdjustChange,
@@ -297,8 +304,9 @@ export function StockDailyKChart({
 
   // extColumns 纳入 query key：勾选/取消扩展字段时需重新请求（带 ext_columns 参数）
   const kline = useQuery({
-    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns, period, adjust),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, adjust),
+    // signalsEnabled 必须进 key: 打开信号标记要重新拉一次带 signal_* 列的响应
+    queryKey: [...QK.kline(symbol, dateRange.start, dateRange.end, extColumns, period, adjust), signalsEnabled],
+    queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns, CUSTOM_INDICATORS, klineChartFields(signalsEnabled), period, adjust),
     enabled: !!symbol && !minutePeriod,
     placeholderData: (prev) => prev,
   })
@@ -580,6 +588,7 @@ export function StockDailyKChart({
         <div className={`relative ${drawing ? 'cursor-crosshair' : ''}`}>
           <EChartsCandlestick
             data={rows}
+            signalsEnabled={signalsEnabled}
             markers={allMarkers}
             ranges={ranges}
             priceLines={priceLines}

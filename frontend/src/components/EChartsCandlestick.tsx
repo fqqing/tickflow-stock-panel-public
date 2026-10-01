@@ -7,6 +7,12 @@ import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange } from '@/lib/chart-primitives'
+import {
+  collectSignalIds,
+  SIGNAL_CN,
+  SIGNAL_COLORS,
+  signalKindOf,
+} from './kline/signal-markers'
 
 // 原语类型已抽到 lib/chart-primitives(换图表内核时上游无需改动), 此处原样导出保持兼容
 export type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange }
@@ -500,6 +506,12 @@ interface Props {
   showInfoBar?: boolean
   showMarkers?: boolean
   onToggleMarkers?: () => void
+  /**
+   * 策略信号标记(与 KLinePro 侧同一套口径: 买=红 / 卖=绿 / 双向=蓝)。
+   * 默认关。要真的画出来, data 里必须带 signal_* 列 —— 由上层在 fields 里
+   * 加上(见 api.ts 的 klineChartFields), 列没下发时这里自然什么都不画。
+   */
+  signalsEnabled?: boolean
   stockInfo?: StockInfo
   symbol?: string
   linkedPrice?: number | null
@@ -1312,6 +1324,7 @@ export function EChartsCandlestick({
   showInfoBar = true,
   showMarkers: showMarkersProp = true,
   onToggleMarkers: _onToggleMarkers,
+  signalsEnabled = false,
   stockInfo,
   symbol: _symbol,
   linkedPrice,
@@ -1705,14 +1718,43 @@ export function EChartsCandlestick({
     if (seriesUpdates.length > 0) chart.setOption({ series: seriesUpdates })
   }
 
+  // ── 策略信号标记: 与 KLinePro 侧同一套口径(共用 collectSignalIds/中文名/配色) ──
+  // ECharts 的 markPoint 没法像 klinecharts overlay 那样按槽位堆叠, 所以一根 K 线
+  // 触发多个信号时合并成一个标记: 方向取优先级(卖 > 买 > 双向), 标签用「/」连前两个。
+  const signalMarkers = useMemo<ChartMarker[]>(() => {
+    if (!signalsEnabled) return []
+    const out: ChartMarker[] = []
+    for (const d of data) {
+      const ids = collectSignalIds(d as unknown as Record<string, unknown>)
+      if (ids.length === 0) continue
+      const kinds = ids.map(signalKindOf)
+      const hasExit = kinds.includes('exit')
+      const hasEntry = kinds.includes('entry')
+      const names = ids.slice(0, 2).map((id) => SIGNAL_CN.get(id) ?? id)
+      out.push({
+        date: d.date,
+        kind: hasExit ? 'sell' : hasEntry ? 'buy' : 'neutral',
+        label: names.join('/') + (ids.length > 2 ? '…' : ''),
+        color: SIGNAL_COLORS[hasExit ? 'exit' : hasEntry ? 'entry' : 'both'],
+      })
+    }
+    return out
+  }, [data, signalsEnabled])
+
   // ===== 核心: 仅在数据/配置变更时全量 setOption =====
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
 
+    // 缠论 markers 与信号标记是两个独立开关, 合并后一起下发
+    const allMarkers = [
+      ...(showMarkersProp ? markers ?? [] : []),
+      ...signalMarkers,
+    ]
+
     const option = buildOption(
       data, dates, dateIndexMap,
-      showMarkersProp ? markers : undefined,
+      allMarkers.length > 0 ? allMarkers : undefined,
       ranges,
       priceLines,
       polylines,

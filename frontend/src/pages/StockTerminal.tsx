@@ -159,6 +159,7 @@ export function StockTerminal() {
   const structOn = overlays.structure
   const chanOn = overlays.chan
   const chipsOn = overlays.chips
+  const signalsOn = overlays.signals
   const [renderer, setRenderer] = useState<ChartRendererId>(
     () => (getKLineProFlag() ? 'klinecharts' : 'echarts'),
   )
@@ -327,6 +328,8 @@ export function StockTerminal() {
           chartSession.setOverlay('chan', !chanOn); break
         case 's':
           chartSession.setOverlay('structure', !structOn); break
+        case 'x':
+          chartSession.setOverlay('signals', !signalsOn); break
         case 'r':
           setRailOpen(v => !v); break
         case 'p':
@@ -351,7 +354,7 @@ export function StockTerminal() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, structOn, symbol])
+  }, [chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, signalsOn, stepSymbol, structOn, symbol])
 
   if (!symbol) {
     return (
@@ -439,6 +442,14 @@ export function StockTerminal() {
                   onClick={() => chartSession.setOverlay('chips', !chipsOn)}
                 />
               )}
+              {caps.overlays.signals && (
+                <OverlayToggle
+                  active={signalsOn}
+                  label="信号"
+                  title="策略信号标记: 买=红下三角 / 卖=绿上三角 / 双向=蓝, 仅日线档 (x)"
+                  onClick={() => chartSession.setOverlay('signals', !signalsOn)}
+                />
+              )}
               <button
                 onClick={handleToggleKLine}
                 title={useKLine ? '切回 ECharts 内核 (g)' : '试用 KLineChart 内核 (g)'}
@@ -475,6 +486,8 @@ export function StockTerminal() {
                 chanEnabled={chanOn}
                 chipsEnabled={chipsOn}
                 onChipsChange={v => chartSession.setOverlay('chips', v)}
+                signalsEnabled={signalsOn}
+                onSignalsChange={v => chartSession.setOverlay('signals', v)}
                 hideOverlayToggles
                 priceLines={priceLines}
                 refetchIntervalMs={refetchMs}
@@ -492,6 +505,7 @@ export function StockTerminal() {
                 onAdjustChange={chartSession.setAdjust}
                 structureOverlay={structOn}
                 onStructureChange={v => chartSession.setOverlay('structure', v)}
+                signalsEnabled={signalsOn}
                 hideOverlayToggles
                 refetchIntervalMs={refetchMs}
                 inWatchlist={inWatchlist}

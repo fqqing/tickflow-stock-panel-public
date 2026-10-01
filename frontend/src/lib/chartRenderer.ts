@@ -23,6 +23,8 @@ export interface OverlayCapability {
   chan: boolean
   /** 筹码分布 */
   chips: boolean
+  /** 策略信号标记(signal_* 列)。两侧都实现了, 且共用同一份中文名/配色 */
+  signals: boolean
 }
 
 export interface ChartCapabilities {
@@ -66,7 +68,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
     capabilities: {
       periods: periodsFor('echarts'),
       adjust: true,
-      overlays: { structure: true, chan: true, chips: false },
+      overlays: { structure: true, chan: true, chips: false, signals: true },
       drawing: true,
       viewport: true,
       indicatorCatalog: 'isolated',
@@ -79,7 +81,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
     capabilities: {
       periods: periodsFor('klinecharts'),
       adjust: true,
-      overlays: { structure: true, chan: true, chips: true },
+      overlays: { structure: true, chan: true, chips: true, signals: true },
       drawing: false,
       viewport: true,
       indicatorCatalog: 'isolated',

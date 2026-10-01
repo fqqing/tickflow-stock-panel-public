@@ -34,6 +34,11 @@ export interface ChartOverlays {
   chan: boolean
   /** 筹码分布 */
   chips: boolean
+  /**
+   * 策略信号标记。只有日线档有意义 —— signal_* 是 enriched 日K的列, 周/月线是
+   * 聚合结果(聚合只保留 OHLCV), 分钟档根本没有这些列。
+   */
+  signals: boolean
 }
 
 export interface ChartSessionState {
@@ -47,7 +52,7 @@ const DEFAULT_STATE: ChartSessionState = {
   symbol: '',
   period: 'day',
   adjust: 'qfq',
-  overlays: { structure: true, chan: false, chips: false },
+  overlays: { structure: true, chan: false, chips: false, signals: false },
 }
 
 let state: ChartSessionState = DEFAULT_STATE
@@ -118,7 +123,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '日线 + 前复权 + 定量结构 + 缠论',
     period: 'day',
     adjust: 'qfq',
-    overlays: { structure: true, chan: true, chips: false },
+    overlays: { structure: true, chan: true, chips: false, signals: false },
   },
   {
     id: 'swing',
@@ -126,7 +131,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '30 分钟 + 不复权 + 定量结构 + 筹码',
     period: '30m',
     adjust: 'none',
-    overlays: { structure: true, chan: false, chips: true },
+    overlays: { structure: true, chan: false, chips: true, signals: false },
   },
   {
     id: 'review',
@@ -134,7 +139,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '周线 + 后复权 + 缠论(看大级别结构)',
     period: 'week',
     adjust: 'hfq',
-    overlays: { structure: false, chan: true, chips: false },
+    overlays: { structure: false, chan: true, chips: false, signals: false },
   },
 ]
 

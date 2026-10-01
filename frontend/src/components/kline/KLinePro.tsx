@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as kc from 'klinecharts'
-import { api, KLINE_CHART_FIELDS, type KlineRow } from '@/lib/api'
+import { api, KLINE_CHART_FIELDS, klineChartFields, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChanOverlay } from '@/lib/useChanOverlay'
 import { useChartTheme } from '@/lib/theme'
@@ -45,6 +45,11 @@ import { registerChanOverlay } from './chan-overlay-kline'
 import { registerPriceLineOverlay } from './price-line-overlay'
 import { registerChipsOverlay } from './chips-overlay'
 import { registerStructureOverlay, type StructurePayload } from './structure-overlay'
+import {
+  collectSignalIds,
+  registerSignalMarkersOverlay,
+  type SignalMarkersPayload,
+} from './signal-markers'
 import { IndicatorManager } from './IndicatorManager'
 import {
   MAIN_PANE_ID,
@@ -137,6 +142,7 @@ function rowToKLine(r: KlineRow): kc.KLineData | null {
     low: Number(r.low ?? r.close),
     close: Number(r.close),
     volume: Number(r.volume ?? 0),
+    sig: collectSignalIds(r),
     st_dsg: r.st_dsg ?? null,
     st_dxg: r.st_dxg ?? null,
     st_csg: r.st_csg ?? null,
@@ -205,6 +211,13 @@ export interface KLineProProps {
   chipsEnabled?: boolean
   onChipsChange?: (v: boolean) => void
   /**
+   * 策略信号标记开关(受控)。不传则组件内部维护, 默认关 ——
+   * 打开要额外下发 20 多个 signal_* 布尔列(1000 根约 +300KB 未压缩),
+   * 默认不付这个成本。打开后图上按买(红下三角)/卖(绿上三角)标出信号日。
+   */
+  signalsEnabled?: boolean
+  onSignalsChange?: (v: boolean) => void
+  /**
    * true = 隐藏图内的叠加层开关(定量结构 / 筹码)。
    * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是割裂观感。
    */
@@ -227,6 +240,8 @@ export function KLinePro({
   priceLines = [],
   chipsEnabled: chipsProp,
   onChipsChange,
+  signalsEnabled: signalsProp,
+  onSignalsChange,
   hideOverlayToggles = false,
   refetchIntervalMs,
 }: KLineProProps) {
@@ -246,8 +261,10 @@ export function KLinePro({
    * ★ 换股会 dispose 重建图表, 这些 id 随之失效 —— 重建时必须清空, 否则后续
    *   走 overrideOverlay 分支会打到不存在的 id 上, 表现是「换股后叠加层静默消失」。
    */
-  const overlayIds = useRef<Record<'chan' | 'chips' | 'price' | 'structure', string | null>>({
-    chan: null, chips: null, price: null, structure: null,
+  const overlayIds = useRef<
+    Record<'chan' | 'chips' | 'price' | 'structure' | 'signal', string | null>
+  >({
+    chan: null, chips: null, price: null, structure: null, signal: null,
   })
   /** 会话视口只重放一次(挂载/换股后), 之后交给用户自由滚动 */
   const vpAppliedRef = useRef(false)
@@ -276,14 +293,24 @@ export function KLinePro({
     else setInnerStruct(v)
   }, [onStructureChange])
 
+  // 策略信号标记: 受控优先, 默认关(打开要多下发 signal_* 列, 见 props 注释)
+  const [innerSignals, setInnerSignals] = useState(false)
+  const signalsOn = signalsProp ?? innerSignals
+  const applySignals = useCallback((v: boolean) => {
+    if (onSignalsChange) onSignalsChange(v)
+    else setInnerSignals(v)
+  }, [onSignalsChange])
+
   const days = useMemo(() => {
     const s = new Date(dateRange.start), e = new Date(dateRange.end)
     return Math.max(1, Math.ceil((e.getTime() - s.getTime()) / 86400000) + 1)
   }, [dateRange])
 
   const daily = useQuery({
-    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, undefined, period, adjust),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, adjust),
+    // signalsOn 必须进 key: 打开信号标记要重新拉一次带 signal_* 列的响应,
+    // 否则命中旧缓存(没有信号列)会导致图上什么都不标。
+    queryKey: [...QK.kline(symbol, dateRange.start, dateRange.end, undefined, period, adjust), signalsOn],
+    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, klineChartFields(signalsOn), period, adjust),
     enabled: !!symbol && !minutePeriod,
   })
 
@@ -334,12 +361,13 @@ export function KLinePro({
     // 指标 diff 的 effect 不会重跑, 新图上就一个指标都没有。
     setReady(false)
     indRefs.current.clear()
-    overlayIds.current = { chan: null, chips: null, price: null, structure: null }
+    overlayIds.current = { chan: null, chips: null, price: null, structure: null, signal: null }
     vpAppliedRef.current = false
     registerChanOverlay()
     registerPriceLineOverlay()
     registerChipsOverlay()
     registerStructureOverlay()
+    registerSignalMarkersOverlay()
 
     const chart = kc.init(el, { styles: buildStyles(ct) })
     if (!chart) return
@@ -523,6 +551,36 @@ export function KLinePro({
     }
   }, [structOn, structRev, minutePeriod, ready])
 
+  // ── 策略信号标记: 与 ECharts 侧同一套口径(买=红下三角 / 卖=绿上三角) ──
+  // 数据挂在 KLineData.sig 上, overlay 从 getDataList() 读, 这里只用 rev 触发重绘
+  // (复用 structRev —— 它已经是「标的+周期+行数+末根」的数据版本指纹)。
+  // 只有日线档有信号: 周/月线是聚合结果(只保留 OHLCV), 分钟档压根没有这些列。
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    if (!signalsOn || period !== 'day') {
+      if (overlayIds.current.signal) {
+        chart.removeOverlay({ id: overlayIds.current.signal })
+        overlayIds.current.signal = null
+      }
+      return
+    }
+    const payload: SignalMarkersPayload = { rev: structRev }
+    if (!overlayIds.current.signal) {
+      const first = rowsRef.current[0]
+      if (!first) return
+      const id = chart.createOverlay({
+        name: 'signalMarkers',
+        paneId: 'candle_pane',
+        points: [{ timestamp: first.timestamp, value: first.close }],
+        extendData: payload,
+      })
+      if (typeof id === 'string') overlayIds.current.signal = id
+    } else {
+      chart.overrideOverlay({ id: overlayIds.current.signal, extendData: payload })
+    }
+  }, [signalsOn, period, structRev, ready])
+
   // ── S2: 指标清单 diff 到图表 ──
   // 增删改一律走增量, 不做「全量重建」 —— 重建窗格会把用户拖动过的高度一起丢掉。
   useEffect(() => {
@@ -677,6 +735,29 @@ export function KLinePro({
             )}
           >
             筹码
+          </button>
+        )}
+        {!hideOverlayToggles && (
+          <button
+            type="button"
+            onClick={() => applySignals(!signalsOn)}
+            disabled={period !== 'day'}
+            title={
+              period !== 'day'
+                ? '策略信号(signal_*)是日K enriched 的列: 周/月线是聚合结果(只留 OHLCV), 分钟档压根没有'
+                : signalsOn
+                  ? '隐藏策略信号标记(买=红下三角 / 卖=绿上三角 / 双向=蓝)'
+                  : '显示策略信号标记(买=红下三角 / 卖=绿上三角 / 双向=蓝)'
+            }
+            className={cn(
+              'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+              signalsOn && period === 'day'
+                ? 'border-accent/30 bg-accent/20 font-medium text-accent'
+                : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
+              period !== 'day' && 'cursor-not-allowed opacity-40',
+            )}
+          >
+            信号
           </button>
         )}
         {chipsOn && !minutePeriod && chips.data?.ok && (
