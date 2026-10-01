@@ -181,6 +181,10 @@ def main() -> int:
     p.add_argument("--as-of", default=None, help="指定交易日 YYYY-MM-DD")
     p.add_argument("--dry-run", action="store_true", help="只跑流程不写飞书")
     p.add_argument("--force", action="store_true", help="跳过去重")
+    p.add_argument(
+        "--abnormal-min-closeness", type=float, default=0.7,
+        help="异动接近度下限 0.5/0.7/1.0, 默认 0.7",
+    )
     p.add_argument("--ignore-weekend", action="store_true", help="周末也跑 (默认周六日直接跳过)")
     p.add_argument(
         "--stop-after", action="store_true",
@@ -220,6 +224,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 force=args.force,
                 no_enrich=False,
+                abnormal_min_closeness=args.abnormal_min_closeness,
             )
             code = push.run(push_args)
     finally:
