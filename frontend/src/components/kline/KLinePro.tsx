@@ -32,6 +32,7 @@ import type { ChartPriceLine } from '@/lib/chart-primitives'
 import { isMinutePeriod, type KLinePeriod } from '@/components/StockDailyKChart'
 import { registerChanOverlay } from './chan-overlay-kline'
 import { registerPriceLineOverlay } from './price-line-overlay'
+import { registerChipsOverlay } from './chips-overlay'
 import { IndicatorManager } from './IndicatorManager'
 import {
   MAIN_PANE_ID,
@@ -58,6 +59,10 @@ const MINUTE_LOOKBACK_DAYS = 120
  * 截断到 800 根 ≈ 80KB。指标是后端在**完整数据**上算好之后再截的, 不失真。
  */
 const MINUTE_BAR_LIMIT = 800
+
+/** 筹码分布回望交易日数 / 价格档数 */
+const CHIPS_DAYS = 250
+const CHIPS_BINS = 60
 
 /** 分钟周期 -> klinecharts span */
 const MINUTE_SPAN: Record<string, number> = {
@@ -214,6 +219,20 @@ export function KLinePro({
   // 缠论只在日线档有意义(笔/中枢按日线口径算), 分钟档直接关掉, 免得发无谓请求
   const chanLayers = useChanOverlay(symbol, chartDates, chanEnabled && !minutePeriod)
 
+  // ── S3 筹码分布: 工具条开关控制, 只在日线档取(分钟档没有"持仓成本"意义) ──
+  const [chipsOn, setChipsOn] = useState(false)
+  const chips = useQuery({
+    queryKey: QK.stockChips(symbol, CHIPS_DAYS, CHIPS_BINS),
+    queryFn: () => api.stockAnalysisChips(symbol, { days: CHIPS_DAYS, bins: CHIPS_BINS }),
+    enabled: !!symbol && chipsOn && !minutePeriod,
+    staleTime: 10 * 60 * 1000,
+  })
+  const chipsData = useMemo(() => {
+    const d = chips.data
+    if (!d?.ok || !d.bins?.length) return null
+    return { bins: d.bins, close: d.close, avg_cost: d.avg_cost, step: d.step }
+  }, [chips.data])
+
   // 初始化图表（仅一次）
   useEffect(() => {
     const el = containerRef.current
@@ -224,6 +243,7 @@ export function KLinePro({
     indRefs.current.clear()
     registerChanOverlay()
     registerPriceLineOverlay()
+    registerChipsOverlay()
 
     const chart = kc.init(el, {
       styles: {
@@ -306,6 +326,34 @@ export function KLinePro({
       chart.overrideOverlay({ id: chanOverlayIdRef.current, extendData: payload })
     }
   }, [chanLayers, ready])
+
+  // 筹码分布: 创建一次, override 更新 extendData
+  const chipsOverlayIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    if (!chipsData) {
+      // 关掉开关时要真的移除, 否则图上残留旧筹码
+      if (chipsOverlayIdRef.current) {
+        chart.removeOverlay({ id: chipsOverlayIdRef.current })
+        chipsOverlayIdRef.current = null
+      }
+      return
+    }
+    if (!chipsOverlayIdRef.current) {
+      const first = rowsRef.current[0]
+      if (!first) return
+      const id = chart.createOverlay({
+        name: 'chips',
+        paneId: 'candle_pane',
+        points: [{ timestamp: first.timestamp, value: first.close }],
+        extendData: chipsData,
+      })
+      if (typeof id === 'string') chipsOverlayIdRef.current = id
+    } else {
+      chart.overrideOverlay({ id: chipsOverlayIdRef.current, extendData: chipsData })
+    }
+  }, [chipsData, ready])
 
   // 监控价位线：创建一次，override 更新
   const priceOverlayIdRef = useRef<string | null>(null)
@@ -424,6 +472,27 @@ export function KLinePro({
         >
           指标{indicators.length > 0 ? ` ${indicators.length}` : ''}
         </button>
+        <button
+          type="button"
+          onClick={() => setChipsOn(v => !v)}
+          disabled={minutePeriod}
+          title={minutePeriod ? '筹码分布只在日线档有意义' : '筹码分布(成本分布): 右侧横条, 红=获利盘 / 绿=套牢盘'}
+          className={cn(
+            'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+            chipsOn && !minutePeriod
+              ? 'border-accent/30 bg-accent/20 font-medium text-accent'
+              : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
+            minutePeriod && 'cursor-not-allowed opacity-40',
+          )}
+        >
+          筹码
+        </button>
+        {chipsOn && !minutePeriod && chips.data?.ok && (
+          <span className="ml-1 text-[10px] text-muted" title="平均成本 / 获利盘比例">
+            成本 {chips.data.avg_cost?.toFixed(2) ?? '—'} · 获利{' '}
+            {chips.data.profit_ratio != null ? `${(chips.data.profit_ratio * 100).toFixed(1)}%` : '—'}
+          </span>
+        )}
         {minutePeriod && (
           <span className="ml-auto pr-1 text-[10px] text-muted/60" title="分钟K数据源: preagg=预聚合目录 / local=1m现场聚合">
             {period} · {active.data?.source ?? '…'}

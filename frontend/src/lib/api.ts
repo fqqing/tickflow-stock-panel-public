@@ -177,6 +177,23 @@ export interface StockLevels {
   series?: LevelSeries
 }
 
+/** S3 筹码分布: bins 按价格从低到高, ratio 为该档筹码占比(合计 1)。 */
+export interface ChipsDistribution {
+  ok: boolean
+  symbol: string
+  bins: { price: number; ratio: number }[]
+  step: number
+  low: number | null
+  high: number | null
+  close: number | null
+  avg_cost: number | null
+  /** 获利盘比例(成本低于现价的筹码占比), 0~1 */
+  profit_ratio: number | null
+  peak_price: number | null
+  concentration: { p70: [number, number] | null; p90: [number, number] | null }
+  days: number
+}
+
 export interface AiStockReport {
   id: string
   symbol: string
@@ -3125,6 +3142,16 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+
+  /** 筹码分布(成本分布): 日K三角分布 + 换手衰减 */
+  stockAnalysisChips: (symbol: string, params: { days?: number; bins?: number; decay?: number } = {}) => {
+    const q = new URLSearchParams({ symbol })
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<ChipsDistribution>(`/api/stock-analysis/chips?${q.toString()}`)
+  },
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),

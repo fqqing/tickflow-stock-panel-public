@@ -4,6 +4,7 @@
 
 端点:
   GET  /levels?symbol=         11 类关键价位(图表 markLine 数据源)
+  GET  /chips?symbol=          筹码分布(成本分布) — 日K三角分布 + 换手衰减
   POST /analyze                AI 流式四维分析(NDJSON)
   GET  /reports                历史报告列表
   POST /reports                保存一条报告
@@ -20,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.indicators.chips import compute_chips
 from app.indicators.levels import compute_levels, summarize_levels
 from app.services import stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
@@ -145,6 +147,51 @@ def get_levels(
         "dates": [str(d) for d in dates],
         "series": series,
     }
+
+
+@router.get("/chips")
+def get_chips(
+    request: Request,
+    symbol: str = Query(..., description="标的代码,如 000001.SZ"),
+    days: int = Query(250, ge=30, le=1500, description="回望交易日数(越多越接近真实持仓成本)"),
+    bins: int = Query(60, ge=10, le=400, description="价格档数"),
+    decay: float = Query(1.0, ge=0.1, le=2.0, description="换手衰减系数, 1=经典模型"),
+):
+    """筹码分布(成本分布): 日K三角分布 + 换手衰减。
+
+    返回 {bins:[{price,ratio}], avg_cost, profit_ratio, peak_price,
+    concentration:{p70,p90}, close, low, high, step, total_volume}。
+    前端按 bins 画横向筹码峰, 按 avg_cost / profit_ratio 显示平均成本与获利盘。
+    """
+    if not symbol:
+        raise HTTPException(400, "symbol 不能为空")
+
+    repo = request.app.state.repo
+    from app.markets import market_of
+    market = market_of(symbol)
+    end = date.today()
+    start = end - timedelta(days=int(days * 1.6) + 30)  # 日历日 -> 交易日约 0.62 折算
+    df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end, market=market)
+    if df.is_empty():
+        return {"ok": False, "symbol": symbol, "bins": [], "reason": "无日K数据"}
+    if df.height > days:
+        df = df.tail(days)
+
+    float_shares = None
+    try:
+        inst = repo.get_instruments()
+        if not inst.is_empty() and "float_shares" in inst.columns:
+            hit = inst.filter(pl.col("symbol") == symbol).head(1)
+            if not hit.is_empty():
+                v = hit["float_shares"][0]
+                float_shares = float(v) if v is not None else None
+    except Exception:  # pragma: no cover - 维表取不到只是降级, 不阻断
+        float_shares = None
+
+    result = compute_chips(df, bins=bins, decay=decay, float_shares=float_shares)
+    result["symbol"] = symbol
+    result["days"] = df.height
+    return result
 
 
 class AnalyzeRequest(BaseModel):

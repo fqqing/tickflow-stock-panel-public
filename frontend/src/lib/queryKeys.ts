@@ -86,6 +86,9 @@ export const QK = {
   klineMinuteK:         (symbol: string, period: string, days: number, limit = 0) =>
                            ['kline-minute-k', symbol, period, days, limit] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  // 筹码分布: 按 symbol + 回望天数 + 档数缓存
+  stockChips:           (symbol: string, days?: number, bins?: number) =>
+                           ['stock-chips', symbol, days ?? 250, bins ?? 60] as const,
   // 缠论单票结构（笔/中枢/一二三买卖点），按 symbol + 回溯根数 + 笔口径缓存
   chanAnalysis:         (symbol: string, lookback: number, strict: boolean) =>
                            ['chan-analysis', symbol, lookback, strict] as const,
