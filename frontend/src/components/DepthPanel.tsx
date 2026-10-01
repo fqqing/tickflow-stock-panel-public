@@ -77,7 +77,11 @@ export function DepthPanel({ symbol, refetchIntervalMs }: Props) {
 
   if (!symbol) return null
 
-  if (depth.isLoading || !mounted) {
+  // 与 useQuote 同一口径: v5 在「无数据 + 轮询」下会让 isLoading 长期为 true,
+  // 取不到盘口(港美股/无后缀代码)时必须落到"不可用"而不是一直转圈。
+  const everFailed = !d && (depth.isError || depth.failureCount > 0)
+
+  if ((depth.isLoading && !everFailed) || !mounted) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-muted">
         盘口加载中…
@@ -85,7 +89,7 @@ export function DepthPanel({ symbol, refetchIntervalMs }: Props) {
     )
   }
 
-  if (depth.isError || !d) {
+  if (depth.isError || everFailed || !d) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-muted">
         盘口数据不可用

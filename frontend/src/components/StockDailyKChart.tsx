@@ -362,6 +362,12 @@ export function StockDailyKChart({
     const chart = chartInst
     if (!chart) return
     const zr = chart.getZr()
+    // ★ chartInst 可能是**已 dispose 的**实例: echarts 5.6.0 的 dispose() 会把
+    //   _zr 置 null(echarts.js:824), 此时 getZr() 返回 null, 挂监听直接抛
+    //   "Cannot read properties of null (reading 'on')"。
+    //   触发窗口: 图表重建(容器高度变化)或组件卸载后, 父层 setChartInst 尚未刷新。
+    //   崩在 useEffect 里会被 React Router 默认错误边界整页替换成堆栈, 所以必须守。
+    if (!zr) return
 
     const toData = (ev: any) => {
       const pt = chart.convertFromPixel({ gridIndex: 0 }, [ev.offsetX, ev.offsetY])

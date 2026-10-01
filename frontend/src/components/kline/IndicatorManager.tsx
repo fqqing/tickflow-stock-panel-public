@@ -8,7 +8,7 @@
  * 参数为空数组表示"跟随库默认", 此时显示「默认」而不是 0 个输入框;
  * 组件挂载后 KLinePro 会回读真实 calcParams 写回, 输入框随后出现。
  */
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import {
   INDICATOR_METAS,
   makeKey,
@@ -62,6 +62,16 @@ function ParamInputs({
 }
 
 export function IndicatorManager({ configs, onChange, onClose }: IndicatorManagerProps) {
+  // 面板开着的期间自己接管 Esc。终端层看到 data-overlay-panel 就不会执行
+  // 「Esc = 返回上一页」, 所以这里不接管的话 Esc 会变成无操作。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); onClose() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const counts = useMemo(() => {
     const m = new Map<string, number>()
     for (const c of configs) m.set(c.name, (m.get(c.name) ?? 0) + 1)
@@ -87,7 +97,13 @@ export function IndicatorManager({ configs, onChange, onClose }: IndicatorManage
   ]
 
   return (
-    <div className="absolute right-1 top-1 z-30 w-[268px] overflow-hidden rounded-card border border-border bg-surface shadow-lg">
+    <div
+      // data-overlay-panel: 告知终端层的全局键盘处理「有浮层面板开着」。
+      // 没有这个标记时, 面板开着按 Esc 会命中 StockTerminal 的 `navigate(-1)`,
+      // 变成「想关面板却被退回上一只股票」。
+      data-overlay-panel="indicator"
+      className="absolute right-1 top-1 z-30 w-[268px] overflow-hidden rounded-card border border-border bg-surface shadow-lg"
+    >
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <span className="text-[11px] font-medium text-foreground">指标</span>
         <button

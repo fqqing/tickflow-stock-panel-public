@@ -115,6 +115,11 @@ export function TerminalHeader({
         <span className="shrink-0 font-mono text-[11px] text-muted">
           {quote.isRealtime
             ? `快照 ${quote.snapshotTime ?? '—'}`
+            // ★ isError 必须排在 isLoading 前: 取不到盘口(港美股 / 无盘口标的)时
+            //   react-query 在「无数据 + 轮询重取」下 isPending 会一直是 true,
+            //   于是 isLoading 恒为 true, 这条兜底文案永远显示不出来, 用户看到的
+            //   是「载入中…」无限转 —— 但实际上后端已经明确回复取不到了。
+            : quote.isError ? '盘口不可用 · 以图表为准'
             : quote.isLoading ? '载入中…' : '盘口不可用 · 以图表为准'}
         </span>
       </div>

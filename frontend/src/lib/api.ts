@@ -2423,7 +2423,10 @@ export const api = {
       wb_diff: number | null
       time: string | null
       timestamp: number | null
-    }>(`/api/depth/${encodeURIComponent(symbol)}`),
+    // 注意: 这里用 quiet —— 盘口是高频轮询查询, 失败的 UI 降级已由顶栏/盘口面板
+    // 自己表达("盘口不可用 · 以图表为准")。若不静默, 无盘口的标的(港美股/写错的
+    // 代码)每轮轮询都会弹一条红色 toast, 实测 12s 内刷了 3 条。
+    }>(`/api/depth/${encodeURIComponent(symbol)}`, { quiet: true }),
 
   // 缠论: 单票结构 / 批量标注 / 全市场扫描
   chanAnalysis: (symbol: string, lookback = 400, strict = true) =>

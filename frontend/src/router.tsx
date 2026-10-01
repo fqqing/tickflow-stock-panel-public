@@ -6,6 +6,7 @@ import { Auth } from './pages/Auth'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
 import { ExtensionBoundary } from './extensions/ExtensionBoundary'
+import { RouteError } from './components/RouteError'
 import {
   finalizeFrontendExtensions,
   getFrontendExtensionLoadErrors,
@@ -117,6 +118,9 @@ export const router = createBrowserRouter([
         <Layout />
       </OnboardingGuard>
     ),
+    // 渲染异常兜底。不给的话 React Router 会用内置错误页整屏替换(只剩堆栈, 无出口)。
+    // 放在根路由上, 子路由自动继承。
+    errorElement: <RouteError />,
     children: [
       { index: true, element: <Dashboard /> },
       { path: 'overview', element: <Navigate to="/" replace /> },

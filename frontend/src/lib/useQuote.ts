@@ -70,6 +70,13 @@ export function useQuote(
   const prevClose = d?.prev_close ?? null
   const change = price != null && prevClose != null ? price - prevClose : null
 
+  // ★ 「取不到」不能被说成「正在加载」。
+  //   react-query v5 在「无数据 + 定期轮询」下会把 query 周期性带回 pending 状态,
+  //   于是 isLoading 长期为 true —— 港美股 / 无盘口标的的顶栏就永远显示"载入中…",
+  //   后面那句"盘口不可用 · 以图表为准"永远没机会出现(真机实测 12s 持续转圈)。
+  //   用 failureCount 记住"失败过", 一旦失败过就不再声称加载中。
+  const everFailed = !!d ? false : (q.isError || q.failureCount > 0)
+
   return {
     price,
     change,
@@ -77,8 +84,8 @@ export function useQuote(
     isUp: (change ?? 0) >= 0,
     snapshotTime: d?.time ?? null,
     isRealtime: price != null,
-    isLoading: q.isLoading,
-    isError: q.isError,
+    isLoading: q.isLoading && !everFailed,
+    isError: q.isError || everFailed,
     raw: d,
   }
 }

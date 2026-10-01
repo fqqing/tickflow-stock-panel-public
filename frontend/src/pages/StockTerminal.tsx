@@ -432,6 +432,9 @@ export function StockTerminal() {
         case '3':
           chartSession.setPeriod('month'); break
         case 'Escape':
+          // 有浮层面板开着时让路: 用户按 Esc 是想关面板, 不是想离开当前标的。
+          // (面板自己接管 Esc 关闭, 见 IndicatorManager 的 data-overlay-panel)
+          if (document.querySelector('[data-overlay-panel]')) break
           e.preventDefault(); navigate(-1); break
         default:
           break
