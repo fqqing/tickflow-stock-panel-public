@@ -83,6 +83,41 @@ def get_auction(symbol: str = Query(...)):
     return auction.fetch_auction(_require(symbol))
 
 
+@router.get("/auction/scan")
+def get_auction_scan(
+    scan: int = Query(500, ge=10, le=_MAX_RANK_SYMBOLS, description="扫描多少只标的"),
+    mode: str = Query("score", description="score=竞价强度榜 / repair=低开走强榜"),
+    limit: int = Query(100, ge=1, le=2000),
+    ascending: bool = Query(False),
+    with_snapshot: bool = Query(True, description="是否合并实时快照(低开走强榜需要)"),
+    min_open_pct: float | None = Query(None, description="开盘涨幅下限(小数, -0.03 即 -3%)"),
+    max_open_pct: float | None = Query(None, description="开盘涨幅上限(小数)"),
+):
+    """全市场竞价扫描。
+
+    - ``mode=score`` 竞价强度榜: 按自建评分排序(加速/撤单/稳定/量能)。
+    - ``mode=repair`` 低开走强榜: **只保留竞价低开的票**, 按日内修复幅度
+      (当前涨幅 - 开盘涨幅)排序 —— 这就是「低开后有没有走强/冲板」。
+
+    ⚠️ 上游竞价序列只保留最近一个交易日, 非交易日取到的是上一交易日的数据。
+    扫 500 只约 8s, 5000 只约 74s(8 并发实测)。
+    """
+    if mode not in ("score", "repair"):
+        raise HTTPException(status_code=400, detail="mode 只能是 score 或 repair")
+    syms = _market_symbols(scan)
+    data = auction.fetch_auction_scan(syms, with_snapshot=with_snapshot)
+    data["mode"] = mode
+    data["rows"] = auction.rank_auction(
+        data["rows"],
+        mode=mode,
+        ascending=ascending,
+        limit=limit,
+        min_open_pct=min_open_pct,
+        max_open_pct=max_open_pct,
+    )
+    return data
+
+
 # ---- M3 分时买卖力道 ----
 
 

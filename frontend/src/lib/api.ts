@@ -3792,6 +3792,23 @@ export const api = {
   pulseAuction: (symbol: string) =>
     request<PulseAuction>(`/api/pulse/auction?symbol=${encodeURIComponent(symbol)}`),
 
+  pulseAuctionScan: (params: {
+    scan?: number
+    mode?: 'score' | 'repair'
+    limit?: number
+    ascending?: boolean
+    with_snapshot?: boolean
+    min_open_pct?: number
+    max_open_pct?: number
+  }) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulseAuctionScanResp>(`/api/pulse/auction/scan?${q.toString()}`)
+  },
+
   pulseStrength: (symbol: string) =>
     request<PulseStrength>(`/api/pulse/strength?symbol=${encodeURIComponent(symbol)}`),
 
@@ -4152,6 +4169,38 @@ export interface PulseAuction {
     open_turnover_bp: number | null
     parts: { accel: number; cancel: number; stability: number; volume: number }
   } | null
+}
+
+/** M2 全市场竞价扫描行。score 为 null = 竞价序列点数不足(<6), 不参与强度排序。 */
+export interface PulseAuctionScanRow {
+  symbol: string
+  name?: string
+  date: string
+  pre_close: number | null
+  open_price: number | null
+  open_change_pct: number | null
+  open_volume: number | null
+  open_amount: number | null
+  n_points: number
+  score: number | null
+  accel: number | null
+  cancel_rate: number | null
+  stability: number | null
+  open_turnover_bp: number | null
+  // 合并快照后才有(低开走强榜依赖它)
+  last_price?: number | null
+  change_pct?: number | null
+  repair_pct?: number | null
+  is_limit_up?: boolean
+}
+
+export interface PulseAuctionScanResp {
+  date: string
+  scanned: number
+  scored: number
+  mode: string
+  snapshot_ts: number | null
+  rows: PulseAuctionScanRow[]
 }
 
 /** M3 分时买卖力道。 */

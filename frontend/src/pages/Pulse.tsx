@@ -257,6 +257,36 @@ function MoneyflowRow({ r, maxAbs, days }: { r: PulseMoneyflowRankRow; maxAbs: n
 /* ------------------------------------------------------------------ M2 集合竞价 */
 
 function AuctionPanel({ symbol }: { symbol: string }) {
+  const [view, setView] = useState<'single' | 'scan'>('single')
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        {([['single', '单只详情'], ['scan', '全市场扫描']] as const).map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setView(k)}
+            className={`h-7 px-3 text-xs rounded-btn border cursor-pointer ${
+              view === k
+                ? 'bg-accent text-white border-accent'
+                : 'border-border bg-surface text-secondary hover:text-foreground'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        {view === 'scan' && (
+          <span className="text-[11px] text-muted">
+            上游竞价序列只保留最近一个交易日；非交易日看到的是上一交易日数据
+          </span>
+        )}
+      </div>
+      {view === 'single' ? <AuctionSingle symbol={symbol} /> : <AuctionScan />}
+    </section>
+  )
+}
+
+function AuctionSingle({ symbol }: { symbol: string }) {
   const { data, isFetching } = useQuery({
     queryKey: [...QK.pulse, 'auction', symbol],
     queryFn: () => api.pulseAuction(symbol),
@@ -298,6 +328,130 @@ function AuctionPanel({ symbol }: { symbol: string }) {
         </div>
       )}
     </SingleBlock>
+  )
+}
+
+/** 全市场竞价扫描: 竞价强度榜 / 低开走强榜。 */
+function AuctionScan() {
+  const [scan, setScan] = useState(500)
+  const [mode, setMode] = useState<'score' | 'repair'>('score')
+  const [asc, setAsc] = useState(false)
+
+  const { data, isFetching, refetch } = useQuery({
+    queryKey: [...QK.pulse, 'auction-scan', scan, mode, asc],
+    queryFn: () => api.pulseAuctionScan({ scan, mode, limit: 100, ascending: asc }),
+    staleTime: 60_000,
+  })
+
+  const rows = data?.rows ?? []
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap text-[11px] text-muted">
+        <label className="flex items-center gap-1.5">
+          扫描
+          <select
+            value={scan}
+            onChange={(e) => setScan(Number(e.target.value))}
+            className="h-7 px-2 text-xs rounded-btn border border-border bg-surface text-foreground"
+          >
+            {[500, 2000, 5000].map((n) => <option key={n} value={n}>{n} 只</option>)}
+          </select>
+        </label>
+        <button
+          onClick={() => setMode(mode === 'score' ? 'repair' : 'score')}
+          className="h-7 px-3 text-xs rounded-btn border border-border bg-surface hover:text-foreground cursor-pointer"
+        >
+          {mode === 'score' ? '竞价强度榜' : '低开走强榜'}
+        </button>
+        <button
+          onClick={() => setAsc(!asc)}
+          className="h-7 px-3 text-xs rounded-btn border border-border bg-surface hover:text-foreground cursor-pointer"
+        >
+          {asc ? '升序' : '降序'}
+        </button>
+        <button
+          onClick={() => void refetch()}
+          className="flex items-center gap-1 h-7 px-3 text-xs rounded-btn border border-border bg-surface hover:text-foreground cursor-pointer"
+        >
+          {isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          刷新
+        </button>
+        <span>交易日 {data?.date ?? '--'} · 已扫描 {data?.scanned ?? 0} 只 / 可评分 {data?.scored ?? 0} 只</span>
+        {mode === 'repair' && (
+          <span className="text-warning">
+            · 只保留竞价低开的票，按「当前涨幅 − 开盘涨幅」排序
+          </span>
+        )}
+      </div>
+
+      {rows.length === 0 && !isFetching ? (
+        <EmptyState
+          icon={Gavel}
+          title="暂无竞价数据"
+          hint="竞价序列只保留最近一个交易日。若当前非交易日，上游返回的是上一交易日数据；换个扫描量或稍后再试。"
+        />
+      ) : (
+        <div className="rounded-card border border-border overflow-hidden">
+          <table className="w-full text-xs border-collapse">
+            <thead className="bg-surface-2">
+              <tr className="text-muted">
+                <th className="px-3 py-2 text-left font-medium">代码</th>
+                <th className="px-3 py-2 text-left font-medium">名称</th>
+                <th className="px-3 py-2 text-right font-medium">开盘涨幅</th>
+                <th className="px-3 py-2 text-right font-medium">当前涨幅</th>
+                <th className="px-3 py-2 text-right font-medium">日内修复</th>
+                <th className="px-3 py-2 text-right font-medium">竞价评分</th>
+                <th className="px-3 py-2 text-right font-medium">加速</th>
+                <th className="px-3 py-2 text-right font-medium">撤单率</th>
+                <th className="px-3 py-2 text-right font-medium">稳定</th>
+                <th className="px-3 py-2 text-right font-medium">量能bp</th>
+                <th className="px-3 py-2 text-right font-medium">竞价额</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.symbol} className="border-t border-border hover:bg-surface-2">
+                  <td className="px-3 py-1.5 font-medium">
+                    <Link to={`/stock/${encodeURIComponent(r.symbol)}`} className="text-accent hover:underline">
+                      {r.symbol}
+                    </Link>
+                  </td>
+                  <td className="px-3 py-1.5 text-muted">
+                    {r.name ?? '--'}
+                    {r.is_limit_up && <span className="ml-1 text-bull font-medium">涨停</span>}
+                  </td>
+                  <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.open_change_pct)}`}>
+                    {pctText(r.open_change_pct)}
+                  </td>
+                  <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.change_pct)}`}>
+                    {r.change_pct == null ? '--' : pctText(r.change_pct)}
+                  </td>
+                  <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.repair_pct)}`}>
+                    {r.repair_pct == null ? '--' : pctText(r.repair_pct)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums">
+                    {r.score == null ? <span className="text-muted">--</span> : r.score.toFixed(1)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums text-muted">{numText(r.accel)}</td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums text-muted">
+                    {r.cancel_rate == null ? '--' : `${(r.cancel_rate * 100).toFixed(1)}%`}
+                  </td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums text-muted">{numText(r.stability)}</td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums text-muted">{numText(r.open_turnover_bp)}</td>
+                  <td className="px-3 py-1.5 text-right num tabular-nums text-muted">{amountText(r.open_amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="text-[11px] text-muted">
+        量纲：涨幅/撤单率为小数展示（+1.20% 即 0.012）。竞价评分 = 加速 30 + (1−撤单) 25 + 稳定 20 + 量能 25；
+        「日内修复」= 当前涨幅 − 开盘涨幅，开盘涨幅取竞价（权威）、当前涨幅取实时快照，衡量低开后的回补力度。
+      </div>
+    </div>
   )
 }
 

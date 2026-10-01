@@ -29,17 +29,55 @@
 
 综合分 0~100 = 加速 30 + (1-撤单) 25 + 稳定 20 + 量能 25。分项原样返回,
 权重可以后面调 —— **先给分项再加总, 别只给一个数**(用户能自己判断权重是否合理)。
+
+全市场竞价扫描 (2026-10-01 新增)
+================================
+``fetch_auction`` 只能一只一只查, 但用户想看的是「今天全市场竞价谁最强 / 谁低开
+后走强」。实测(见 scripts/probe_auction_scan.py): 8 并发下单只中位 0.12s,
+5000 只约 74s —— 与资金流排行同量级, 完全可做全市场。
+
+⚠️ 竞价数据的时效性:
+    上游只保留**最近一个交易日**的竞价序列(实测 10-01 取到的 trading_date 是
+    09-30)。隔天即被覆盖 => 历史样本不会自动积累, 要建模必须每天盘后主动落盘。
+
+低开 -> 走强为什么必须合并快照:
+    竞价数据只给**开盘**价, 不知道盘中走到哪。所以「低开后有没有修复 / 有没有
+    冲板」只能靠实时快照补: repair_pct = 当前涨幅 - 开盘涨幅。两者口径不同源,
+    开盘涨幅取竞价(权威), 当前涨幅取快照(实时)。
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from app.plugins.eltdx.provider import app_to_eltdx
+from app.plugins.eltdx.provider import _snap_fetch, app_to_eltdx, market_meta
 from app.pulse.gateway import client
 
 logger = logging.getLogger(__name__)
+
+#: 扫描并发数。实测 8 并发稳定; 再高上游开始 sporadic ProtocolError。
+_SCAN_WORKERS = 8
+
+#: 涨停判定阈值(涨幅小数)。按板块区分, 留 0.2% 浮点余量(实际涨停是 10/20/30,
+#: 但快照 change_pct 有精度损失, 用 9.8/19.8/29.8 更稳)。
+_LIMIT_UP_BY_PREFIX: tuple[tuple[tuple[str, ...], float], ...] = (
+    (("688", "689"), 0.198),   # 科创板
+    (("300", "301"), 0.198),   # 创业板
+    (("43", "83", "87", "88", "920"), 0.298),  # 北交所
+)
+_DEFAULT_LIMIT_UP = 0.098      # 主板
+
+
+def _limit_up_threshold(symbol: str) -> float:
+    """按代码前缀给出涨停涨幅阈值(小数)。"""
+    code = symbol.partition(".")[0]
+    for prefixes, thr in _LIMIT_UP_BY_PREFIX:
+        if code.startswith(prefixes):
+            return thr
+    return _DEFAULT_LIMIT_UP
 
 
 def _f(raw: object) -> float | None:
@@ -171,3 +209,154 @@ def _score(
             "volume": round(s_volume, 1),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 全市场竞价扫描
+# ---------------------------------------------------------------------------
+
+
+def _scan_one(symbol: str) -> dict | None:
+    """拉单只竞价并压成一行。失败 / 点数不足返回 None(不阻断整批)。"""
+    code = app_to_eltdx(symbol)
+    if code is None:
+        return None
+    try:
+        data = client().helpers.auction_data(code)
+    except Exception as e:  # 单只失败只丢这一只, 不能连累整批
+        logger.debug("eltdx 竞价扫描跳过 %s: %s: %s", symbol, type(e).__name__, e)
+        return None
+
+    series = getattr(data, "series", None)
+    points: list[dict] = []
+    for p in getattr(series, "points", ()) or ():
+        points.append({
+            "time": str(getattr(p, "time_label", "") or ""),
+            "price": _f(getattr(p, "price", None)),
+            "matched": _f(getattr(p, "matched_volume", None)),
+            "unmatched": _f(getattr(p, "unmatched_volume", None)),
+        })
+
+    pre_close = _f(getattr(data, "pre_close_price", None))
+    open_price = _f(getattr(data, "open_price", None))
+    open_amount = _f(getattr(data, "open_amount", None))
+    change_pct = _f(getattr(data, "open_change_pct", None))
+    # 评分点数不足时 score=None, 该行仍保留(开盘涨幅等指标本身有用), 只是不参与强度榜
+    score = _score(points, pre_close, open_price, open_amount, _float_shares(symbol))
+    return {
+        "symbol": symbol,
+        "date": str(getattr(data, "trading_date", "") or ""),
+        "pre_close": pre_close,
+        "open_price": open_price,
+        "open_change_pct": (change_pct or 0.0) / 100.0,
+        "open_volume": _f(getattr(data, "open_volume", None)),
+        "open_amount": open_amount,
+        "n_points": len(points),
+        "score": score["total"] if score else None,
+        "accel": score["accel"] if score else None,
+        "cancel_rate": score["cancel_rate"] if score else None,
+        "stability": score["stability"] if score else None,
+        "open_turnover_bp": score["open_turnover_bp"] if score else None,
+    }
+
+
+def fetch_auction_scan(
+    symbols: list[str],
+    *,
+    with_snapshot: bool = True,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict:
+    """全市场竞价扫描: 并发拉竞价 + 可选合并实时快照。
+
+    - ``score`` 为 None 的行 = 竞价序列点数不足(<6), 开盘涨幅等指标仍有效,
+      但不参与「竞价强度」排序(排在最后)。
+    - ``repair_pct`` = 当前涨幅 - 开盘涨幅, 衡量**低开后的日内修复幅度**。
+      开盘涨幅取竞价(权威), 当前涨幅取快照(实时), 两者不同源。
+    """
+    pairs = [(s, app_to_eltdx(s)) for s in symbols or ()]
+    todo = [s for s, c in pairs if c]
+    if not todo:
+        return {"date": "", "scanned": 0, "scored": 0, "rows": [], "snapshot_ts": None}
+
+    rows: list[dict] = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as pool:
+        for row in pool.map(_scan_one, todo):
+            done += 1
+            if row:
+                rows.append(row)
+            if on_progress:
+                on_progress(done, len(todo))
+
+    # 名称 + 快照(合并后才知道低开有没有修复/冲板)
+    meta = market_meta()
+    for r in rows:
+        r["name"] = (meta.get(r["symbol"]) or {}).get("name")
+
+    snapshot_ts = None
+    if with_snapshot and rows:
+        try:
+            snap_rows = _snap_fetch([r["symbol"] for r in rows])
+        except Exception as e:  # 快照失败不阻断: 竞价榜本身仍可用
+            logger.warning("竞价扫描合并快照失败: %s: %s", type(e).__name__, e)
+            snap_rows = []
+        by_symbol = {s["symbol"]: s for s in snap_rows}
+        stamps = [s["timestamp"] for s in snap_rows if s.get("timestamp")]
+        snapshot_ts = max(stamps) if stamps else None
+        for r in rows:
+            s = by_symbol.get(r["symbol"])
+            if not s:
+                continue
+            cur = s.get("change_pct") or 0.0
+            r["last_price"] = s.get("last_price")
+            r["change_pct"] = cur
+            r["repair_pct"] = cur - (r["open_change_pct"] or 0.0)
+            r["is_limit_up"] = cur >= _limit_up_threshold(r["symbol"])
+
+    scored = sum(1 for r in rows if r["score"] is not None)
+    date = max((r.get("date") or "" for r in rows), default="")
+    return {
+        "date": date,
+        "scanned": len(todo),
+        "scored": scored,
+        "rows": rows,
+        "snapshot_ts": snapshot_ts,
+    }
+
+
+def rank_auction(
+    rows: list[dict],
+    mode: str = "score",
+    *,
+    ascending: bool = False,
+    limit: int = 100,
+    min_open_pct: float | None = None,
+    max_open_pct: float | None = None,
+) -> list[dict]:
+    """按模式排序并筛选。
+
+    - ``score``: 竞价强度榜(score 高的在前; None 永远垫底)。
+    - ``repair``: 低开走强榜(repair_pct 大的在前) —— **自动只留竞价低开的行**
+      (open_change_pct < 0), 否则"高开高走"会混进来盖住真正的低开修复。
+    - ``min_open_pct`` / ``max_open_pct``: 开盘涨幅区间(小数), 用于人工圈定
+      "小幅低开""深跌低开"这类范围。
+    """
+    out = rows
+    if min_open_pct is not None:
+        out = [r for r in out if (r.get("open_change_pct") or 0.0) >= min_open_pct]
+    if max_open_pct is not None:
+        out = [r for r in out if (r.get("open_change_pct") or 0.0) <= max_open_pct]
+
+    if mode == "repair":
+        # 低开走强: 只保留竞价低开的行(高开高走修复幅度再大也不算)
+        low = [r for r in out if (r.get("open_change_pct") or 0.0) < 0]
+        low.sort(key=lambda r: r.get("repair_pct") or 0.0, reverse=not ascending)
+        return low[:limit]
+
+    # 强度榜: score=None(竞价点数不足)必须**始终垫底**。
+    # ⚠️ 不能用 (分组标记, 分数) 单键 + reverse=True —— 降序时分组标记 1 会被
+    # 翻到最前面, 变成"无评分的排在榜首"。显式拆两段拼接才不会随升降序漂移。
+    scored = [r for r in out if r.get("score") is not None]
+    unscored = [r for r in out if r.get("score") is None]
+    scored.sort(key=lambda r: r["score"], reverse=not ascending)
+    return (scored + unscored)[:limit]
