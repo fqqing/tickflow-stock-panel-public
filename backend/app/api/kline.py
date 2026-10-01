@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import threading
@@ -11,6 +12,8 @@ from functools import lru_cache
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
@@ -422,6 +425,63 @@ def _resolve_market(symbol: str, market: str) -> str:
     return wanted
 
 
+# ===== 条件请求 (ETag / 304) =====
+# 切周期/切票/分钟轮询会反复打同一个 URL, 而响应体动辄 0.4MB (1000 天) 到
+# 1MB (5 分钟/120 日)。没有 ETag 时这些请求每次都要重新传一遍并重新 JSON 解析。
+# 前端是 fetch + react-query, 浏览器会自动带 If-None-Match 并把 304 还原成
+# 缓存的 200, 所以后端加完前端零改动。
+
+
+def _rows_digest(rows: list[dict]) -> str:
+    """对 K 线行做轻量摘要 (md5), 作为 ETag 的内容指纹.
+
+    比「先 json.dumps 全量再 hash」便宜一个数量级 (1000 行约 1ms vs 20ms),
+    且能抓到「中间历史行被重写」这种情况 -- 后者正是只按末日 + 行数做指纹
+    会漏掉的场景 (重写不改变末日和行数)。
+
+    时间列两种口径: 日K是 date, 分钟K是 datetime, 都要取到。
+    """
+    h = hashlib.md5()
+    for r in rows:
+        stamp = r.get("date")
+        if stamp is None:
+            stamp = r.get("datetime")
+        h.update(
+            "{},{},{},{},{},{}".format(
+                stamp,
+                r.get("open"),
+                r.get("high"),
+                r.get("low"),
+                r.get("close"),
+                r.get("volume"),
+            ).encode("utf-8")
+        )
+    return h.hexdigest()
+
+
+def _conditional_json(request: Request, payload: dict):
+    """命中 If-None-Match 返回 304 (空 body), 否则返回带 ETag 的 JSON.
+
+    指纹只取「名称 + 行数 + 行摘要」: 浏览器按 URL 缓存, 同一 URL 内的响应
+    差异只来自数据本身, 所以 period/adjust/fields 这些已经体现在 URL 里的
+    参数不必重复进指纹。名称进指纹是为了 ST 摘帽/改名能及时刷新。
+
+    用弱校验 (W/ 前缀): 同一份数据的两种等价序列化 (浮点精度/字段顺序差异)
+    应算同一个 ETag, 弱校验的语义正是「语义等价即可复用」。
+
+    Cache-Control 用 no-cache 而不是 no-store: 允许浏览器缓存响应体, 但每次
+    必须先回源校验。日K会注入实时蜡烛, 盘中价格一动摘要就变, 所以 304 只在
+    真的没变时才出现, 不会让盘中的图停在旧价上。
+    """
+    rows = payload.get("rows") or []
+    raw = f"{payload.get('name')};{len(rows)};{_rows_digest(rows)}"
+    etag = 'W/"' + hashlib.md5(raw.encode("utf-8")).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if (request.headers.get("if-none-match") or "").strip() == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(jsonable_encoder(payload), headers=headers)
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -500,13 +560,16 @@ def get_daily(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
-            return {
-                "symbol": symbol,
-                "name": stock_name,
-                "market": market,
-                "stock_info": stock_info,
-                "rows": [],
-            }
+            return _conditional_json(
+                request,
+                {
+                    "symbol": symbol,
+                    "name": stock_name,
+                    "market": market,
+                    "stock_info": stock_info,
+                    "rows": [],
+                },
+            )
         # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
         factors = pl.DataFrame()
         capset = getattr(request.app.state, "capabilities", None)
@@ -532,7 +595,9 @@ def get_daily(
         resp = _attach_indicators(
             request, repo, resp, symbol, indicators, start, end, asset_type, market=market
         )
-        return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
+        return _conditional_json(
+            request, _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
+        )
 
     # 复权要在周期聚合之前做: 聚合取 last/first/max/min, 若先聚合再复权,
     # 周末那根用的是「周期末」的价格, 与逐根缩放的结果不等价。
@@ -558,7 +623,9 @@ def get_daily(
     resp = _attach_indicators(
         request, repo, resp, symbol, indicators, start, end, asset_type, market=market
     )
-    return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
+    return _conditional_json(
+        request, _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
+    )
 
 
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
@@ -1664,19 +1731,18 @@ def get_minute_k(
     if agg is None or agg.is_empty():
         minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
         if minute.is_empty() or "datetime" not in minute.columns:
-            return base_resp
+            return _conditional_json(request, base_resp)
         agg = _aggregate_minute(minute, minutes)
         source = "local"
     if agg.is_empty():
-        return base_resp
+        return _conditional_json(request, base_resp)
     if limit and agg.height > limit:
         # 尾部截断: 指标已在完整数据上算完(见 docstring), 这里只省传输量
         agg = agg.tail(limit)
-    return {
-        **base_resp,
-        "source": source,
-        "rows": _select_fields_df(agg, fields).to_dicts(),
-    }
+    return _conditional_json(
+        request,
+        {**base_resp, "source": source, "rows": _select_fields_df(agg, fields).to_dicts()},
+    )
 
 
 @router.get("/minute")

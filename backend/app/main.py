@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from app import __version__
 from app.api import (
@@ -394,6 +395,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 响应压缩: K 线与扫描类 JSON 动辄 0.4~1.3MB (1000 天日K实测 1.32MB,
+# 5m/120 交易日实测 ~1MB), 裸传是「K 线图打开慢」的主要成本之一。
+# 前端是 fetch, 浏览器自动解 gzip, 业务代码零改动。
+# compresslevel 取 4 而不是默认的 9: 实测 366KB 的日K JSON, L1=3.6x/3.6ms,
+# L4=4.2x/5.8ms, L6=4.8x/12.5ms, L9=5.1x/61.5ms —— L9 多花 55ms 只多省 15KB,
+# 不划算; L4 处在「多花 2ms 换 16KB」的拐点上, 比 L1 值。
+# 注: starlette 1.0 的 GZipMiddleware 默认已排除 text/event-stream, 回测与
+# 参数优化的 SSE 进度流不会被压缩缓冲。若日后自己实现压缩中间件, 必须同样
+# 放行 event-stream, 否则进度会攒到流结束才一次性到达。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
 
 
 # ================================================================

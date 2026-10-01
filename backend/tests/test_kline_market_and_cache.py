@@ -9,6 +9,7 @@ API 层若不透传, 港美股 K 线恒返回空 —— 既不报错也不提示
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -20,14 +21,16 @@ from fastapi import HTTPException
 from app.api import kline as kline_api
 
 
-def _request(repo=None):
+def _request(repo=None, headers=None):
+    # headers 必须有: 响应现在带 ETag, 端点会读 request.headers['if-none-match']
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 repo=repo or MagicMock(),
                 capabilities=MagicMock(),
             )
-        )
+        ),
+        headers=headers or {},
     )
 
 
@@ -58,7 +61,10 @@ def _repo(rows: pl.DataFrame | None = None) -> MagicMock:
 
 
 def _call_daily(repo, symbol: str, **overrides):
-    """直调端点函数: FastAPI 的 Query 默认值只在 HTTP 入口生效, 直调时必须显式给全。"""
+    """直调端点函数: FastAPI 的 Query 默认值只在 HTTP 入口生效, 直调时必须显式给全。
+
+    端点现在返回带 ETag 的 JSONResponse (条件请求改造), 这里解回 dict 供断言。
+    """
     kwargs = {
         "start_date": None,
         "end_date": None,
@@ -70,7 +76,8 @@ def _call_daily(repo, symbol: str, **overrides):
         "market": "",
     }
     kwargs.update(overrides)
-    return kline_api.get_daily(_request(repo), symbol, days=30, **kwargs)
+    resp = kline_api.get_daily(_request(repo), symbol, days=30, **kwargs)
+    return json.loads(resp.body) if hasattr(resp, "body") else resp
 
 
 # ===== market 透传 =====
