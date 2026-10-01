@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Play, Square, Trophy } from 'lucide-react'
+import { Play, Square, Trophy, Sparkles } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { fmtPct } from '@/lib/format'
 import { EmptyState } from '@/components/EmptyState'
@@ -17,6 +17,8 @@ import {
   INPUT_CLS,
   OBJECTIVES,
   GRID_MAX_COMBINATIONS,
+  PARAM_SUGGESTION_KEY,
+  type ParamSuggestionPayload,
   useParamSweep,
   StrategySelect,
   SweepParamList,
@@ -40,12 +42,36 @@ export function StrategyOptimizer() {
   const [start, setStart] = useState(ONE_YEAR_AGO)
   const [end, setEnd] = useState(TODAY)
   const [mode, setMode] = useState<'position' | 'full'>('position')
+  /** 从「信号实验室」AI 归因带过来的建议(展示一次来源提示, 不参与后续渲染判断)。 */
+  const [appliedFrom, setAppliedFrom] = useState<string | null>(null)
+  const suggestionConsumed = useRef(false)
 
   // 刷新/切页后: 恢复未完成的优化任务
   useEffect(() => {
     tryReconnectOptimize()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 从 AI 归因跳转进来: 策略列表加载完后再套用建议, 且只消费一次(读完即删)。
+  useEffect(() => {
+    if (suggestionConsumed.current || !strategies.length) return
+    const raw = sessionStorage.getItem(PARAM_SUGGESTION_KEY)
+    if (!raw) return
+    suggestionConsumed.current = true
+    sessionStorage.removeItem(PARAM_SUGGESTION_KEY)
+    try {
+      const payload = JSON.parse(raw) as ParamSuggestionPayload
+      if (sweep.applySuggestion(payload)) {
+        setAppliedFrom(payload.source === 'explore'
+          ? `AI 未给出可执行建议, 已按参数声明填入 ${payload.items.length} 个参数的探索网格`
+          : `已按 AI 归因建议填入 ${payload.items.length} 个参数（持有 ${payload.horizon ?? '-'} 日口径）`)
+      } else {
+        setAppliedFrom(`AI 建议的策略「${payload.strategy_id}」不在当前策略列表中, 未套用`)
+      }
+    } catch {
+      setAppliedFrom('AI 建议解析失败, 未套用')
+    }
+  }, [strategies, sweep])
 
   const canRun = sweep.strategyId && sweep.combos > 0 && sweep.combos <= GRID_MAX_COMBINATIONS
     && !sweep.gridError && !task?.isPending
@@ -104,6 +130,13 @@ export function StrategyOptimizer() {
             <option value="full">全量独立</option>
           </select>
         </div>
+
+        {appliedFrom && (
+          <div className="flex items-start gap-1.5 rounded-input border border-accent/30 bg-accent/5 px-2.5 py-2 text-[11px] text-accent">
+            <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>{appliedFrom}</span>
+          </div>
+        )}
 
         <SweepParamList params={sweep.params} sweeps={sweep.sweeps} updateSweep={sweep.updateSweep} />
         <CombosHint show={!!sweep.strategyId} combos={sweep.combos} gridError={sweep.gridError} />

@@ -15,7 +15,8 @@
 - ``GET  /api/signallab/summary``     战绩汇总(可分组)
 - ``GET  /api/signallab/attribution`` 形态归因(按特征分桶)
 - ``GET  /api/signallab/score-today`` 当日候选打分(把归因学到的档位搬到今天)
-- ``POST /api/signallab/attribution-insight`` AI 解读归因(流式 NDJSON)
+- ``POST /api/signallab/attribution-insight`` AI 解读归因(流式 NDJSON; 正文 delta 之外
+  会多一个 ``suggestions`` 事件, 给出可直接送进参数网格搜索的参数范围)
 
 口径见 ``app/signallab/outcome.py`` 顶部: 收益小数制、T+1 开盘成交、停牌/涨停封死顺延、
 前瞻不足记 null 且不进分母。
@@ -638,6 +639,7 @@ async def analyze_attribution(request: Request, payload: InsightRequest):
         async for chunk in analyze_attribution_stream(
             frame,
             meta,
+            strategy_id=payload.strategy_id,
             strategy_name=name,
             strategy_desc=desc,
             params=params,

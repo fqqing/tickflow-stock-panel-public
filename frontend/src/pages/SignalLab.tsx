@@ -16,17 +16,23 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FlaskConical, Play, RefreshCw, Loader2, Info, Sparkles, Target } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { FlaskConical, Play, RefreshCw, Loader2, Info, Sparkles, Target, SlidersHorizontal } from 'lucide-react'
 import {
   api,
   type SignalLabAttributionRow,
   type SignalLabDataset,
   type SignalLabScoreRow,
   type SignalLabStrategy,
+  type SignalLabSuggestions,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
+import {
+  PARAM_SUGGESTION_KEY,
+  type ParamSuggestionPayload,
+} from '@/pages/backtest/components/paramSweep'
 
 /** 默认观察持有期（交易日），与后端 DEFAULT_HORIZONS 一致。 */
 const DEFAULT_HORIZONS = '1,3,5,10,20,60'
@@ -64,6 +70,7 @@ function numText(v: unknown, digits = 2): string {
 
 export function SignalLab() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const [strategyId, setStrategyId] = useState('')
   const [horizons, setHorizons] = useState(DEFAULT_HORIZONS)
   const [limit, setLimit] = useState(100)
@@ -75,6 +82,8 @@ export function SignalLab() {
   const [insight, setInsight] = useState('')
   const [insightError, setInsightError] = useState('')
   const [insightOn, setInsightOn] = useState(false)
+  // AI 正文末尾附的机器可读参数建议(后端已按参数声明收口), 可一键送进网格搜索
+  const [suggestions, setSuggestions] = useState<SignalLabSuggestions | null>(null)
   const [focus, setFocus] = useState('')
   const insightAbort = useRef<AbortController | null>(null)
 
@@ -194,6 +203,7 @@ export function SignalLab() {
     setInsightOn(true)
     setInsight('')
     setInsightError('')
+    setSuggestions(null)
     const horizon = summary?.horizons?.length ? summary.horizons[summary.horizons.length - 1] : undefined
     try {
       await api.signalLabInsight(
@@ -201,6 +211,15 @@ export function SignalLab() {
         (ev) => {
           if (ev.type === 'delta') setInsight((prev) => prev + (ev.content ?? ''))
           else if (ev.type === 'error') setInsightError(String(ev.message ?? 'AI 解读失败'))
+          else if (ev.type === 'suggestions') {
+            setSuggestions({
+              strategy_id: ev.strategy_id,
+              horizon: ev.horizon,
+              source: ev.source,
+              items: ev.items,
+              combos: ev.combos,
+            })
+          }
         },
         controller.signal,
       )
@@ -210,6 +229,20 @@ export function SignalLab() {
       setInsightOn(false)
     }
   }, [strategyId, range, summary?.horizons, focus])
+
+  /** 把 AI 给的参数建议交给「回测 / 参数优化」页(一次性, 读完即删)。 */
+  const sendSuggestionsToOptimizer = useCallback(() => {
+    if (!suggestions?.items?.length) return
+    const payload: ParamSuggestionPayload = {
+      strategy_id: suggestions.strategy_id || strategyId,
+      horizon: suggestions.horizon,
+      source: suggestions.source,
+      items: suggestions.items,
+      combos: suggestions.combos,
+    }
+    sessionStorage.setItem(PARAM_SUGGESTION_KEY, JSON.stringify(payload))
+    navigate('/backtest?tab=robustness')
+  }, [suggestions, strategyId, navigate])
 
   const keys = horizonKeys(summary?.horizons ?? [])
   const overall = summary?.overall ?? {}
@@ -398,6 +431,43 @@ export function SignalLab() {
                     {insightOn ? <span className="ml-0.5 animate-pulse">▍</span> : null}
                   </p>
                 )}
+              </div>
+            )}
+            {suggestions && suggestions.items.length > 0 && (
+              <div className="mb-3 rounded-btn border border-accent/30 bg-accent/5 p-3">
+                <div className="mb-2 flex items-center gap-1.5 text-[11px] text-accent">
+                  <SlidersHorizontal className="h-3 w-3" />
+                  {suggestions.source === 'explore'
+                    ? '探索网格（AI 未给出可执行建议 · 按参数声明等距铺开）'
+                    : '参数建议（已按参数声明收口）'}
+                  <span className="text-muted">共 {suggestions.combos} 组组合</span>
+                  <button
+                    onClick={sendSuggestionsToOptimizer}
+                    className="ml-auto flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-btn border border-accent/40 text-accent hover:bg-accent/10 cursor-pointer"
+                  >
+                    <Play className="h-3 w-3" /> 填入网格搜索
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  {suggestions.items.map((it) => (
+                    <div key={it.param_id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                      <span className="font-medium text-foreground">{it.label}</span>
+                      <span className="text-muted">({it.param_id})</span>
+                      <span className="text-secondary">
+                        {it.direction === 'up' ? '建议上调' : it.direction === 'down' ? '建议下调' : '建议附近微调'}
+                      </span>
+                      <span className="num tabular-nums text-secondary">
+                        {typeof it.grid === 'object' && !Array.isArray(it.grid) && 'min' in it.grid
+                          ? `${it.grid.min} ~ ${it.grid.max} / step ${it.grid.step}`
+                          : Array.isArray(it.grid) ? `候选 ${it.grid.join(' / ')}` : ''}
+                      </span>
+                      {it.reason && <span className="text-muted">· {it.reason}</span>}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 text-[11px] text-muted">
+                  填入后只勾选这些参数, 其余参数保持默认; 起止区间与目标请在优化页自行确认。
+                </div>
               </div>
             )}
             <div className="overflow-x-auto rounded-btn border border-border">

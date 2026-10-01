@@ -15,6 +15,9 @@
   前端可以逐字渲染, 长时间等待不白屏。
 - **参数建议要落到具体参数**: 提示词里带上策略的 params 声明(id/label/default),
   让模型把"避开高 ATR 档"翻译成"调哪个参数、往哪个方向", 否则建议无法执行。
+- **建议要出机器可读的一份**: 正文给人类看, 末尾再输出一个 ```json 建议块给程序用
+  (见 ``suggestions.py``)。这份会被 :class:`FenceSplitter` 从流里扣下来, 不进正文,
+  且每条都要过参数声明的边界/步长校验后才下发给前端 —— 模型编的参数名直接丢。
 """
 from __future__ import annotations
 
@@ -28,6 +31,13 @@ import polars as pl
 
 from app.signallab.lab import DEFAULT_ATTRIBUTION_FEATURES
 from app.signallab.outcome import ret_column
+from app.signallab.suggestions import (
+    FenceSplitter,
+    explore_suggestions,
+    extract_suggestions,
+    normalize_suggestions,
+    suggest_combos,
+)
 from app.signallab.summary import attribute_outcomes, summarize_outcomes
 
 logger = logging.getLogger(__name__)
@@ -110,8 +120,69 @@ def _system_prompt() -> str:
         "3. 结论要能落地: 说清楚该加权/该避开哪些形态, 并对应到具体可调参数;\n"
         "4. 用中文, 结构化输出(小标题 + 要点), 不要复述表格, 总长控制在 800 字以内;\n"
         "5. 如果数据整体不支持任何结论(样本太少 / 各档差异不显著), 直接说明并给出"
-        "下一步该补什么数据, 不要硬凑建议。"
+        "下一步该补什么数据, 不要硬凑建议;\n"
+        "6. 正文写完后, 最后单独输出一个 ```json 代码块 (正文里不要出现其他代码块), "
+        "把参数建议写成机器可读的形式, 用于直接生成参数网格:\n"
+        '{"suggestions":[{"param_id":"<参数 id, 必须来自上面列表>",'
+        '"direction":"up|down|hold","reason":"一句话说明为什么",'
+        '"min":<数字>,"max":<数字>,"step":<数字>}]}\n'
+        "要求: 最多 3 条, 只写有把握的; min/max 必须落在该参数声明的范围内, "
+        "step 要能把 (max-min) 整除; 没有可调参数或数据不支持时输出 "
+        '{"suggestions":[]}。'
     )
+
+
+_SUGGEST_SYSTEM = (
+    "你是量化策略调参助手, 只做一件事: 把形态归因结论翻译成参数扫描范围。\n"
+    "只输出一个 JSON 对象, 不要任何解释、不要代码块围栏、不要前后缀文字:\n"
+    '{"suggestions":[{"param_id":"<下面参数列表里的 id>","direction":"up|down|hold",'
+    '"reason":"一句话","min":<数字>,"max":<数字>,"step":<数字>}]}\n'
+    "规则: 最多 3 条; min/max 必须落在该参数声明的 [min,max] 内; step 必须能把 "
+    "(max-min) 整除; 没有把握就返回 {\"suggestions\":[]}, 不要硬凑。"
+)
+
+
+def _suggest_user_prompt(
+    params: Sequence[dict[str, Any]],
+    rows: Sequence[dict[str, Any]],
+    horizon: int,
+) -> str:
+    """二次追问的提示词: 只带参数声明 + 分桶事实, 不要正文(省 token 也更聚焦)。"""
+    return "\n\n".join([
+        f"## 可调参数\n{params_markdown(params)}",
+        f"## 形态归因 (持有 {horizon} 日, 按平均收益降序)\n{attribution_markdown(rows, horizon)}",
+        "请给出建议扫描的参数范围。",
+    ])
+
+
+async def _request_param_suggestions(
+    params: Sequence[dict[str, Any]],
+    rows: Sequence[dict[str, Any]],
+    horizon: int,
+) -> list[dict]:
+    """正文没带出建议块时的二次追问 —— 一次短调用, 只求 JSON。
+
+    为什么不直接把这段塞进主提示词: 主调用要流式输出长正文, 模型在长输出末尾常常
+    省略结构化尾巴(实测 bottom_structure 两次都只在正文里说"无法给出建议", 没有
+    输出 json 块)。短调用 + temperature=0 的输出稳定得多。
+    """
+    if not params:
+        return []
+    try:
+        from app.services.ai_provider import generate_ai_text
+
+        text = await generate_ai_text(
+            [
+                {"role": "system", "content": _SUGGEST_SYSTEM},
+                {"role": "user", "content": _suggest_user_prompt(params, rows, horizon)},
+            ],
+            temperature=0.0,
+            max_tokens=800,
+        )
+    except Exception as e:  # 追问失败不该让整条解读失败, 只是没有建议而已
+        logger.warning("参数建议二次追问失败: %r", e)
+        return []
+    return normalize_suggestions(extract_suggestions(prose=text or ""), list(params))
 
 
 def build_user_prompt(
@@ -140,7 +211,10 @@ def build_user_prompt(
         parts.append(f"## 用户追加关注点\n{focus}")
     parts.append(
         "请按系统提示的要求输出: 关键发现 / 值得加权与应当规避的形态 / "
-        "对应的参数调整建议 / 结论的可靠性与风险提示。"
+        "对应的参数调整建议 / 结论的可靠性与风险提示。\n"
+        "最后**务必**另起一段输出一个 ```json 代码块, 内含 suggestions 数组: 从上面的可调"
+        '参数里挑最多 3 个, 给 min/max/step (须落在该参数声明范围内); 确实无可调或数据不'
+        '支持时输出 {"suggestions":[]} —— 这一段是给程序读的, 不能省略。'
     )
     return "\n\n".join(parts)
 
@@ -191,6 +265,7 @@ async def analyze_attribution_stream(
     frame: pl.DataFrame,
     dataset: dict[str, Any],
     *,
+    strategy_id: str = "",
     strategy_name: str,
     strategy_desc: str = "",
     params: Sequence[dict[str, Any]] | None = None,
@@ -202,7 +277,8 @@ async def analyze_attribution_stream(
 ) -> AsyncIterator[str]:
     """流式形态归因解读, yield 每个 NDJSON 事件字符串。
 
-    协议与概念轮动分析一致: meta / delta / error / done。
+    协议与概念轮动分析一致: meta / delta / error / done, 额外多一个 ``suggestions``
+    —— 正文流完后再下发模型给的参数建议(已按参数声明收口), 供前端一键送进网格搜索。
     """
     rows, overall, horizons = collect_attribution_facts(
         frame, horizon, features=features, buckets=buckets, min_samples=min_samples
@@ -243,6 +319,7 @@ async def analyze_attribution_stream(
             horizon=horizon,
             focus=focus,
         )
+        splitter = FenceSplitter()
         got = False
         async for delta in stream_ai_text(
             [
@@ -253,7 +330,13 @@ async def analyze_attribution_stream(
             max_tokens=None,
         ):
             got = True
-            yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
+            # 建议块(```json ... ```)被 splitter 扣下, 只把正文推给前端逐字渲染。
+            chunk = splitter.feed(delta)
+            if chunk:
+                yield json.dumps({"type": "delta", "content": chunk}, ensure_ascii=False)
+        tail = splitter.flush()
+        if tail:
+            yield json.dumps({"type": "delta", "content": tail}, ensure_ascii=False)
         if not got:
             yield json.dumps(
                 {"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"},
@@ -264,4 +347,25 @@ async def analyze_attribution_stream(
         logger.exception("AI attribution insight failed: %s", e)
         yield json.dumps({"type": "error", "message": f"AI 形态归因失败: {e}"}, ensure_ascii=False)
         return
+
+    meta_list = list(params or [])
+    items = normalize_suggestions(
+        extract_suggestions(prose=splitter.text, json_text=splitter.json_text()),
+        meta_list,
+    )
+    source = "ai"
+    if not items:
+        items = await _request_param_suggestions(meta_list, rows, horizon)
+    if not items:
+        items = explore_suggestions(meta_list)
+        source = "explore" if items else "none"
+    if items:
+        yield json.dumps({
+            "type": "suggestions",
+            "strategy_id": strategy_id,
+            "horizon": horizon,
+            "source": source,
+            "items": items,
+            "combos": suggest_combos(items),
+        }, ensure_ascii=False)
     yield json.dumps({"type": "done"}, ensure_ascii=False)

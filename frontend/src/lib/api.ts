@@ -1946,6 +1946,36 @@ export interface SignalLabScoreToday {
   notes: string[]
 }
 
+/** AI 归因给出的单条参数建议 — 网格已按策略参数声明收口, 可直接送进网格搜索。 */
+export interface SignalLabParamSuggestion {
+  param_id: string
+  label: string
+  type: 'float' | 'int' | 'bool' | 'select' | string
+  direction: 'up' | 'down' | 'hold'
+  reason: string
+  /** 数值型: {min,max,step}; bool/select: 候选值数组 */
+  grid: { min: number; max: number; step: number } | (string | number | boolean)[]
+  levels: (number | string | boolean)[]
+  n_levels: number
+}
+
+export interface SignalLabSuggestions {
+  strategy_id: string
+  horizon: number
+  /** ai = 模型给的建议; explore = 模型给不出, 后端按参数声明铺的探索网格(前端须标注来源) */
+  source?: 'ai' | 'explore' | 'none'
+  items: SignalLabParamSuggestion[]
+  combos: number
+}
+
+/** AI 归因流的一帧。 */
+export type SignalLabInsightEvent =
+  | { type: 'meta'; horizon: number; n_buckets: number; n_signals: number; summary: string }
+  | { type: 'delta'; content: string }
+  | { type: 'error'; message: string }
+  | SignalLabSuggestions & { type: 'suggestions' }
+  | { type: 'done' }
+
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
@@ -3701,7 +3731,8 @@ export const api = {
 
   /**
    * AI 形态归因解读 (NDJSON 流)。
-   * 每帧: {type:'meta'|'delta'|'error'|'done', ...}
+   * 每帧: meta / delta / error / suggestions / done —— suggestions 是正文流完后
+   * 补发的机器可读参数建议(已按策略参数声明收口), 可直接送进参数网格搜索。
    */
   signalLabInsight: async (
     payload: {
@@ -3713,7 +3744,7 @@ export const api = {
       buckets?: number
       focus?: string
     },
-    onEvent: (event: { type: string; content?: string; message?: string; [k: string]: unknown }) => void,
+    onEvent: (event: SignalLabInsightEvent) => void,
     signal?: AbortSignal,
   ) => {
     const resp = await fetch('/api/signallab/attribution-insight', {
@@ -3735,7 +3766,7 @@ export const api = {
       for (const line of lines) {
         if (!line.trim()) continue
         try {
-          onEvent(JSON.parse(line))
+          onEvent(JSON.parse(line) as SignalLabInsightEvent)
         } catch {
           // 半包/脏行直接跳过, 不打断整条流
         }

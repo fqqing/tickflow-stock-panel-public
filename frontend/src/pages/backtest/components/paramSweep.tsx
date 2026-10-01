@@ -1,7 +1,24 @@
 import { useMemo, useState } from 'react'
-import type { StrategyDetail, StrategyParamDef } from '@/lib/api'
+import type { SignalLabParamSuggestion, StrategyDetail, StrategyParamDef } from '@/lib/api'
 
 /** 参数扫描配置的共享逻辑与 UI — 优化器与 walk-forward 复用。 */
+
+/**
+ * AI 归因 -> 参数优化 的交接键。
+ *
+ * 用 sessionStorage 而不是路由 state: 归因在「信号实验室」页, 网格搜索在「回测/稳健性」
+ * 页, 中间隔着路由跳转; 一次性的建议不该进 localStorage(刷新后还弹一次很怪), 读完即删。
+ */
+export const PARAM_SUGGESTION_KEY = 'tickflow.param-suggestion'
+
+export interface ParamSuggestionPayload {
+  strategy_id: string
+  horizon?: number
+  /** ai = AI 归因给的建议; explore = AI 给不出, 后端按参数声明铺的探索网格 */
+  source?: 'ai' | 'explore' | 'none'
+  items: SignalLabParamSuggestion[]
+  combos?: number
+}
 
 export const INPUT_CLS =
   'w-full px-2.5 py-1.5 rounded-input bg-surface border border-border text-xs focus:outline-none focus:border-accent'
@@ -111,7 +128,37 @@ export function useParamSweep(strategies: StrategyDetail[], onStrategyChange?: (
     return grid
   }
 
-  return { strategyId, selected, selectStrategy, params, sweeps, updateSweep, combos, gridError, buildGrid }
+  /**
+   * 用 AI 归因给的建议覆盖扫描配置: 只勾选建议到的参数(其余关掉, 否则组合数会爆),
+   * 数值型直接搬后端收口过的 min/max/step, bool/select 扫全部候选值。
+   * 返回是否命中了策略(策略 id 对不上时为 false)。
+   */
+  const applySuggestion = (payload: ParamSuggestionPayload): boolean => {
+    const target = strategies.find(s => s.id === payload.strategy_id)
+    if (!target) return false
+    setStrategyId(target.id)
+    const next: Record<string, Sweep> = {}
+    for (const p of target.params ?? []) next[p.id] = defaultSweep(p)
+    for (const item of payload.items ?? []) {
+      const p = (target.params ?? []).find(x => x.id === item.param_id)
+      if (!p) continue
+      const base = next[p.id] ?? defaultSweep(p)
+      const numeric = p.type === 'float' || p.type === 'int'
+      const g = item.grid as { min?: number; max?: number; step?: number } | undefined
+      if (numeric && g && g.min != null && g.max != null && g.step != null) {
+        next[p.id] = { enabled: true, min: String(g.min), max: String(g.max), step: String(g.step) }
+      } else {
+        next[p.id] = { ...base, enabled: true }
+      }
+    }
+    setSweeps(next)
+    return true
+  }
+
+  return {
+    strategyId, selected, selectStrategy, params, sweeps, updateSweep,
+    combos, gridError, buildGrid, applySuggestion,
+  }
 }
 
 /** 策略选择器。 */
