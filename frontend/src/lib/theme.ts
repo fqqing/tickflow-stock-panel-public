@@ -49,7 +49,7 @@ export function useTheme(): Theme {
 }
 
 // ================================================================
-// 图表调色板 — ECharts / lightweight-charts 画布不吃 CSS 变量,
+// 图表调色板 — ECharts / KLineChart 画布不吃 CSS 变量,
 // 所有图表组件统一从这里取色, 主题切换时依赖 useTheme 重建 option。
 // bull/bear/accent 等语义色双主题一致, 不在此重复定义。
 // ================================================================

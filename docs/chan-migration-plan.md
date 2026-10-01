@@ -203,7 +203,10 @@ chart.createOverlay({
 
 ## 八、回退机制
 
-- **双轨灰度**：`StockDailyKChart` 保留 ECharts 路径，新增 `KLinePro` 并行；按 `symbol` 哈希分流，设置项可一键全量回退
+- **双轨并行**：`StockDailyKChart` 保留 ECharts 路径，新增 `KLinePro` 并行。
+  ⚠️ 实际实现是**全局布尔开关**（`components/kline/useKLineProFlag.ts` 的 localStorage
+  `tickflow.useKLinePro`，终端按 `g` 键切换），**没有**按 symbol 哈希分流 —— 也就是说
+  灰度粒度是"整机开/关"，不能只让一部分标的走新内核。需要按比例灰度时得先补分流逻辑。
 - **缠论独立开关**：缠论图层挂不挂，与用哪个内核解耦。即使新内核的 K 线本身有问题，缠论仍可在旧内核上看
 - **备份点**：`backup/pre-terminal-20260924`（tag + branch + bundle + 物理文件），任何时候可整体回退
 

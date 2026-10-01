@@ -19,8 +19,9 @@
  *   主图指标挂 candle_pane, 副图自动开新窗格; 窗格分隔条可拖动, 高度同样持久化。
  *   指标参数**不硬编码**: 创建时不传 calcParams, 再从 getIndicators() 回读库内默认值。
  *
- * 当前能力: 多周期 K + 指标自选(27 个内置) + 缠论叠加(仅日线档) + 监控价位水平线 + 暗色主题(红涨绿跌)。
- * 未做: 复权切换、涨停标记、手绘线、分时(均价)图。
+ * 当前能力: 多周期 K + 指标自选(27 个内置) + 缠论叠加(仅日线档) + 主图定量结构
+ *   (EMA25/89 双轨 + 交叉图标 + 九转) + 筹码分布 + 监控价位水平线 + 三档复权 + 主题跟随。
+ * 未做: 涨停标记、手绘线、分时(均价)图、MACD 定量结构副图。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -28,11 +29,22 @@ import * as kc from 'klinecharts'
 import { api, KLINE_CHART_FIELDS, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChanOverlay } from '@/lib/useChanOverlay'
+import { useChartTheme } from '@/lib/theme'
+import { chartSession } from '@/lib/chartSession'
+import { applyKcViewport, readKcViewport } from '@/lib/chartViewport'
 import type { ChartPriceLine } from '@/lib/chart-primitives'
-import { isMinutePeriod, type KLinePeriod } from '@/components/StockDailyKChart'
+import {
+  ADJUST_OPTIONS,
+  isMinutePeriod,
+  MINUTE_SPAN,
+  periodTabsFor,
+  type KLineAdjust,
+  type KLinePeriod,
+} from '@/lib/klinePeriod'
 import { registerChanOverlay } from './chan-overlay-kline'
 import { registerPriceLineOverlay } from './price-line-overlay'
 import { registerChipsOverlay } from './chips-overlay'
+import { registerStructureOverlay, type StructurePayload } from './structure-overlay'
 import { IndicatorManager } from './IndicatorManager'
 import {
   MAIN_PANE_ID,
@@ -46,9 +58,8 @@ import { cn } from '@/lib/cn'
 
 const BULL = '#F04438' // --bull 红涨
 const BEAR = '#12B76A' // --bear 绿跌
-const CHART_BG = '#0B1220'
-const GRID = '#1E293B'
-const TEXT = '#94A3B8'
+/** 十字光标线的颜色(双主题都用中性灰, 与 ECharts 的 CT().crosshair 观感对齐) */
+const CROSSHAIR = '#475569'
 
 const CUSTOM_INDICATORS = 'trend_dragon,capital_momentum,structure,macd_structure'
 
@@ -64,24 +75,34 @@ const MINUTE_BAR_LIMIT = 800
 const CHIPS_DAYS = 250
 const CHIPS_BINS = 60
 
-/** 分钟周期 -> klinecharts span */
-const MINUTE_SPAN: Record<string, number> = {
-  '1m': 1, '5m': 5, '15m': 15, '30m': 30, '60m': 60, '90m': 90, '120m': 120,
-}
-
-/** 图内周期工具条(90m/120m 后端支持, 但终端常用档位里不放) */
-const PERIOD_TABS: { key: KLinePeriod; label: string }[] = [
-  { key: 'day', label: '日' },
-  { key: 'week', label: '周' },
-  { key: 'month', label: '月' },
-  { key: '1m', label: '1分' },
-  { key: '5m', label: '5分' },
-  { key: '15m', label: '15分' },
-  { key: '30m', label: '30分' },
-  { key: '60m', label: '60分' },
-]
+/** 图内周期工具条: 与 ECharts 内核消费同一份档位表(见 lib/klinePeriod) */
+const PERIOD_TABS = periodTabsFor('klinecharts')
 
 const CN_OFFSET_MS = 8 * 60 * 60 * 1000
+
+/**
+ * 主题 → klinecharts styles。
+ * 此前这里硬编码了一套暗色(#0B1220), 切到亮色主题后 K 线区仍是黑底 ——
+ * 这是「切换内核割裂」里最扎眼的一条。现在跟 ECharts 一样走 useChartTheme()。
+ */
+function buildStyles(ct: { grid: string; text: string; crosshairLabelBg: string }): kc.DeepPartial<kc.Styles> {
+  const grid = ct.grid
+  const text = ct.text
+  return {
+    grid: { horizontal: { color: grid }, vertical: { color: grid } },
+    candle: {
+      bar: { upColor: BULL, downColor: BEAR, noChangeColor: text },
+      priceMark: { last: { upColor: BULL, downColor: BEAR, noChangeColor: text } },
+    },
+    xAxis: { axisLine: { color: grid }, tickLine: { color: grid }, tickText: { color: text } },
+    yAxis: { axisLine: { color: grid }, tickLine: { color: grid }, tickText: { color: text } },
+    separator: { color: grid },
+    crosshair: {
+      horizontal: { text: { color: text, backgroundColor: ct.crosshairLabelBg }, line: { color: CROSSHAIR } },
+      vertical: { text: { color: text, backgroundColor: ct.crosshairLabelBg }, line: { color: CROSSHAIR } },
+    },
+  }
+}
 
 /**
  * 后端日期 -> 毫秒 epoch。
@@ -100,6 +121,11 @@ function parseTs(v: unknown): number | null {
   return (hh ? +hh : 0) < 8 ? ts : ts - CN_OFFSET_MS
 }
 
+/**
+ * 结构列(st_*): 主图定量结构的轨道与标注, 由后端算好后随 K 线一起下来。
+ * 挂在 KLineData 上是为了让 structure overlay 能直接按 timestamp 取到 ——
+ * 前端不重算指标, 与 ECharts 侧同源同口径。
+ */
 function rowToKLine(r: KlineRow): kc.KLineData | null {
   if (!r || r.date == null || r.open == null || r.close == null) return null
   const ts = parseTs(r.date)
@@ -111,6 +137,13 @@ function rowToKLine(r: KlineRow): kc.KLineData | null {
     low: Number(r.low ?? r.close),
     close: Number(r.close),
     volume: Number(r.volume ?? 0),
+    st_dsg: r.st_dsg ?? null,
+    st_dxg: r.st_dxg ?? null,
+    st_csg: r.st_csg ?? null,
+    st_cxg: r.st_cxg ?? null,
+    st_icon: r.st_icon ?? 0,
+    st_dn: r.st_dn ?? 0,
+    st_up: r.st_up ?? 0,
   }
 }
 
@@ -154,8 +187,28 @@ export interface KLineProProps {
   period?: KLinePeriod
   /** 受控模式: 由外层持有周期(终端键盘 1/2/3 与图内按钮共用一份状态) */
   onPeriodChange?: (p: KLinePeriod) => void
+  /**
+   * 复权方式(受控)。不传则组件自己维护。
+   * 提升到终端层是为了让「切内核」不丢口径 —— 此前这里硬编码 qfq。
+   */
+  adjust?: KLineAdjust
+  onAdjustChange?: (a: KLineAdjust) => void
+  /**
+   * 主图定量结构开关(受控)。不传则组件自己维护, 默认开 ——
+   * 这是本项目的核心策略信号, 默认可见才符合「策略与结构的观察面」定位。
+   */
+  structureEnabled?: boolean
+  onStructureChange?: (v: boolean) => void
   chanEnabled?: boolean
   priceLines?: ChartPriceLine[]
+  /** 筹码分布开关(受控)。不传则组件内部维护, 默认关 */
+  chipsEnabled?: boolean
+  onChipsChange?: (v: boolean) => void
+  /**
+   * true = 隐藏图内的叠加层开关(定量结构 / 筹码)。
+   * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是割裂观感。
+   */
+  hideOverlayToggles?: boolean
   /** 盘中自动刷新间隔(毫秒); 分钟档配合实时同步使用 */
   refetchIntervalMs?: number
 }
@@ -166,20 +219,38 @@ export function KLinePro({
   dateRange,
   period: periodProp,
   onPeriodChange,
+  adjust: adjustProp,
+  onAdjustChange,
+  structureEnabled: structProp,
+  onStructureChange,
   chanEnabled = false,
   priceLines = [],
+  chipsEnabled: chipsProp,
+  onChipsChange,
+  hideOverlayToggles = false,
   refetchIntervalMs,
 }: KLineProProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<kc.Chart | null>(null)
   const rowsRef = useRef<kc.KLineData[]>([])
   const [ready, setReady] = useState(false)
+  const ct = useChartTheme()
 
   // ── S2 指标清单(持久化在 localStorage, 换股不换指标) ──
   const [indicators, setIndicators] = useState<IndicatorConfig[]>(() => loadIndicators())
   const [managerOpen, setManagerOpen] = useState(false)
   /** key -> 图表内指标 id / 所在窗格 */
   const indRefs = useRef(new Map<string, { id: string; paneId: string }>())
+  /**
+   * 各叠加层在图表内的 id。
+   * ★ 换股会 dispose 重建图表, 这些 id 随之失效 —— 重建时必须清空, 否则后续
+   *   走 overrideOverlay 分支会打到不存在的 id 上, 表现是「换股后叠加层静默消失」。
+   */
+  const overlayIds = useRef<Record<'chan' | 'chips' | 'price' | 'structure', string | null>>({
+    chan: null, chips: null, price: null, structure: null,
+  })
+  /** 会话视口只重放一次(挂载/换股后), 之后交给用户自由滚动 */
+  const vpAppliedRef = useRef(false)
 
   const [innerPeriod, setInnerPeriod] = useState<KLinePeriod>('day')
   const period = periodProp ?? innerPeriod
@@ -189,14 +260,30 @@ export function KLinePro({
   }, [onPeriodChange])
   const minutePeriod = isMinutePeriod(period)
 
+  // 复权: 受控优先。分钟档后端无复权口径, 控件禁用(见工具条)
+  const [innerAdjust, setInnerAdjust] = useState<KLineAdjust>('qfq')
+  const adjust = adjustProp ?? innerAdjust
+  const applyAdjust = useCallback((a: KLineAdjust) => {
+    if (onAdjustChange) onAdjustChange(a)
+    else setInnerAdjust(a)
+  }, [onAdjustChange])
+
+  // 主图定量结构: 受控优先, 默认开
+  const [innerStruct, setInnerStruct] = useState(true)
+  const structOn = structProp ?? innerStruct
+  const applyStruct = useCallback((v: boolean) => {
+    if (onStructureChange) onStructureChange(v)
+    else setInnerStruct(v)
+  }, [onStructureChange])
+
   const days = useMemo(() => {
     const s = new Date(dateRange.start), e = new Date(dateRange.end)
     return Math.max(1, Math.ceil((e.getTime() - s.getTime()) / 86400000) + 1)
   }, [dateRange])
 
   const daily = useQuery({
-    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, undefined, period, 'qfq'),
-    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, 'qfq'),
+    queryKey: QK.kline(symbol, dateRange.start, dateRange.end, undefined, period, adjust),
+    queryFn: () => api.klineDaily(symbol, days, dateRange, undefined, CUSTOM_INDICATORS, KLINE_CHART_FIELDS, period, adjust),
     enabled: !!symbol && !minutePeriod,
   })
 
@@ -220,7 +307,13 @@ export function KLinePro({
   const chanLayers = useChanOverlay(symbol, chartDates, chanEnabled && !minutePeriod)
 
   // ── S3 筹码分布: 工具条开关控制, 只在日线档取(分钟档没有"持仓成本"意义) ──
-  const [chipsOn, setChipsOn] = useState(false)
+  // 受控优先: 终端层持有后与结构/缠论一样进会话, 切内核不丢
+  const [innerChips, setInnerChips] = useState(false)
+  const chipsOn = chipsProp ?? innerChips
+  const applyChips = useCallback((v: boolean) => {
+    if (onChipsChange) onChipsChange(v)
+    else setInnerChips(v)
+  }, [onChipsChange])
   const chips = useQuery({
     queryKey: QK.stockChips(symbol, CHIPS_DAYS, CHIPS_BINS),
     queryFn: () => api.stockAnalysisChips(symbol, { days: CHIPS_DAYS, bins: CHIPS_BINS }),
@@ -241,26 +334,14 @@ export function KLinePro({
     // 指标 diff 的 effect 不会重跑, 新图上就一个指标都没有。
     setReady(false)
     indRefs.current.clear()
+    overlayIds.current = { chan: null, chips: null, price: null, structure: null }
+    vpAppliedRef.current = false
     registerChanOverlay()
     registerPriceLineOverlay()
     registerChipsOverlay()
+    registerStructureOverlay()
 
-    const chart = kc.init(el, {
-      styles: {
-        grid: { horizontal: { color: GRID }, vertical: { color: GRID } },
-        candle: {
-          bar: { upColor: BULL, downColor: BEAR, noChangeColor: TEXT },
-          priceMark: { last: { upColor: BULL, downColor: BEAR, noChangeColor: TEXT } },
-        },
-        xAxis: { axisLine: { color: GRID }, tickLine: { color: GRID }, tickText: { color: TEXT } },
-        yAxis: { axisLine: { color: GRID }, tickLine: { color: GRID }, tickText: { color: TEXT } },
-        separator: { color: GRID },
-        crosshair: {
-          horizontal: { text: { color: TEXT, backgroundColor: CHART_BG }, line: { color: '#475569' } },
-          vertical: { text: { color: TEXT, backgroundColor: CHART_BG }, line: { color: '#475569' } },
-        },
-      },
-    })
+    const chart = kc.init(el, { styles: buildStyles(ct) })
     if (!chart) return
     chartRef.current = chart
 
@@ -285,6 +366,13 @@ export function KLinePro({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol])
 
+  // 主题切换: 只换 styles, 不重建图表(重建会丢视口 / 指标 / 窗格高度)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    chart.setStyles(buildStyles(ct))
+  }, [ct, ready])
+
   // 数据刷新
   useEffect(() => {
     const chart = chartRef.current
@@ -292,6 +380,35 @@ export function KLinePro({
     rowsRef.current = rows
     chart.resetData()
   }, [rows])
+
+  // ── 视口: 静默写回会话 ──
+  // 滚动/缩放每秒可触发几十次, 绝不能走 setState —— 写 chartSession 的静默通道,
+  // 只在新渲染器挂载时被读走一次(见下)。这是「切内核不丢缩放」的关键。
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    const report = () => {
+      const vp = readKcViewport(chart)
+      if (vp) chartSession.setViewport(vp)
+    }
+    chart.subscribeAction('onVisibleRangeChange', report)
+    chart.subscribeAction('onScroll', report)
+    chart.subscribeAction('onZoom', report)
+    return () => {
+      chart.unsubscribeAction('onVisibleRangeChange', report)
+      chart.unsubscribeAction('onScroll', report)
+      chart.unsubscribeAction('onZoom', report)
+    }
+  }, [ready])
+
+  // 挂载/换股后重放上次视口(仅一次, 且要等数据到位 —— 空图上算不出 barSpace)
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready || rows.length === 0 || vpAppliedRef.current) return
+    const vp = chartSession.getViewport()
+    if (vp) applyKcViewport(chart, vp)
+    vpAppliedRef.current = true
+  }, [ready, rows.length])
 
   // 周期切换: setPeriod 内部会 resetData 重新走 loader, 先清空 rowsRef
   // 避免切档瞬间用上一档的数据重绘(会看到错周期的 K 线)。
@@ -303,7 +420,6 @@ export function KLinePro({
   }, [period, ready])
 
   // 缠论叠加层：创建一次，之后用 overrideOverlay 更新 extendData
-  const chanOverlayIdRef = useRef<string | null>(null)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !ready) return
@@ -312,7 +428,7 @@ export function KLinePro({
       ranges: chanLayers.ranges,
       markers: chanLayers.markers,
     }
-    if (!chanOverlayIdRef.current) {
+    if (!overlayIds.current.chan) {
       const first = rowsRef.current[0]
       if (!first) return
       const id = chart.createOverlay({
@@ -321,26 +437,25 @@ export function KLinePro({
         points: [{ timestamp: first.timestamp, value: first.close }],
         extendData: payload,
       })
-      if (typeof id === 'string') chanOverlayIdRef.current = id
+      if (typeof id === 'string') overlayIds.current.chan = id
     } else {
-      chart.overrideOverlay({ id: chanOverlayIdRef.current, extendData: payload })
+      chart.overrideOverlay({ id: overlayIds.current.chan, extendData: payload })
     }
   }, [chanLayers, ready])
 
   // 筹码分布: 创建一次, override 更新 extendData
-  const chipsOverlayIdRef = useRef<string | null>(null)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !ready) return
     if (!chipsData) {
       // 关掉开关时要真的移除, 否则图上残留旧筹码
-      if (chipsOverlayIdRef.current) {
-        chart.removeOverlay({ id: chipsOverlayIdRef.current })
-        chipsOverlayIdRef.current = null
+      if (overlayIds.current.chips) {
+        chart.removeOverlay({ id: overlayIds.current.chips })
+        overlayIds.current.chips = null
       }
       return
     }
-    if (!chipsOverlayIdRef.current) {
+    if (!overlayIds.current.chips) {
       const first = rowsRef.current[0]
       if (!first) return
       const id = chart.createOverlay({
@@ -349,18 +464,17 @@ export function KLinePro({
         points: [{ timestamp: first.timestamp, value: first.close }],
         extendData: chipsData,
       })
-      if (typeof id === 'string') chipsOverlayIdRef.current = id
+      if (typeof id === 'string') overlayIds.current.chips = id
     } else {
-      chart.overrideOverlay({ id: chipsOverlayIdRef.current, extendData: chipsData })
+      chart.overrideOverlay({ id: overlayIds.current.chips, extendData: chipsData })
     }
   }, [chipsData, ready])
 
   // 监控价位线：创建一次，override 更新
-  const priceOverlayIdRef = useRef<string | null>(null)
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !ready) return
-    if (!priceOverlayIdRef.current) {
+    if (!overlayIds.current.price) {
       const first = rowsRef.current[0]
       if (!first) return
       const id = chart.createOverlay({
@@ -369,11 +483,45 @@ export function KLinePro({
         points: [{ timestamp: first.timestamp, value: first.close }],
         extendData: priceLines,
       })
-      if (typeof id === 'string') priceOverlayIdRef.current = id
+      if (typeof id === 'string') overlayIds.current.price = id
     } else {
-      chart.overrideOverlay({ id: priceOverlayIdRef.current, extendData: priceLines })
+      chart.overrideOverlay({ id: overlayIds.current.price, extendData: priceLines })
     }
   }, [priceLines, ready])
+
+  // ── 主图定量结构: 与 ECharts 侧 showStructure 同一套口径 ──
+  //   (EMA25/89 双轨 + 轨道带 + BBB/SSS 交叉图标 + 九转数字)
+  //   数据从 getDataList() 读, 这里只用 rev 触发重绘。
+  const structRev = useMemo(() => {
+    const last = rows[rows.length - 1]
+    return `${symbol}|${period}|${rows.length}|${last?.timestamp ?? 0}`
+  }, [symbol, period, rows])
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    // 结构信号按日线口径算, 分钟档不画(与 ECharts 侧一致, 按钮也是禁用的)
+    if (!structOn || minutePeriod) {
+      if (overlayIds.current.structure) {
+        chart.removeOverlay({ id: overlayIds.current.structure })
+        overlayIds.current.structure = null
+      }
+      return
+    }
+    const payload: StructurePayload = { rev: structRev }
+    if (!overlayIds.current.structure) {
+      const first = rowsRef.current[0]
+      if (!first) return
+      const id = chart.createOverlay({
+        name: 'structure',
+        paneId: 'candle_pane',
+        points: [{ timestamp: first.timestamp, value: first.close }],
+        extendData: payload,
+      })
+      if (typeof id === 'string') overlayIds.current.structure = id
+    } else {
+      chart.overrideOverlay({ id: overlayIds.current.structure, extendData: payload })
+    }
+  }, [structOn, structRev, minutePeriod, ready])
 
   // ── S2: 指标清单 diff 到图表 ──
   // 增删改一律走增量, 不做「全量重建」 —— 重建窗格会把用户拖动过的高度一起丢掉。
@@ -443,7 +591,7 @@ export function KLinePro({
 
   return (
     <div className={cn('relative flex h-full w-full flex-col', className)}>
-      <div className="flex shrink-0 items-center gap-1 px-1 py-1">
+      <div className="flex shrink-0 flex-wrap items-center gap-1 px-1 py-1">
         {PERIOD_TABS.map(t => (
           <button
             key={t.key}
@@ -459,6 +607,48 @@ export function KLinePro({
             {t.label}
           </button>
         ))}
+        {/* 复权: 与 ECharts 侧同一份 ADJUST_OPTIONS。分钟档后端无复权口径, 禁用 */}
+        <div className="ml-1 flex items-center gap-0.5 rounded border border-border/70 p-0.5">
+          {ADJUST_OPTIONS.map(opt => (
+            <button
+              key={opt.key}
+              type="button"
+              onClick={() => applyAdjust(opt.key)}
+              disabled={minutePeriod}
+              title={minutePeriod ? '分钟档无复权口径' : opt.title}
+              className={cn(
+                'h-5 rounded px-1.5 text-[10px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+                minutePeriod
+                  ? 'cursor-not-allowed text-muted/40'
+                  : adjust === opt.key
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-secondary',
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {!hideOverlayToggles && (
+          <button
+            type="button"
+            onClick={() => applyStruct(!structOn)}
+            disabled={minutePeriod}
+            title={minutePeriod
+              ? '主图定量结构(双轨/九转)按日线口径算, 分钟档不可用'
+              : structOn ? '隐藏主图定量结构(EMA25/89 双轨 + 九转)' : '显示主图定量结构(EMA25/89 双轨 + 九转)'}
+            className={cn(
+              'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+              minutePeriod
+                ? 'cursor-not-allowed border-transparent text-muted/40'
+                : structOn
+                  ? 'border-accent/30 bg-accent/20 font-medium text-accent'
+                  : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
+            )}
+          >
+            定量结构
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setManagerOpen(v => !v)}
@@ -472,21 +662,23 @@ export function KLinePro({
         >
           指标{indicators.length > 0 ? ` ${indicators.length}` : ''}
         </button>
-        <button
-          type="button"
-          onClick={() => setChipsOn(v => !v)}
-          disabled={minutePeriod}
-          title={minutePeriod ? '筹码分布只在日线档有意义' : '筹码分布(成本分布): 右侧横条, 红=获利盘 / 绿=套牢盘'}
-          className={cn(
-            'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
-            chipsOn && !minutePeriod
-              ? 'border-accent/30 bg-accent/20 font-medium text-accent'
-              : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
-            minutePeriod && 'cursor-not-allowed opacity-40',
-          )}
-        >
-          筹码
-        </button>
+        {!hideOverlayToggles && (
+          <button
+            type="button"
+            onClick={() => applyChips(!chipsOn)}
+            disabled={minutePeriod}
+            title={minutePeriod ? '筹码分布只在日线档有意义' : '筹码分布(成本分布): 右侧横条, 红=获利盘 / 绿=套牢盘'}
+            className={cn(
+              'h-6 rounded border px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+              chipsOn && !minutePeriod
+                ? 'border-accent/30 bg-accent/20 font-medium text-accent'
+                : 'border-transparent text-muted hover:bg-elevated hover:text-foreground',
+              minutePeriod && 'cursor-not-allowed opacity-40',
+            )}
+          >
+            筹码
+          </button>
+        )}
         {chipsOn && !minutePeriod && chips.data?.ok && (
           <span className="ml-1 text-[10px] text-muted" title="平均成本 / 获利盘比例">
             成本 {chips.data.avg_cost?.toFixed(2) ?? '—'} · 获利{' '}

@@ -1,4 +1,7 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
+import type { KlineRow } from '@/lib/api'
+import { chartSession } from '@/lib/chartSession'
+import { viewportToZoom, zoomToViewport } from '@/lib/chartViewport'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
@@ -8,7 +11,20 @@ import type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange } from '@/l
 // 原语类型已抽到 lib/chart-primitives(换图表内核时上游无需改动), 此处原样导出保持兼容
 export type { ChartMarker, ChartPolyline, ChartPriceLine, ChartRange }
 
-export interface OHLC {
+/**
+ * 解密公式派生列(趋势擒龙 / 资金动能 / 主图定量结构 / MACD 定量结构)。
+ * 这些值由后端算好后随 K 线一起返回, 声明收敛到 `api.ts` 的 KlineRow ——
+ * 新增一列只改三处(KlineRow / KLINE_CHART_FIELDS / StockDailyKChart.toOHLC),
+ * 不要在这里再抄一遍: 此前两份声明各自漂移, 是"同一语义两处实现"的典型债。
+ */
+type FormulaFields = Pick<
+  KlineRow,
+  | 'td_signal' | 'td_a3' | 'cm_value'
+  | 'st_dsg' | 'st_dxg' | 'st_csg' | 'st_cxg' | 'st_icon' | 'st_dn' | 'st_up'
+  | 'ms_diff' | 'ms_dea' | 'ms_hist' | 'ms_btext' | 'ms_by' | 'ms_ttext' | 'ms_ty'
+>
+
+export interface OHLC extends FormulaFields {
   date: string
   open: number
   high: number
@@ -30,33 +46,6 @@ export interface OHLC {
   kdj_j?: number | null
   boll_upper?: number | null
   boll_lower?: number | null
-  /** 趋势擒龙（蛟龙出海）信号日 */
-  td_signal?: boolean | null
-  /** 趋势擒龙的 A3（上次「9 连阳」距今 bar 数） */
-  td_a3?: number | null
-  /** 资金动能（(RS/RS_MA52-1)*10），数据不足 52 根时为 null */
-  cm_value?: number | null
-  /** 主图定量结构：短轨道 EMA(HIGH/LOW,25) 与长轨道 EMA(HIGH/LOW,89) */
-  st_dsg?: number | null
-  st_dxg?: number | null
-  st_csg?: number | null
-  st_cxg?: number | null
-  /** 主图定量结构：0 无 / 4 收盘上穿短上轨 / 5 收盘跌破短下轨 */
-  st_icon?: number | null
-  /** 下跌九转标注数字（0 无标注，否则 6~9），画在 LOW 下方 */
-  st_dn?: number | null
-  /** 上涨九转标注数字（0 无标注，否则 6~9），画在 HIGH 上方 */
-  st_up?: number | null
-  /** MACD 定量结构：DIFF / DEA / 柱 */
-  ms_diff?: number | null
-  ms_dea?: number | null
-  ms_hist?: number | null
-  /** 底部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失，纵坐标为 ms_by */
-  ms_btext?: number | null
-  ms_by?: number | null
-  /** 顶部结构标注：1 结构形成 / 2 钝化 / 3 钝化消失，纵坐标为 ms_ty */
-  ms_ttext?: number | null
-  ms_ty?: number | null
 }
 
 /**
@@ -1623,6 +1612,9 @@ export function EChartsCandlestick({
 
       const d = dataRef.current
       const total = d.length
+      // 写回会话(静默通道, 不触发 React 重渲染): 切到另一个内核时由它重放
+      const vp = zoomToViewport({ start: zoom.start, end: zoom.end }, total)
+      if (vp) chartSession.setViewport(vp)
       const visibleCount = Math.round(total * (zoom.end - zoom.start) / 100)
       const newCompact = visibleCount > COMPACT_THRESHOLD
       if (newCompact !== compactRef.current) {
@@ -1740,13 +1732,14 @@ export function EChartsCandlestick({
 
     chart.setOption(option, true)
 
-    // 恢复用户缩放位置
-    const zoom = userZoomRef.current
-    if (zoom) {
-      chart.dispatchAction({ type: 'dataZoom', start: zoom.start, end: zoom.end })
-    } else {
-      chart.dispatchAction({ type: 'dataZoom', start: initialZoom.start, end: initialZoom.end })
-    }
+    // 恢复缩放位置: 会话视口 > 本轮用户缩放 > 默认区间。
+    // 会话视口是从上一个内核带过来的(互译见 chartViewport), 优先它 —— 这是
+    // 「切内核不丢缩放」的关键; 之后用户滚动会经 dataZoom 事件把它覆盖掉。
+    const sessionVp = chartSession.getViewport()
+    const zoom = (sessionVp ? viewportToZoom(sessionVp, data.length) : null)
+      ?? userZoomRef.current
+      ?? initialZoom
+    chart.dispatchAction({ type: 'dataZoom', start: zoom.start, end: zoom.end })
 
     // 初始信息栏
     const infoEl = infoBarRef.current

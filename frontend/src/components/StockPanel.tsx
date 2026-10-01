@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type KLinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
+import type { KLineAdjust } from '@/lib/klinePeriod'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -42,6 +43,14 @@ interface Props {
   /** K 线周期（受控，透传给 StockDailyKChart）。终端层持有，供键盘 1/2/3 跨内核生效 */
   period?: KLinePeriod
   onPeriodChange?: (p: KLinePeriod) => void
+  /** 主图定量结构开关（受控，透传）。终端层持有，与 KLinePro 共用一份状态 */
+  structureOverlay?: boolean
+  onStructureChange?: (v: boolean) => void
+  /** true = 隐藏图内叠加层开关(终端层已提供统一入口, 避免同屏两组同名按钮) */
+  hideOverlayToggles?: boolean
+  /** 复权方式（受控，透传）。终端层持有，与 KLinePro 共用一份状态 */
+  adjust?: KLineAdjust
+  onAdjustChange?: (a: KLineAdjust) => void
   /** 加监控回调 (传入后信息条显示 RadioTower 图标) */
   onMonitor?: () => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -79,6 +88,11 @@ export function StockPanel({
   onToggleChan,
   period,
   onPeriodChange,
+  structureOverlay,
+  onStructureChange,
+  hideOverlayToggles,
+  adjust,
+  onAdjustChange,
   onMonitor,
   onPriceDoubleClick,
   inWatchlist,
@@ -209,6 +223,11 @@ export function StockPanel({
           onToggleChan={onToggleChan}
           period={period}
           onPeriodChange={onPeriodChange}
+          structureOverlay={structureOverlay}
+          onStructureChange={onStructureChange}
+          hideOverlayToggles={hideOverlayToggles}
+          adjust={adjust}
+          onAdjustChange={onAdjustChange}
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
           onPriceDoubleClick={onPriceDoubleClick}

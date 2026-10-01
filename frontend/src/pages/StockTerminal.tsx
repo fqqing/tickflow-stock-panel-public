@@ -20,7 +20,8 @@ import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useLayoutMode } from '@/lib/useLayoutMode'
 import { useRecentStocks } from '@/lib/useRecentStocks'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
-import { type KLinePeriod } from '@/components/StockDailyKChart'
+import { fallbackPeriod, RENDERERS, type ChartRendererId } from '@/lib/chartRenderer'
+import { applyWorkspace, chartSession, useChartSession, WORKSPACE_PRESETS } from '@/lib/chartSession'
 import { DepthPanel } from '@/components/DepthPanel'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
@@ -103,6 +104,33 @@ function DrawerButton({ side, label, onClick }: { side: 'left' | 'right'; label:
   )
 }
 
+/** 叠加层开关 —— 终端层的唯一入口(内核工具条在 hideOverlayToggles 下不再重复渲染) */
+function OverlayToggle({
+  active,
+  label,
+  title,
+  onClick,
+}: {
+  active: boolean
+  label: string
+  title: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={cn(
+        'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+        active ? 'border-accent/30 bg-accent/20 text-accent' : 'border-transparent text-muted hover:bg-elevated',
+      )}
+    >
+      {label}
+    </button>
+  )
+}
+
 export function StockTerminal() {
   const { symbol = '' } = useParams<{ symbol: string }>()
   const navigate = useNavigate()
@@ -121,11 +149,22 @@ export function StockTerminal() {
   const quote = useQuote(symbol, refetchMs)
 
   const [dateRange, setDateRange] = useState(() => getDefaultRange())
-  const [chanOn, setChanOn] = useState(false)
-  const [useKLine, setUseKLine] = useState(() => getKLineProFlag())
-  // 周期提升到终端层: 键盘 1/2/3 与两个内核共用同一份状态。
-  // S1 起 KLinePro 也支持分钟档(1m/5m/15m/30m/60m), 不再降级成日线。
-  const [period, setPeriod] = useState<KLinePeriod>('day')
+  /**
+   * 图表会话: 周期 / 复权 / 叠加层开关住在组件树之外(见 lib/chartSession)。
+   * 这里不再用 useState —— 否则切内核时子树卸载重建会把它们一起带走,
+   * 那正是「切换割裂」的根因。现在切内核只是换渲染器 + 重放会话。
+   */
+  const session = useChartSession()
+  const { period, adjust, overlays } = session
+  const structOn = overlays.structure
+  const chanOn = overlays.chan
+  const chipsOn = overlays.chips
+  const [renderer, setRenderer] = useState<ChartRendererId>(
+    () => (getKLineProFlag() ? 'klinecharts' : 'echarts'),
+  )
+  const useKLine = renderer === 'klinecharts'
+  /** 当前渲染器的能力矩阵: UI 按它显隐, 不按内核名分叉 */
+  const caps = RENDERERS[renderer].capabilities
   const [priceLines, setPriceLines] = useState<ChartPriceLine[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -156,6 +195,11 @@ export function StockTerminal() {
     if (!symbol) return
     setFocusSymbol(symbol)
     return () => clearFocusSymbol()
+  }, [symbol])
+
+  // 会话里记一份当前标的(便于排查, 也为将来「按 symbol 隔离视口」留口子)
+  useEffect(() => {
+    if (symbol) chartSession.setSymbol(symbol)
   }, [symbol])
 
   // ── 触发上下文 ────────────────────────────────────────────
@@ -240,12 +284,15 @@ export function StockTerminal() {
   }
 
   const handleToggleKLine = useCallback(() => {
-    setUseKLine(v => {
-      const next = !v
-      setKLineProFlag(next)
-      return next
-    })
-  }, [])
+    const next: ChartRendererId = renderer === 'klinecharts' ? 'echarts' : 'klinecharts'
+    setRenderer(next)
+    setKLineProFlag(next === 'klinecharts')
+    // 目标内核不支持当前周期时退化到最近可用档位(ECharts 无 1m -> 5m)。
+    // 否则切过去会发现档位凭空消失 —— 这也是「割裂」的一种表现。
+    const current = chartSession.getState().period
+    const fp = fallbackPeriod(next, current)
+    if (fp !== current) chartSession.setPeriod(fp)
+  }, [renderer])
 
   // ── P2 键盘优先 ────────────────────────────────────────────
   useEffect(() => {
@@ -277,7 +324,9 @@ export function StockTerminal() {
         case '?':
           e.preventDefault(); setHelpOpen(true); break
         case 'c':
-          setChanOn(v => !v); break
+          chartSession.setOverlay('chan', !chanOn); break
+        case 's':
+          chartSession.setOverlay('structure', !structOn); break
         case 'r':
           setRailOpen(v => !v); break
         case 'p':
@@ -289,11 +338,11 @@ export function StockTerminal() {
         case ']':
           stepSymbol(1); break
         case '1':
-          setPeriod('day'); break
+          chartSession.setPeriod('day'); break
         case '2':
-          setPeriod('week'); break
+          chartSession.setPeriod('week'); break
         case '3':
-          setPeriod('month'); break
+          chartSession.setPeriod('month'); break
         case 'Escape':
           e.preventDefault(); navigate(-1); break
         default:
@@ -302,7 +351,7 @@ export function StockTerminal() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, symbol])
+  }, [chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, stepSymbol, structOn, symbol])
 
   if (!symbol) {
     return (
@@ -342,33 +391,54 @@ export function StockTerminal() {
             )}
             <RangeBar value={dateRange} onChange={setDateRange} />
             <div className="ml-auto flex items-center gap-1.5">
-              {useKLine && (
-                <div className="flex items-center gap-0.5 rounded border border-border/70 p-0.5">
-                  {([['day', '日'], ['week', '周'], ['month', '月']] as const).map(([k, label]) => (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={() => setPeriod(k)}
-                      className={cn(
-                        'h-5 rounded px-1.5 text-[10px] font-mono transition-colors',
-                        period === k ? 'bg-accent text-white' : 'text-muted hover:text-secondary',
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <button
-                onClick={() => setChanOn(v => !v)}
-                title="缠论笔 / 中枢 / 买卖点 (c)"
-                className={cn(
-                  'h-6 rounded border px-2 text-[11px] font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
-                  chanOn ? 'border-accent/30 bg-accent/20 text-accent' : 'border-transparent text-muted hover:bg-elevated',
-                )}
+              {/* 周期按钮已下沉到各自内核的工具条(共用 lib/klinePeriod 的档位表),
+                  这里不再重复渲染一组 —— 同屏两组周期控件本身就是割裂观感。 */}
+              {/* 工作区模板: 一键落到一组预设(会话级, 切内核不丢) */}
+              <select
+                value=""
+                title="工作区模板: 一键切换周期 / 复权 / 叠加层组合"
+                onChange={e => {
+                  const id = e.target.value
+                  if (!id) return
+                  applyWorkspace(id)
+                  // 模板想要的档位当前渲染器不支持时(ECharts 无 1m)兜底退化
+                  const cur = chartSession.getState().period
+                  const fp = fallbackPeriod(renderer, cur)
+                  if (fp !== cur) chartSession.setPeriod(fp)
+                }}
+                className="h-6 rounded border border-border/70 bg-elevated px-1 text-[11px] text-muted transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               >
-                缠论
-              </button>
+                <option value="">工作区…</option>
+                {WORKSPACE_PRESETS.map(w => (
+                  <option key={w.id} value={w.id} title={w.hint}>{w.label}</option>
+                ))}
+              </select>
+              {/* 叠加层开关: 按渲染器能力显隐, 不按内核名分叉。
+                  这一组是终端层唯一入口 —— 内核工具条在 hideOverlayToggles 下不再重复渲染。 */}
+              {caps.overlays.structure && (
+                <OverlayToggle
+                  active={structOn}
+                  label="定量结构"
+                  title="主图定量结构: EMA25/89 双轨 + 九转 (s)"
+                  onClick={() => chartSession.setOverlay('structure', !structOn)}
+                />
+              )}
+              {caps.overlays.chan && (
+                <OverlayToggle
+                  active={chanOn}
+                  label="缠论"
+                  title="缠论笔 / 中枢 / 买卖点 (c)"
+                  onClick={() => chartSession.setOverlay('chan', !chanOn)}
+                />
+              )}
+              {caps.overlays.chips && (
+                <OverlayToggle
+                  active={chipsOn}
+                  label="筹码"
+                  title="筹码分布(成本分布): 右侧横条, 红=获利盘 / 绿=套牢盘"
+                  onClick={() => chartSession.setOverlay('chips', !chipsOn)}
+                />
+              )}
               <button
                 onClick={handleToggleKLine}
                 title={useKLine ? '切回 ECharts 内核 (g)' : '试用 KLineChart 内核 (g)'}
@@ -397,8 +467,15 @@ export function StockTerminal() {
                 symbol={symbol}
                 dateRange={dateRange}
                 period={period}
-                onPeriodChange={setPeriod}
+                onPeriodChange={chartSession.setPeriod}
+                adjust={adjust}
+                onAdjustChange={chartSession.setAdjust}
+                structureEnabled={structOn}
+                onStructureChange={v => chartSession.setOverlay('structure', v)}
                 chanEnabled={chanOn}
+                chipsEnabled={chipsOn}
+                onChipsChange={v => chartSession.setOverlay('chips', v)}
+                hideOverlayToggles
                 priceLines={priceLines}
                 refetchIntervalMs={refetchMs}
               />
@@ -410,7 +487,12 @@ export function StockTerminal() {
                 priceLines={priceLines}
                 chanOverlay={chanOn}
                 period={period}
-                onPeriodChange={setPeriod}
+                onPeriodChange={chartSession.setPeriod}
+                adjust={adjust}
+                onAdjustChange={chartSession.setAdjust}
+                structureOverlay={structOn}
+                onStructureChange={v => chartSession.setOverlay('structure', v)}
+                hideOverlayToggles
                 refetchIntervalMs={refetchMs}
                 inWatchlist={inWatchlist}
                 onAddToWatchlist={() => toggleWatchlist.mutate('add')}

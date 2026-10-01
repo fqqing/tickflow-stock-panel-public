@@ -4,6 +4,13 @@ import { api, KLINE_CHART_FIELDS, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
+  ADJUST_OPTIONS,
+  isMinutePeriod,
+  periodTabsFor,
+  type KLineAdjust,
+  type KLinePeriod,
+} from '@/lib/klinePeriod'
+import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
   SUB_CHARTS,
@@ -22,37 +29,17 @@ const MAX_DAYS = 2000
 /** 分钟周期回看多少个交易日的 1 分钟数据(30 分钟档约得 8 根/日 -> 约 960 根) */
 const MINUTE_LOOKBACK_DAYS = 120
 
-/** K 线周期: 日 / 周 / 月 + 分钟档。周月由后端按日 K 聚合后重算指标。 */
-export type KLinePeriod = 'day' | 'week' | 'month' | '1m' | '5m' | '15m' | '30m' | '60m' | '90m' | '120m'
 /**
- * 分钟周期由后端用 1 分钟 K 聚合(依赖分钟数据是否回补), 日/周/月走 /kline/daily。
- * 1m 在类型与判定里存在(KLinePro 工具条会用它), 但 ECharts 工具条不列 ——
- * 1 分钟档行数太大(单日 240 根), ECharts 渲染会明显掉帧。
+ * 周期 / 复权的类型与档位表已从 lib/klinePeriod 收口(两个内核共用一份)。
+ * 这里原样重导出, 兼容既有 import 路径。
  */
-const MINUTE_PERIODS: KLinePeriod[] = ['1m', '5m', '15m', '30m', '60m', '90m', '120m']
-export const isMinutePeriod = (p: KLinePeriod): boolean => MINUTE_PERIODS.includes(p)
+export type { KLinePeriod, KLineAdjust }
+export { isMinutePeriod }
 /** 这两个主图叠加指标的开关放顶部工具条(与缠论同组), 不占底部副图指标栏 */
 const TOP_TOOLBAR_OVERLAYS = ['tdragon', 'structure']
-const PERIOD_OPTIONS: { key: KLinePeriod; label: string }[] = [
-  { key: 'day', label: '日' },
-  { key: 'week', label: '周' },
-  { key: 'month', label: '月' },
-  { key: '5m', label: '5分' },
-  { key: '15m', label: '15分' },
-  { key: '30m', label: '30分' },
-  { key: '60m', label: '60分' },
-  { key: '90m', label: '90分' },
-  { key: '120m', label: '120分' },
-]
+/** ECharts 不列 1m(单日 240 根, 渲染掉帧) —— 由 PERIOD_CAPABILITY 决定, 不在这里硬编码 */
+const PERIOD_OPTIONS = periodTabsFor('echarts')
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
-
-/** 复权方式: qfq(前复权, 默认) / none(不复权) / hfq(后复权) */
-export type KLineAdjust = 'qfq' | 'none' | 'hfq'
-const ADJUST_OPTIONS: { key: KLineAdjust; label: string; title: string }[] = [
-  { key: 'qfq', label: '前复权', title: '前复权: 以最新价为基准, 历史价向下调整(消除除权跳空)' },
-  { key: 'none', label: '不复权', title: '不复权: 交易所真实成交价, 除权日会保留跳空' },
-  { key: 'hfq', label: '后复权', title: '后复权: 以最早价为基准, 历史价显示为真实价' },
-]
 
 /** 用户手绘线: 端点存 (date, price), 按 symbol 存 localStorage */
 interface DrawLine { a: { date: string; price: number }; b: { date: string; price: number } }
@@ -119,6 +106,25 @@ interface Props {
    */
   period?: KLinePeriod
   onPeriodChange?: (p: KLinePeriod) => void
+  /**
+   * 主图定量结构开关(受控, 可选)。终端层持有后与 KLinePro 共用一份状态,
+   * 切内核不丢 —— 此前「结构信号只长在 ECharts 上」是割裂最痛的一处。
+   * 不传则维持组件内部状态(默认关), 弹窗/预览等独立用法不受影响。
+   */
+  structureOverlay?: boolean
+  onStructureChange?: (v: boolean) => void
+  /**
+   * true = 隐藏图内的叠加层开关(主图定量结构 / 缠论)。
+   * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是「割裂」观感,
+   * 而且两处状态来源一旦不一致, 排查成本极高。
+   */
+  hideOverlayToggles?: boolean
+  /**
+   * 复权方式(受控, 可选)。终端层持有后与 KLinePro 共用一份口径, 切内核不丢。
+   * 不传则维持组件内部状态(默认前复权)。
+   */
+  adjust?: KLineAdjust
+  onAdjustChange?: (a: KLineAdjust) => void
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
@@ -233,6 +239,11 @@ export function StockDailyKChart({
   onToggleChan,
   period: externalPeriod,
   onPeriodChange,
+  structureOverlay,
+  onStructureChange,
+  hideOverlayToggles = false,
+  adjust: adjustProp,
+  onAdjustChange,
   showMA = true,
   showInfoBar = true,
   visibleBars = 60,
@@ -253,7 +264,13 @@ export function StockDailyKChart({
     if (onPeriodChange) onPeriodChange(p)
     else setInnerPeriod(p)
   }, [onPeriodChange])
-  const [adjust, setAdjust] = useState<KLineAdjust>('qfq')
+  // 复权: 受控优先(终端层持有), 不传则组件内部维护
+  const [innerAdjust, setInnerAdjust] = useState<KLineAdjust>('qfq')
+  const adjust = adjustProp ?? innerAdjust
+  const applyAdjust = useCallback((a: KLineAdjust) => {
+    if (onAdjustChange) onAdjustChange(a)
+    else setInnerAdjust(a)
+  }, [onAdjustChange])
   // 手绘趋势线: 非画线模式下不拦截鼠标事件, 画线模式在 zrender 上手动拖拽
   const [drawing, setDrawing] = useState(false)
   const [drawLines, setDrawLines] = useState<DrawLine[]>([])
@@ -365,9 +382,31 @@ export function StockDailyKChart({
     }
   }, [chartInst, symbol])
 
+  /**
+   * 受控的「主图定量结构」合并进指标清单。
+   * 用派生而不是 useEffect 回写, 避免"点了按钮又被同步回来"的回弹。
+   */
+  const effectiveIndicators = useMemo(() => {
+    if (structureOverlay === undefined) return activeIndicators
+    const has = activeIndicators.includes('structure')
+    if (structureOverlay === has) return activeIndicators
+    return structureOverlay
+      ? [...activeIndicators, 'structure']
+      : activeIndicators.filter(k => k !== 'structure')
+  }, [activeIndicators, structureOverlay])
+
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
   }, [])
+
+  const toggleStructure = useCallback(() => {
+    const next = !effectiveIndicators.includes('structure')
+    if (onStructureChange) {
+      onStructureChange(next)
+      return
+    }
+    setActiveIndicators(prev => next ? [...prev, 'structure'] : prev.filter(k => k !== 'structure'))
+  }, [effectiveIndicators, onStructureChange])
 
   const updateVolumeCompare = useCallback((patch: Partial<VolumeCompareConfig>) => {
     setVolumeCompare(prev => {
@@ -396,7 +435,7 @@ export function StockDailyKChart({
     saveLines(symbol, [])
   }, [symbol])
 
-  const activeSubDefs = activeIndicators
+  const activeSubDefs = effectiveIndicators
     .map(key => SUB_CHARTS.find(s => s.key === key))
     .filter((d): d is typeof SUB_CHARTS[number] => !!d)
   let subExtraH = 0
@@ -436,7 +475,7 @@ export function StockDailyKChart({
             {ADJUST_OPTIONS.map(opt => (
               <button
                 key={opt.key}
-                onClick={() => setAdjust(opt.key)}
+                onClick={() => applyAdjust(opt.key)}
                 title={opt.title}
                 className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
                   adjust === opt.key
@@ -472,13 +511,13 @@ export function StockDailyKChart({
           {/* 右侧: 主图叠加开关 (蛟龙出海/主图定量结构画在 K 线上, 与缠论/异动同组),
               分钟周期下禁用(这两组信号只有日/周/月口径) */}
           <div className="ml-auto flex items-center gap-1.5">
-            {OVERLAY_INDICATORS.filter(ind => TOP_TOOLBAR_OVERLAYS.includes(ind.key)).map(ind => {
+            {!hideOverlayToggles && OVERLAY_INDICATORS.filter(ind => TOP_TOOLBAR_OVERLAYS.includes(ind.key)).map(ind => {
               const minuteDisabled = isMinutePeriod(period)
-              const active = activeIndicators.includes(ind.key)
+              const active = effectiveIndicators.includes(ind.key)
               return (
                 <button
                   key={ind.key}
-                  onClick={() => toggleIndicator(ind.key)}
+                  onClick={() => (ind.key === 'structure' ? toggleStructure() : toggleIndicator(ind.key))}
                   disabled={minuteDisabled}
                   title={minuteDisabled
                     ? `${ind.label}仅在日/周/月周期下可用`
@@ -509,7 +548,7 @@ export function StockDailyKChart({
                   异动
                 </button>
               )}
-              {chanEnabled !== undefined && onToggleChan !== undefined && (
+              {!hideOverlayToggles && chanEnabled !== undefined && onToggleChan !== undefined && (
                 <button
                   onClick={onToggleChan}
                   disabled={period !== 'day'}
@@ -559,7 +598,7 @@ export function StockDailyKChart({
             onPriceDoubleClick={onPriceDoubleClick}
             onChartReady={setChartInst}
             visibleBars={visibleBars}
-            activeIndicators={activeIndicators}
+            activeIndicators={effectiveIndicators}
             volumeCompare={volumeCompare}
           />
           {/* 拖拽预览: 用 SVG 覆盖层画, 不进 ECharts 避免整图重绘 */}
@@ -581,7 +620,7 @@ export function StockDailyKChart({
               key={ind.key}
               onClick={() => toggleIndicator(ind.key)}
               className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                activeIndicators.includes(ind.key)
+                effectiveIndicators.includes(ind.key)
                   ? 'bg-accent/20 text-accent'
                   : 'bg-elevated text-muted hover:text-secondary'
               }`}
@@ -594,9 +633,9 @@ export function StockDailyKChart({
           {OVERLAY_INDICATORS.filter(ind => !TOP_TOOLBAR_OVERLAYS.includes(ind.key)).map(ind => (
             <button
               key={ind.key}
-              onClick={() => toggleIndicator(ind.key)}
+              onClick={() => (ind.key === 'structure' ? toggleStructure() : toggleIndicator(ind.key))}
               className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                activeIndicators.includes(ind.key)
+                effectiveIndicators.includes(ind.key)
                   ? 'bg-accent/20 text-accent'
                   : 'bg-elevated text-muted hover:text-secondary'
               }`}
@@ -604,7 +643,7 @@ export function StockDailyKChart({
               {ind.label}
             </button>
           ))}
-          {activeIndicators.includes('vol') && (
+          {effectiveIndicators.includes('vol') && (
             <div className="ml-0.5 flex h-5 items-center gap-1.5 border-l border-border/70 pl-2">
               <span className="text-[10px] text-muted">量比</span>
               <button
