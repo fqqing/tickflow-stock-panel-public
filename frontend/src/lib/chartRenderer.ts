@@ -45,6 +45,12 @@ export interface ChartCapabilities {
    */
   viewport: boolean
   /**
+   * 能否按日期定位视口(事件时间轴点击后跳过去)。
+   * 两侧都用各自的官方 API 实现了: klinecharts 是 scrollToDataIndex,
+   * ECharts 是 dataZoom 的 start/end。做不到的一侧时间轴按钮就不显示。
+   */
+  focus: boolean
+  /**
    * 指标清单是否跨内核共享。'isolated' = 两侧各存各的, 切内核不继承。
    * 统一它需要先把两侧指标名对齐, 属于后续项。
    */
@@ -75,6 +81,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
       overlays: { structure: true, chan: true, chips: false, signals: true, alerts: true, trades: true },
       drawing: true,
       viewport: true,
+      focus: true,
       indicatorCatalog: 'isolated',
     },
   },
@@ -88,6 +95,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
       overlays: { structure: true, chan: true, chips: true, signals: true, alerts: true, trades: true },
       drawing: false,
       viewport: true,
+      focus: true,
       indicatorCatalog: 'isolated',
     },
   },

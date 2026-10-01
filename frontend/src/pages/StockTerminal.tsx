@@ -27,6 +27,9 @@ import { useRecentStocks } from '@/lib/useRecentStocks'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { fallbackPeriod, RENDERERS, type ChartRendererId } from '@/lib/chartRenderer'
 import { applyWorkspace, chartSession, useChartSession, WORKSPACE_PRESETS } from '@/lib/chartSession'
+import { chartBars, chartFocus, chartSignals } from '@/lib/chartBridge'
+import { eventPointsToTimeline, mergeTimeline, type TimelineEvent } from '@/lib/chart-timeline'
+import { EventTimeline } from '@/components/kline/EventTimeline'
 import { DepthPanel } from '@/components/DepthPanel'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
@@ -221,17 +224,62 @@ export function StockTerminal() {
     enabled: !!symbol && tradesOn && period === 'day',
     staleTime: 300_000,
   })
+  // 拆成两步: 归约结果要同时喂给「K 线标记」和「事件时间轴」两个消费者,
+  // 各自归约一遍就会长出两套实现(正是之前切内核割裂的老病根)。
+  const alertPoints = useMemo(
+    () => alertPointsToEvents(alertsQ.data?.points ?? []),
+    [alertsQ.data],
+  )
+  const tradePoints = useMemo(
+    () => tradesToEvents(tradesQ.data?.trades ?? []),
+    [tradesQ.data],
+  )
   const eventMarks = useMemo(
     () => mergeEventPoints(
-      alertsOn ? alertPointsToEvents(alertsQ.data?.points ?? []) : [],
-      tradesOn ? tradesToEvents(tradesQ.data?.trades ?? []) : [],
+      alertsOn ? alertPoints : [],
+      tradesOn ? tradePoints : [],
     ),
-    [alertsOn, alertsQ.data, tradesOn, tradesQ.data],
+    [alertsOn, alertPoints, tradesOn, tradePoints],
   )
+
+  // ── 事件时间轴(P4-1) ───────────────────────────────────────
+  // 日期序列与信号事件由渲染器经窄通道上报(见 lib/chartBridge): 时间轴挂在终端
+  // 层, 拿不到渲染器内部的 rows, 而让终端层再拉一次日K是重复请求。
+  const [barDates, setBarDates] = useState<string[]>([])
+  useEffect(() => chartBars.subscribe(setBarDates), [])
+  const [signalEvents, setSignalEvents] = useState<TimelineEvent[]>([])
+  useEffect(() => chartSignals.subscribe(setSignalEvents), [])
+  const timelineOn = overlays.timeline
+  /**
+   * ★ 时间轴显示的是**当前已启用的那几类事件**, 与图上标记一一对应 —— 绝不出现
+   *   「条上有、图上没有」。所以打开时间轴会连带打开「信号」(见 toggleTimeline):
+   *   否则条是空的, 而图上却一个标记也没有, 用户只会觉得这个功能坏了。
+   */
+  const timelineEvents = useMemo(
+    () => mergeTimeline(
+      signalsOn ? signalEvents : [],
+      alertsOn ? eventPointsToTimeline(alertPoints, 'alert') : [],
+      tradesOn ? eventPointsToTimeline(tradePoints, 'trade') : [],
+    ),
+    [signalsOn, signalEvents, alertsOn, alertPoints, tradesOn, tradePoints],
+  )
+  const toggleTimeline = useCallback((v: boolean) => {
+    const cur = chartSession.getState().overlays
+    // 一次 patch 改两个开关: 分两次会通知两遍, 中间那帧状态是自相矛盾的
+    chartSession.patch({
+      overlays: { ...cur, timeline: v, signals: v ? true : cur.signals },
+    })
+  }, [])
 
   // 会话里记一份当前标的(便于排查, 也为将来「按 symbol 隔离视口」留口子)
   useEffect(() => {
-    if (symbol) chartSession.setSymbol(symbol)
+    if (!symbol) return
+    chartSession.setSymbol(symbol)
+    // 换股后旧的定位指令、日期序列、信号事件都属于上一只票 —— 不清的话新图会先
+    // 跳到上一只票那天, 时间轴也会先闪一下旧数据。
+    chartFocus.consume()
+    chartBars.set([])
+    chartSignals.set([])
   }, [symbol])
 
   // ── 触发上下文 ────────────────────────────────────────────
@@ -365,6 +413,8 @@ export function StockTerminal() {
           chartSession.setOverlay('alerts', !alertsOn); break
         case 't':
           chartSession.setOverlay('trades', !tradesOn); break
+        case 'e':
+          toggleTimeline(!timelineOn); break
         case 'r':
           setRailOpen(v => !v); break
         case 'p':
@@ -389,7 +439,7 @@ export function StockTerminal() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [alertsOn, chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, signalsOn, stepSymbol, structOn, symbol, tradesOn])
+  }, [alertsOn, chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, signalsOn, stepSymbol, structOn, symbol, timelineOn, toggleTimeline, tradesOn])
 
   if (!symbol) {
     return (
@@ -501,6 +551,14 @@ export function StockTerminal() {
                   onClick={() => chartSession.setOverlay('trades', !tradesOn)}
                 />
               )}
+              {caps.focus && (
+                <OverlayToggle
+                  active={timelineOn}
+                  label="时间轴"
+                  title="事件时间轴: 图下方按日期排开信号 / 触发 / 买卖点, 点一下视口跳过去, 仅日线档 (e)"
+                  onClick={() => toggleTimeline(!timelineOn)}
+                />
+              )}
               <button
                 onClick={handleToggleKLine}
                 title={useKLine ? '切回 ECharts 内核 (g)' : '试用 KLineChart 内核 (g)'}
@@ -569,6 +627,11 @@ export function StockTerminal() {
               />
             )}
           </div>
+          {/* 事件时间轴: 只在日线档渲染 —— 告警与买卖点都是日粒度(周月线取不到),
+              signal_* 列也被聚合丢掉了, 非日线档渲染出来只会是一条空轨道。 */}
+          {timelineOn && period === 'day' && (
+            <EventTimeline events={timelineEvents} dates={barDates} />
+          )}
         </main>
 
         {depthDocked && (

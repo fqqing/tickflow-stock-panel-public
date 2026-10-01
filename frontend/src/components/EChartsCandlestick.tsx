@@ -2,6 +2,8 @@ import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import type { KlineRow } from '@/lib/api'
 import { chartSession } from '@/lib/chartSession'
 import { viewportToZoom, zoomToViewport } from '@/lib/chartViewport'
+import { chartBars, chartFocus, chartSignals } from '@/lib/chartBridge'
+import { findDateIndex, signalRowsToTimeline } from '@/lib/chart-timeline'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { densePolyline, POLYLINE_GAP } from '@/lib/chart-polyline'
 import * as echarts from 'echarts'
@@ -1789,6 +1791,45 @@ export function EChartsCandlestick({
       infoEl.innerHTML = getInfoBarHTML()
     }
   }, [data, markers, ranges, priceLines, polylines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, layout, dragIdx, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+
+  // ── 事件时间轴(P4-1): 上报日期序列与信号事件 ────────────────────
+  // 与 KLinePro 侧同一套口径(都调 signalRowsToTimeline), 时间轴不管当前是哪个
+  // 内核, 拿到的都是同一份数据。
+  const signalTimeline = useMemo(
+    () => (signalsEnabled ? signalRowsToTimeline(data) : []),
+    [signalsEnabled, data],
+  )
+  useEffect(() => { chartBars.set(dates) }, [dates])
+  useEffect(() => { chartSignals.set(signalTimeline) }, [signalTimeline])
+
+  // ── 点击定位(P4-2): 时间轴点某天 → dataZoom 挪过去 ──────────────
+  // 百分比换算复用 viewportToZoom, 不在这里另算一套 —— 否则「切内核丢缩放」
+  // 那套互译就等于有了第二个实现。dispatch 后 ECharts 会自己发 dataZoom 事件,
+  // 会话视口随之更新, 切到另一个内核时定位结果照样保留。
+  useEffect(() => chartFocus.subscribe((req) => {
+    const chart = chartRef.current
+    const d = chartBars.get()
+    if (!chart || d.length === 0) return
+    const idx = findDateIndex(d, req.date)
+    if (idx < 0) return
+    const total = d.length
+    const vp = chartSession.getViewport()
+    let vis = vp && vp.visibleBars > 0
+      ? vp.visibleBars
+      : null
+    if (vis == null) {
+      const z = userZoomRef.current ?? initialZoom
+      vis = Math.round(total * (z.end - z.start) / 100)
+    }
+    vis = Math.min(total, Math.max(1, vis))
+    const from = Math.min(
+      Math.max(0, idx - Math.round((vis - 1) * req.anchor)),
+      Math.max(0, total - vis),
+    )
+    const zoom = viewportToZoom({ visibleBars: vis, offsetRight: total - from - vis }, total)
+    chart.dispatchAction({ type: 'dataZoom', start: zoom.start, end: zoom.end })
+    chartFocus.consume()
+  }), [data, dates]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

@@ -33,6 +33,8 @@ import { useChartTheme } from '@/lib/theme'
 import { chartSession } from '@/lib/chartSession'
 import { applyKcViewport, readKcViewport } from '@/lib/chartViewport'
 import type { ChartEventPoint } from '@/lib/chart-events'
+import { chartBars, chartFocus, chartSignals } from '@/lib/chartBridge'
+import { findDateIndex, signalRowsToTimeline } from '@/lib/chart-timeline'
 import type { ChartPriceLine } from '@/lib/chart-primitives'
 import {
   ADJUST_OPTIONS,
@@ -638,6 +640,42 @@ export function KLinePro({
       chart.overrideOverlay({ id: overlayIds.current.events, extendData: payload })
     }
   }, [eventMarks, eventRev, period, ready])
+
+  // ── 事件时间轴(P4-1): 上报日期序列与信号事件 ──────────────────
+  // 时间轴挂在终端层, 拿不到渲染器内部的 rows; 反过来让终端层再拉一次日K是重复
+  // 请求。所以只上报「一条日期数组 + 已归约好的信号事件」, 两边指纹相同就不通知
+  // (分钟档 6 秒一次的轮询不会因此把终端重渲染一遍)。
+  const signalTimeline = useMemo(
+    () => (signalsOn && period === 'day' ? signalRowsToTimeline(active.data?.rows ?? []) : []),
+    [signalsOn, period, active.data?.rows],
+  )
+  useEffect(() => { chartBars.set(chartDates) }, [chartDates])
+  useEffect(() => { chartSignals.set(signalTimeline) }, [signalTimeline])
+
+  // ── 点击定位(P4-2): 时间轴点某天 → 视口挪过去 ────────────────
+  //
+  // ★ scrollToDataIndex 的语义是实测出来的, 别按直觉写: 它是把参数 j 放在视口
+  //   **右端**(实测 to ≈ j + 2, 那 2 根是右侧留白), 不是左端。所以想让目标落在
+  //   anchor 处(0=最左, 1=最右), 得先把它往右推 (1 - anchor) 屏再减掉留白。
+  //   照直觉写成 idx - anchor*屏宽 的话, 目标会被推到视口左侧外面去。
+  //
+  // 依赖里带 chartDates 是因为「数据还没到就不能消费指令」—— 那时 return 而不
+  // consume, 等数据到了本 effect 重跑, 订阅时会自动补发那条待办指令。
+  useEffect(() => {
+    if (!ready) return
+    return chartFocus.subscribe((req) => {
+      const chart = chartRef.current
+      const dates = chartBars.get()
+      if (!chart || dates.length === 0) return
+      const idx = findDateIndex(dates, req.date)
+      if (idx < 0) return
+      const range = chart.getVisibleRange()
+      const vis = Math.max(1, range.to - range.from + 1)
+      const j = idx + Math.round((vis - 1) * (1 - req.anchor)) - 2
+      chart.scrollToDataIndex(Math.max(0, j), 300)
+      chartFocus.consume()
+    })
+  }, [ready, chartDates])
 
   // ── S2: 指标清单 diff 到图表 ──
   // 增删改一律走增量, 不做「全量重建」 —— 重建窗格会把用户拖动过的高度一起丢掉。

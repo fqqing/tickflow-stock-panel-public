@@ -13,43 +13,19 @@
  * 性能: 与 structure-overlay 一样只画可视区间内的 bar。
  */
 import * as kc from 'klinecharts'
-import { BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
-
-/** 买入类: 红(A 股红涨) */
-const ENTRY_COLOR = '#F04438'
-/** 卖出类: 绿 */
-const EXIT_COLOR = '#12B76A'
-/** 双向类(如放量): 蓝, 与买卖都区分开 */
-const BOTH_COLOR = '#3B82F6'
-
-export const SIGNAL_CN = new Map(BUILTIN_SIGNAL_DEFINITIONS.map((d) => [d.id, d.name]))
-export const SIGNAL_KIND = new Map(BUILTIN_SIGNAL_DEFINITIONS.map((d) => [d.id, d.kind]))
-
-/** 买卖方向 → 颜色。ECharts 侧画的是同一套信号, 必须共用, 否则两内核观感不一致。 */
-export const SIGNAL_COLORS = {
-  entry: ENTRY_COLOR,
-  exit: EXIT_COLOR,
-  both: BOTH_COLOR,
-} as const
+import {
+  collectSignalIds,
+  SIGNAL_CN,
+  SIGNAL_COLORS,
+  signalKindOf,
+} from '@/lib/signals'
 
 /**
- * 从一行 K 线数据取出触发的信号 id: 认 signal_ 前缀且值为 true。
- *
- * 两个内核共用这一份实现, 「哪些列算信号」不会在两处漂移。
- * 清单的权威来源是 signals.ts, 后端新增信号时这里不用改。
+ * 中文名 / 配色 / 取信号 id 的实现都已下沉到 lib/signals —— 事件时间轴也要用,
+ * 而它不能 import 本文件(会拉进 klinecharts)。这里 re-export 保持既有 import
+ * 路径可用, 三个消费方拿到的是同一份定义。
  */
-export function collectSignalIds(row: Record<string, unknown>): string[] {
-  const out: string[] = []
-  for (const [k, v] of Object.entries(row)) {
-    if (v === true && k.startsWith('signal_')) out.push(k)
-  }
-  return out
-}
-
-/** 信号方向: 未知 id 一律按 both(中性) 处理, 用蓝色兜底 */
-export function signalKindOf(id: string): 'entry' | 'exit' | 'both' {
-  return SIGNAL_KIND.get(id) ?? 'both'
-}
+export { collectSignalIds, SIGNAL_CN, SIGNAL_COLORS, signalKindOf }
 
 /** 一根 K 线最多画几个信号: 再多堆不下, 可读性也反而更差 */
 const MAX_PER_BAR = 4

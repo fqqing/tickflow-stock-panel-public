@@ -205,3 +205,43 @@ export function cnSignal(name: string, customNames?: Record<string, string>): st
   if (customNames && name in customNames) return customNames[name]
   return SIGNAL_LABELS[name] ?? FIELD_LABELS[name] ?? name
 }
+
+// ── 信号标记的共用元数据 ─────────────────────────────────────
+// 放在这里(而不是 kline 组件里)是为了让「不依赖图表库」的模块也能复用 ——
+// 事件时间轴要用同一份中文名与配色, 若它去 import 图表组件就会把 klinecharts
+// 一起拉进来。两个 K 线内核 + 时间轴必须共用一个来源, 否则观感必然漂移。
+
+/** 买入类: 红(A 股红涨) */
+const SIGNAL_ENTRY_COLOR = '#F04438'
+/** 卖出类: 绿 */
+const SIGNAL_EXIT_COLOR = '#12B76A'
+/** 双向类(如放量): 蓝, 与买卖都区分开 */
+const SIGNAL_BOTH_COLOR = '#3B82F6'
+
+export const SIGNAL_CN = new Map(BUILTIN_SIGNAL_DEFINITIONS.map((d) => [d.id, d.name]))
+export const SIGNAL_KIND = new Map(BUILTIN_SIGNAL_DEFINITIONS.map((d) => [d.id, d.kind]))
+
+/** 买卖方向 → 颜色。ECharts / KLinePro / 时间轴三处共用 */
+export const SIGNAL_COLORS = {
+  entry: SIGNAL_ENTRY_COLOR,
+  exit: SIGNAL_EXIT_COLOR,
+  both: SIGNAL_BOTH_COLOR,
+} as const
+
+/**
+ * 从一行 K 线数据取出触发的信号 id: 认 signal_ 前缀且值为 true。
+ *
+ * 清单的权威来源是上面的 BUILTIN_SIGNAL_DEFINITIONS, 后端新增信号时这里不用改。
+ */
+export function collectSignalIds(row: Record<string, unknown>): string[] {
+  const out: string[] = []
+  for (const [k, v] of Object.entries(row)) {
+    if (v === true && k.startsWith('signal_')) out.push(k)
+  }
+  return out
+}
+
+/** 信号方向: 未知 id 一律按 both(中性) 处理, 用蓝色兜底 */
+export function signalKindOf(id: string): SignalKind {
+  return SIGNAL_KIND.get(id) ?? 'both'
+}

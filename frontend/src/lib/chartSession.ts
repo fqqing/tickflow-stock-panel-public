@@ -46,6 +46,13 @@ export interface ChartOverlays {
   alerts: boolean
   /** 回测买卖点标记。数据来自最近一次策略回测的落盘, 同样只在日线档画 */
   trades: boolean
+  /**
+   * 事件时间轴。它不是画在 K 线上的叠加层, 而是图下方那条「事件索引条」:
+   * 把信号 / 触发 / 买卖点按日期排开, 点一下视口就跳过去。
+   * ★ 它显示的是**当前已启用的那几类事件** —— 时间轴上的点与图上的标记永远
+   *   一一对应, 不会出现「条上有、图上没有」的错位。所以打开它会连带开 signals。
+   */
+  timeline: boolean
 }
 
 export interface ChartSessionState {
@@ -59,7 +66,10 @@ const DEFAULT_STATE: ChartSessionState = {
   symbol: '',
   period: 'day',
   adjust: 'qfq',
-  overlays: { structure: true, chan: false, chips: false, signals: false, alerts: false, trades: false },
+  overlays: {
+    structure: true, chan: false, chips: false,
+    signals: false, alerts: false, trades: false, timeline: false,
+  },
 }
 
 let state: ChartSessionState = DEFAULT_STATE
@@ -130,7 +140,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '日线 + 前复权 + 定量结构 + 缠论',
     period: 'day',
     adjust: 'qfq',
-    overlays: { structure: true, chan: true, chips: false, signals: false, alerts: false, trades: false },
+    overlays: { structure: true, chan: true, chips: false, signals: false, alerts: false, trades: false, timeline: false },
   },
   {
     id: 'swing',
@@ -138,7 +148,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '30 分钟 + 不复权 + 定量结构 + 筹码',
     period: '30m',
     adjust: 'none',
-    overlays: { structure: true, chan: false, chips: true, signals: false, alerts: false, trades: false },
+    overlays: { structure: true, chan: false, chips: true, signals: false, alerts: false, trades: false, timeline: false },
   },
   {
     id: 'review',
@@ -146,7 +156,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '周线 + 后复权 + 缠论(看大级别结构)',
     period: 'week',
     adjust: 'hfq',
-    overlays: { structure: false, chan: true, chips: false, signals: false, alerts: false, trades: false },
+    overlays: { structure: false, chan: true, chips: false, signals: false, alerts: false, trades: false, timeline: false },
   },
 ]
 
