@@ -34,7 +34,7 @@ def test_tables_endpoint_lists_all_with_config_flag():
         "bottom_structure", "upward_trend_breakout", "trend_dragon", "abnormal", "startup_surge",
     }
     assert tables["bottom_structure"]["label"] == "底部结构"
-    assert tables["startup_surge"]["configured"] is False, "启动策略尚未建表"
+    assert tables["startup_surge"]["configured"] is True, "启动策略 2026-10-01 已建独立表"
     assert tables["abnormal"]["configured"] is True
 
 
@@ -50,7 +50,11 @@ def test_push_unknown_strategy():
 
 
 def test_push_unconfigured_table_skips_without_writing(monkeypatch):
-    """未配置表必须在写表之前拦下 —— 否则会推进异动预警表造成脏数据。"""
+    """未配置表必须在写表之前拦下 —— 否则会推进别人的表造成脏数据。
+
+    五个目标表 2026-10-01 起全部已配置, 因此这里临时把 startup_surge 抹空来
+    复现「未配置」分支, 而不是依赖某张表永远为空。
+    """
     called = []
 
     def _boom(*a, **kw):  # pragma: no cover - 真被调用就说明拦截失败
@@ -58,6 +62,9 @@ def test_push_unconfigured_table_skips_without_writing(monkeypatch):
         raise AssertionError("未配置的表不应触发写表")
 
     monkeypatch.setattr(lb, "push_records", _boom)
+    cfg = dict(ls.STRATEGY_TABLES["startup_surge"])
+    unconfigured = {**cfg, "base_token": None, "table_id": None}
+    monkeypatch.setitem(ls.STRATEGY_TABLES, "startup_surge", unconfigured)
     body = _client().post("/api/lark/push", json={"strategy_id": "startup_surge"}).json()
     assert body["ok"] is False
     assert "未配置" in body["error"]
@@ -156,3 +163,22 @@ def test_service_abnormal_mapping_matches_script():
     r = ls._abnormal_records(rows, "2026-09-30")[0]
     assert r["目标等级"] == "30日异动"
     assert r["下一日可能触发"] == "True"
+
+
+def test_startup_surge_record_fields():
+    """启动策略走独立表: 量比/换手/动量/评分这组选股字段, 不带底部结构的 DIF/DEA。"""
+    rows = [{
+        "symbol": "600354.SH", "name": "敦煌种业", "close": 11.45, "change_pct": 0.0306,
+        "vol_ratio_5d": 1.8734, "turnover_rate": 5.2136, "momentum_20d": 0.1234,
+        "ma5": 11.2, "ma20": 10.9, "score": 48.6217,
+    }]
+    r = ls.build_records("startup_surge", rows, "2026-09-30")[0]
+    assert r["代码"] == "600354"
+    assert r["市场"] == "SH"
+    assert r["信号日期"] == "2026-09-30"
+    assert r["涨跌幅%"] == 3.06          # 小数 -> 百分数
+    assert r["20日动量%"] == 12.34
+    assert r["量比5日"] == 1.87          # 抹到 2 位, 不留浮点尾巴
+    assert r["换手率%"] == 5.21          # enriched 已是百分数, 不换算
+    assert r["评分"] == 48.62
+    assert "DIF" not in r and "钝化类型" not in r

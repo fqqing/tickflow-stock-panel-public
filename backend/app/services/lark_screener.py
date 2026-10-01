@@ -17,6 +17,9 @@
   - 趋势擒龙表 资金动能: 与 /api/kline/daily?indicators=capital_momentum 同口径
     (RS/RS_MA52-1, 已乘 10), 这里直接用 formula_signals.capital_momentum 算。
   - 底部结构表 信号状态/钝化类型: 策略矩阵内部值, 输出行不携带, 置空。
+  - 启动策略表 (2026-10-01 新建, 表结构由本模块定义): 代码/名称/市场/信号日期/
+    收盘价/涨跌幅%/量比5日/换手率%/20日动量%/MA5/MA20/评分。换手率 enriched 已是
+    百分数, 涨跌幅与 20日动量是小数需 x100。
 """
 from __future__ import annotations
 
@@ -61,12 +64,13 @@ STRATEGY_TABLES: dict[str, dict[str, Any]] = {
         "key_fields": ("代码", "日期"),
         "date_fields": ("日期",),
     },
-    # 启动策略在面板策略池里有, 但飞书侧还没有对应表 —— base_token/table_id
-    # 待补。留 None 时 run_push() 会跳过并报错提示, 不会误推进异动预警表。
+    # 启动策略: 2026-10-01 新建的独立表(字段由本模块定义, 见 _startup_records)。
+    # 此前该策略一直留空 —— 用户给的 G5pg.../tbllED... 实测是异动预警口径
+    # (触发信号次数/所需最小涨幅), 与选股字段完全不同, 不能复用。
     "startup_surge": {
         "label": "启动策略",
-        "base_token": None,
-        "table_id": None,
+        "base_token": "RSYubVkH8aJajys5sh2c6NGAn62",
+        "table_id": "tbl1VE8bY2Jos8RY",
     },
 }
 
@@ -157,6 +161,12 @@ def _pct(x: float | None) -> float | None:
     return round(v * 100, 4) if v is not None else None
 
 
+def _r2(x: Any) -> float | None:
+    """数值 -> 保留 2 位。表内数值列精度设为 2, 存原值会带一堆浮点尾巴, 先抹平。"""
+    v = lb.to_num(x)
+    return round(v, 2) if v is not None else None
+
+
 def _bias_ma20(close: Any, ma20: Any) -> float | None:
     """乖离MA20% = (close / ma20 - 1) * 100。"""
     c, m = lb.to_num(close), lb.to_num(ma20)
@@ -193,7 +203,16 @@ def build_records(
                 "乖离MA20%": _bias_ma20(r.get("close"), r.get("ma20")),
                 "资金动能": (momentum_map or {}).get(symbol),
             })
-        elif strategy_id in ("bottom_structure", "startup_surge"):
+        elif strategy_id == "startup_surge":
+            base.update({
+                "量比5日": _r2(r.get("vol_ratio_5d")),
+                "换手率%": _r2(r.get("turnover_rate")),
+                "20日动量%": _pct(r.get("momentum_20d")),
+                "MA5": _r2(r.get("ma5")),
+                "MA20": _r2(r.get("ma20")),
+                "评分": _r2(r.get("score")),
+            })
+        elif strategy_id == "bottom_structure":
             base.update({
                 "信号状态": "",   # 策略矩阵内部值, 输出行不携带
                 "DIF": lb.to_num(r.get("macd_dif")),
