@@ -86,6 +86,10 @@ export const QK = {
   klineMinuteK:         (symbol: string, period: string, days: number, limit = 0) =>
                            ['kline-minute-k', symbol, period, days, limit] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  // 图表外部事件(监控触发 / 回测买卖点)。与 kline 分开: 这两路有自己的
+  // staleTime, 不该因为切周期/复权(会让 kline key 变化)被一起重拉。
+  chartAlerts:          (symbol: string, days: number) => ['chart-alerts', symbol, days] as const,
+  chartTrades:          (symbol: string) => ['chart-trades', symbol] as const,
   // 筹码分布: 按 symbol + 回望天数 + 档数缓存
   stockChips:           (symbol: string, days?: number, bins?: number) =>
                            ['stock-chips', symbol, days ?? 250, bins ?? 60] as const,

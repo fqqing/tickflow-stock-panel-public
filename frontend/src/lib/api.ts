@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import type { AlertTriggerPoint, BacktestTradeMark } from './chart-events'
 import { BUILTIN_SIGNAL_DEFINITIONS } from './signals'
 
 const BASE = ''
@@ -3549,6 +3550,26 @@ export const api = {
     const s = qs.toString()
     return request<{ alerts: AlertEvent[]; total: number }>(`/api/alerts${s ? `?${s}` : ''}`)
   },
+
+  /**
+   * 单只股票的监控触发点(按天聚合), 供 K 线叠加。
+   * 后端已把 UTC epoch 的 ts 按北京时间归日, 前端不重复换算。
+   */
+  alertsBySymbol: (symbol: string, days = 7) =>
+    request<{ symbol: string; days: number; points: AlertTriggerPoint[] }>(
+      `/api/alerts/by-symbol?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+
+  /**
+   * 最近一次策略回测中该股票的买卖点, 供 K 线叠加。
+   * 没跑过回测是正常状态 —— 后端返回空 trades, 不报错。
+   */
+  lastBacktestTrades: (symbol: string, limit = 200) =>
+    request<{
+      symbol: string
+      strategy_id: string | null
+      finished_at: string | null
+      trades: BacktestTradeMark[]
+    }>(`/api/backtest/trades/by-symbol?symbol=${encodeURIComponent(symbol)}&limit=${limit}`),
 
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, KLINE_CHART_FIELDS, klineChartFields, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import type { ChartEventPoint } from '@/lib/chart-events'
 import { storage } from '@/lib/storage'
 import {
   ADJUST_OPTIONS,
@@ -119,6 +120,8 @@ interface Props {
    * 只有日线档有意义 —— 周/月线是聚合结果, 分钟档没有这些列。
    */
   signalsEnabled?: boolean
+  /** 外部事件标记(监控触发 / 回测买卖点), 与 KLinePro 侧共用同一份归约结果 */
+  eventMarks?: ChartEventPoint[]
   /**
    * true = 隐藏图内的叠加层开关(主图定量结构 / 缠论)。
    * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是「割裂」观感,
@@ -248,6 +251,7 @@ export function StockDailyKChart({
   structureOverlay,
   onStructureChange,
   signalsEnabled = false,
+  eventMarks,
   hideOverlayToggles = false,
   adjust: adjustProp,
   onAdjustChange,
@@ -317,10 +321,33 @@ export function StockDailyKChart({
   rowsRef.current = rows
   const stockInfo = klineData.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(klineData.data?.rows ?? []), [klineData.data?.rows])
+  /**
+   * 外部事件(监控触发 / 回测买卖点) → ECharts 的 ChartMarker。
+   *
+   * ECharts 的 markPoint 不像 klinecharts overlay 那样能按槽位堆叠, 同一天多个
+   * 标记只能合并成一个: 方向取「有 above 就 above」(告警/卖出优先浮在上方),
+   * 颜色取第一个, 标签用「/」连前两个。这是与 KLinePro 唯一的有意差异 ——
+   * 同一天堆 3 个 markPoint 在 ECharts 里会互相压住, 比合并更难读。
+   */
+  const eventChartMarkers = useMemo<ChartMarker[]>(() => {
+    if (!eventMarks || eventMarks.length === 0 || period !== 'day') return []
+    return eventMarks.map((p) => {
+      const above = p.marks.some((m) => m.side === 'above')
+      return {
+        date: p.date,
+        kind: 'neutral' as const,
+        label: p.marks.map((m) => m.label).slice(0, 2).join('/'),
+        above,
+        color: p.marks[0]?.color,
+      }
+    })
+  }, [eventMarks, period])
+
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
     ...(showLimitMarkers ? limitMarkers : []),
-  ], [limitMarkers, markers, showLimitMarkers])
+    ...eventChartMarkers,
+  ], [eventChartMarkers, limitMarkers, markers, showLimitMarkers])
 
   // 切换个股时载入该股已保存的手绘线
   useEffect(() => {

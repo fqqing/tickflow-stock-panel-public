@@ -39,6 +39,13 @@ export interface ChartOverlays {
    * 聚合结果(聚合只保留 OHLCV), 分钟档根本没有这些列。
    */
   signals: boolean
+  /**
+   * 监控触发标记。数据来自 alerts.jsonl (近 7 天), 只在日线档画。
+   * 默认关: 不是每只票都有触发记录, 常开会在图上留一堆无意义的空查询。
+   */
+  alerts: boolean
+  /** 回测买卖点标记。数据来自最近一次策略回测的落盘, 同样只在日线档画 */
+  trades: boolean
 }
 
 export interface ChartSessionState {
@@ -52,7 +59,7 @@ const DEFAULT_STATE: ChartSessionState = {
   symbol: '',
   period: 'day',
   adjust: 'qfq',
-  overlays: { structure: true, chan: false, chips: false, signals: false },
+  overlays: { structure: true, chan: false, chips: false, signals: false, alerts: false, trades: false },
 }
 
 let state: ChartSessionState = DEFAULT_STATE
@@ -123,7 +130,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '日线 + 前复权 + 定量结构 + 缠论',
     period: 'day',
     adjust: 'qfq',
-    overlays: { structure: true, chan: true, chips: false, signals: false },
+    overlays: { structure: true, chan: true, chips: false, signals: false, alerts: false, trades: false },
   },
   {
     id: 'swing',
@@ -131,7 +138,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '30 分钟 + 不复权 + 定量结构 + 筹码',
     period: '30m',
     adjust: 'none',
-    overlays: { structure: true, chan: false, chips: true, signals: false },
+    overlays: { structure: true, chan: false, chips: true, signals: false, alerts: false, trades: false },
   },
   {
     id: 'review',
@@ -139,7 +146,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     hint: '周线 + 后复权 + 缠论(看大级别结构)',
     period: 'week',
     adjust: 'hfq',
-    overlays: { structure: false, chan: true, chips: false, signals: false },
+    overlays: { structure: false, chan: true, chips: false, signals: false, alerts: false, trades: false },
   },
 ]
 

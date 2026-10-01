@@ -25,6 +25,10 @@ export interface OverlayCapability {
   chips: boolean
   /** 策略信号标记(signal_* 列)。两侧都实现了, 且共用同一份中文名/配色 */
   signals: boolean
+  /** 监控触发标记(alerts.jsonl)。两侧共用 lib/chart-events 的归约 */
+  alerts: boolean
+  /** 回测买卖点标记(最近一次策略回测落盘)。同上 */
+  trades: boolean
 }
 
 export interface ChartCapabilities {
@@ -68,7 +72,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
     capabilities: {
       periods: periodsFor('echarts'),
       adjust: true,
-      overlays: { structure: true, chan: true, chips: false, signals: true },
+      overlays: { structure: true, chan: true, chips: false, signals: true, alerts: true, trades: true },
       drawing: true,
       viewport: true,
       indicatorCatalog: 'isolated',
@@ -81,7 +85,7 @@ export const RENDERERS: Record<ChartRendererId, ChartRendererSpec> = {
     capabilities: {
       periods: periodsFor('klinecharts'),
       adjust: true,
-      overlays: { structure: true, chan: true, chips: true, signals: true },
+      overlays: { structure: true, chan: true, chips: true, signals: true, alerts: true, trades: true },
       drawing: false,
       viewport: true,
       indicatorCatalog: 'isolated',

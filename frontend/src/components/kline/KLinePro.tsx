@@ -32,6 +32,7 @@ import { useChanOverlay } from '@/lib/useChanOverlay'
 import { useChartTheme } from '@/lib/theme'
 import { chartSession } from '@/lib/chartSession'
 import { applyKcViewport, readKcViewport } from '@/lib/chartViewport'
+import type { ChartEventPoint } from '@/lib/chart-events'
 import type { ChartPriceLine } from '@/lib/chart-primitives'
 import {
   ADJUST_OPTIONS,
@@ -50,6 +51,11 @@ import {
   registerSignalMarkersOverlay,
   type SignalMarkersPayload,
 } from './signal-markers'
+import {
+  registerEventMarkersOverlay,
+  setEventMarks,
+  type EventMarkersPayload,
+} from './event-markers'
 import { IndicatorManager } from './IndicatorManager'
 import {
   MAIN_PANE_ID,
@@ -218,6 +224,12 @@ export interface KLineProProps {
   signalsEnabled?: boolean
   onSignalsChange?: (v: boolean) => void
   /**
+   * 外部事件标记(监控触发 / 回测买卖点), 已在终端层按日期归约好。
+   * 数据不在 K 线行里, 由 overlay 从内部 WeakMap 按日期反查 —— 传空数组即关闭。
+   * 两个内核消费同一份(见 lib/chart-events.ts), 避免切内核观感漂移。
+   */
+  eventMarks?: ChartEventPoint[]
+  /**
    * true = 隐藏图内的叠加层开关(定量结构 / 筹码)。
    * 终端层已提供统一入口时传 true —— 同屏两组同名按钮本身就是割裂观感。
    */
@@ -242,6 +254,7 @@ export function KLinePro({
   onChipsChange,
   signalsEnabled: signalsProp,
   onSignalsChange,
+  eventMarks,
   hideOverlayToggles = false,
   refetchIntervalMs,
 }: KLineProProps) {
@@ -262,9 +275,9 @@ export function KLinePro({
    *   走 overrideOverlay 分支会打到不存在的 id 上, 表现是「换股后叠加层静默消失」。
    */
   const overlayIds = useRef<
-    Record<'chan' | 'chips' | 'price' | 'structure' | 'signal', string | null>
+    Record<'chan' | 'chips' | 'price' | 'structure' | 'signal' | 'events', string | null>
   >({
-    chan: null, chips: null, price: null, structure: null, signal: null,
+    chan: null, chips: null, price: null, structure: null, signal: null, events: null,
   })
   /** 会话视口只重放一次(挂载/换股后), 之后交给用户自由滚动 */
   const vpAppliedRef = useRef(false)
@@ -361,13 +374,16 @@ export function KLinePro({
     // 指标 diff 的 effect 不会重跑, 新图上就一个指标都没有。
     setReady(false)
     indRefs.current.clear()
-    overlayIds.current = { chan: null, chips: null, price: null, structure: null, signal: null }
+    overlayIds.current = {
+      chan: null, chips: null, price: null, structure: null, signal: null, events: null,
+    }
     vpAppliedRef.current = false
     registerChanOverlay()
     registerPriceLineOverlay()
     registerChipsOverlay()
     registerStructureOverlay()
     registerSignalMarkersOverlay()
+    registerEventMarkersOverlay()
 
     const chart = kc.init(el, { styles: buildStyles(ct) })
     if (!chart) return
@@ -580,6 +596,48 @@ export function KLinePro({
       chart.overrideOverlay({ id: overlayIds.current.signal, extendData: payload })
     }
   }, [signalsOn, period, structRev, ready])
+
+  // ── 外部事件标记(监控触发 / 回测买卖点) ──
+  // 数据是终端层异步取来的, 不在 K 线行里, 所以走 WeakMap 挂到 chart 实例:
+  // 开关时只改 WeakMap + 推一个 rev, 不重建 dataList(那是用户最常点的动作)。
+  // 同样只在日线档画: 告警/买卖点都是日粒度, 周月线的 date 是周末, 对不上。
+  //
+  // rev 必须含首末日期: 只写点数的话, 「告警条数不变但内容换了」(老告警过期、
+  // 新告警补位) 不会触发重绘, 图上就一直标着旧的。
+  const eventRev = useMemo(
+    () => (eventMarks && eventMarks.length > 0
+      ? `${eventMarks.length}:${eventMarks[0].date}:${eventMarks[eventMarks.length - 1].date}`
+      : ''),
+    [eventMarks],
+  )
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !ready) return
+    const marks = period === 'day' ? eventMarks : undefined
+    if (!marks || marks.length === 0) {
+      if (overlayIds.current.events) {
+        chart.removeOverlay({ id: overlayIds.current.events })
+        overlayIds.current.events = null
+      }
+      setEventMarks(chart, null)
+      return
+    }
+    const first = rowsRef.current[0]
+    if (!first) return
+    setEventMarks(chart, marks)
+    const payload: EventMarkersPayload = { rev: eventRev }
+    if (!overlayIds.current.events) {
+      const id = chart.createOverlay({
+        name: 'eventMarkers',
+        paneId: 'candle_pane',
+        points: [{ timestamp: first.timestamp, value: first.close }],
+        extendData: payload,
+      })
+      if (typeof id === 'string') overlayIds.current.events = id
+    } else {
+      chart.overrideOverlay({ id: overlayIds.current.events, extendData: payload })
+    }
+  }, [eventMarks, eventRev, period, ready])
 
   // ── S2: 指标清单 diff 到图表 ──
   // 增删改一律走增量, 不做「全量重建」 —— 重建窗格会把用户拖动过的高度一起丢掉。

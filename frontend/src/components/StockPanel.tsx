@@ -4,6 +4,7 @@ import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type KLinePeriod, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import type { KLineAdjust } from '@/lib/klinePeriod'
+import type { ChartEventPoint } from '@/lib/chart-events'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
@@ -48,6 +49,8 @@ interface Props {
   onStructureChange?: (v: boolean) => void
   /** 策略信号标记开关（受控，透传）。与 KLinePro 共用会话里的同一份状态 */
   signalsEnabled?: boolean
+  /** 外部事件标记(监控触发 / 回测买卖点), 透传给日K图, 两内核同口径 */
+  eventMarks?: ChartEventPoint[]
   /** true = 隐藏图内叠加层开关(终端层已提供统一入口, 避免同屏两组同名按钮) */
   hideOverlayToggles?: boolean
   /** 复权方式（受控，透传）。终端层持有，与 KLinePro 共用一份状态 */
@@ -93,6 +96,7 @@ export function StockPanel({
   structureOverlay,
   onStructureChange,
   signalsEnabled,
+  eventMarks,
   hideOverlayToggles,
   adjust,
   onAdjustChange,
@@ -229,6 +233,7 @@ export function StockPanel({
           structureOverlay={structureOverlay}
           onStructureChange={onStructureChange}
           signalsEnabled={signalsEnabled}
+          eventMarks={eventMarks}
           hideOverlayToggles={hideOverlayToggles}
           adjust={adjust}
           onAdjustChange={onAdjustChange}

@@ -13,6 +13,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import {
+  alertPointsToEvents,
+  mergeEventPoints,
+  tradesToEvents,
+} from '@/lib/chart-events'
 import { QK } from '@/lib/queryKeys'
 import { useQuote, useElementHeight } from '@/lib/useQuote'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -160,6 +165,8 @@ export function StockTerminal() {
   const chanOn = overlays.chan
   const chipsOn = overlays.chips
   const signalsOn = overlays.signals
+  const alertsOn = overlays.alerts
+  const tradesOn = overlays.trades
   const [renderer, setRenderer] = useState<ChartRendererId>(
     () => (getKLineProFlag() ? 'klinecharts' : 'echarts'),
   )
@@ -197,6 +204,30 @@ export function StockTerminal() {
     setFocusSymbol(symbol)
     return () => clearFocusSymbol()
   }, [symbol])
+
+  // ── 外部事件标记(监控触发 / 回测买卖点) ──────────────────────
+  // 开关关着就不取数(这两路都不是每只票都有数据); 也只在日线档取 —— 周/月线的
+  // date 是周末, 日粒度的告警/买卖点对不上, 取回来也画不出来。
+  // 归约在终端层做完再下发, 两个内核拿的是同一份, 不会各画一套。
+  const alertsQ = useQuery({
+    queryKey: QK.chartAlerts(symbol, 7),
+    queryFn: () => api.alertsBySymbol(symbol, 7),
+    enabled: !!symbol && alertsOn && period === 'day',
+    staleTime: 60_000,
+  })
+  const tradesQ = useQuery({
+    queryKey: QK.chartTrades(symbol),
+    queryFn: () => api.lastBacktestTrades(symbol),
+    enabled: !!symbol && tradesOn && period === 'day',
+    staleTime: 300_000,
+  })
+  const eventMarks = useMemo(
+    () => mergeEventPoints(
+      alertsOn ? alertPointsToEvents(alertsQ.data?.points ?? []) : [],
+      tradesOn ? tradesToEvents(tradesQ.data?.trades ?? []) : [],
+    ),
+    [alertsOn, alertsQ.data, tradesOn, tradesQ.data],
+  )
 
   // 会话里记一份当前标的(便于排查, 也为将来「按 symbol 隔离视口」留口子)
   useEffect(() => {
@@ -330,6 +361,10 @@ export function StockTerminal() {
           chartSession.setOverlay('structure', !structOn); break
         case 'x':
           chartSession.setOverlay('signals', !signalsOn); break
+        case 'a':
+          chartSession.setOverlay('alerts', !alertsOn); break
+        case 't':
+          chartSession.setOverlay('trades', !tradesOn); break
         case 'r':
           setRailOpen(v => !v); break
         case 'p':
@@ -354,7 +389,7 @@ export function StockTerminal() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, signalsOn, stepSymbol, structOn, symbol])
+  }, [alertsOn, chanOn, handleToggleKLine, helpOpen, navigate, paletteOpen, showMonitor, signalsOn, stepSymbol, structOn, symbol, tradesOn])
 
   if (!symbol) {
     return (
@@ -450,6 +485,22 @@ export function StockTerminal() {
                   onClick={() => chartSession.setOverlay('signals', !signalsOn)}
                 />
               )}
+              {caps.overlays.alerts && (
+                <OverlayToggle
+                  active={alertsOn}
+                  label="触发"
+                  title="监控触发记录: 近 7 天该股的告警, 画在 K 线上方(红=严重/橙=警告/蓝=提示), 仅日线档 (a)"
+                  onClick={() => chartSession.setOverlay('alerts', !alertsOn)}
+                />
+              )}
+              {caps.overlays.trades && (
+                <OverlayToggle
+                  active={tradesOn}
+                  label="回测"
+                  title="最近一次策略回测的买卖点: 买=红下三角 / 卖=绿上三角(带盈亏%), 仅日线档 (t)"
+                  onClick={() => chartSession.setOverlay('trades', !tradesOn)}
+                />
+              )}
               <button
                 onClick={handleToggleKLine}
                 title={useKLine ? '切回 ECharts 内核 (g)' : '试用 KLineChart 内核 (g)'}
@@ -488,6 +539,7 @@ export function StockTerminal() {
                 onChipsChange={v => chartSession.setOverlay('chips', v)}
                 signalsEnabled={signalsOn}
                 onSignalsChange={v => chartSession.setOverlay('signals', v)}
+                eventMarks={eventMarks}
                 hideOverlayToggles
                 priceLines={priceLines}
                 refetchIntervalMs={refetchMs}
@@ -506,6 +558,7 @@ export function StockTerminal() {
                 structureOverlay={structOn}
                 onStructureChange={v => chartSession.setOverlay('structure', v)}
                 signalsEnabled={signalsOn}
+                eventMarks={eventMarks}
                 hideOverlayToggles
                 refetchIntervalMs={refetchMs}
                 inWatchlist={inWatchlist}
