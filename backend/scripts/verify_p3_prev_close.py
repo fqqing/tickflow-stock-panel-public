@@ -45,7 +45,7 @@ class FakeRepo:
         self.rows = rows or []
         self.raise_error = False
 
-    def get_daily_asset(self, asset_type, symbol, start, end, columns=None):
+    def get_daily_asset(self, asset_type, symbol, start, end, columns=None, market="cn"):
         import polars as pl
 
         if self.raise_error:

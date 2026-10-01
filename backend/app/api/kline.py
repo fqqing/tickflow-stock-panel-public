@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
+import time
 from datetime import date, timedelta
 from functools import lru_cache
 from typing import Optional
@@ -12,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
+from app.markets import ALL_MARKETS, market_of
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
@@ -297,8 +300,12 @@ def _get_previous_closes(
     symbol: str,
     trade_dates: list[date],
     asset_type: str,
+    market: str = "cn",
 ) -> dict[date, float | None]:
-    """Return the previous trading day's adjusted close for each session."""
+    """Return the previous trading day's adjusted close for each session.
+
+    market 必须透传: cn/hk/us 三市的日K落在不同目录, 默认 cn 会让港美股恒读不到数据.
+    """
     if not trade_dates:
         return {}
     start = min(trade_dates) - timedelta(days=45)
@@ -310,6 +317,7 @@ def _get_previous_closes(
             start,
             end,
             columns=["date", "close"],
+            market=market,
         ).sort("date")
     except Exception:
         daily = None
@@ -372,6 +380,7 @@ def _prev_close_with_fallback(
     symbol: str,
     trade_dates: list[date],
     asset_type: str,
+    market: str = "cn",
 ) -> tuple[dict[date, float | None], dict[date, str]]:
     """取昨收并在本地缺失时用实时快照兜底。
 
@@ -380,7 +389,7 @@ def _prev_close_with_fallback(
       realtime — 本地缺失, 用实时快照兜底(未复权口径)
       none     — 两者都没有, 调用方应按「数据未就绪」处理而不是当成 0
     """
-    local = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    local = _get_previous_closes(repo, symbol, trade_dates, asset_type, market=market)
     values: dict[date, float | None] = {}
     sources: dict[date, str] = {}
     for trade_date in trade_dates:
@@ -393,6 +402,24 @@ def _prev_close_with_fallback(
         values[trade_date] = fallback
         sources[trade_date] = "realtime" if fallback is not None else "none"
     return values, sources
+
+
+def _resolve_market(symbol: str, market: str) -> str:
+    """确定标的市场: 显式传参优先, 留空则按 symbol 后缀推导.
+
+    A 股之外 (hk/us) 的日K落在独立目录, 而 ``repo.get_daily_asset`` 的 market
+    默认是 cn -- 少了这一层, 港美股 K 线恒返回空 (既不是报错也不是缺数据,
+    排查时极易误判成"没同步"). 所以每个读日K的入口都必须显式带 market.
+    """
+    wanted = (market or "").strip().lower()
+    if not wanted:
+        return market_of(symbol)
+    if wanted not in ALL_MARKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的市场: {wanted} (可选 {','.join(ALL_MARKETS)})",
+        )
+    return wanted
 
 
 @router.get("/daily")
@@ -426,6 +453,14 @@ def get_daily(
         "qfq",
         description="复权方式: qfq(前复权, 数据源口径, 默认) / none(不复权) / hfq(后复权)。",
     ),
+    market: str = Query(
+        "",
+        description=(
+            "市场: cn/hk/us. 留空按 symbol 后缀自动推导 "
+            "(600000.SH->cn, 00700.HK->hk, AAPL.US->us). 三市日K分目录存储, "
+            "取错市场会恒返回空."
+        ),
+    ),
 ):
     """读取本地 enriched 表中某只股票的日 K。
 
@@ -436,10 +471,12 @@ def get_daily(
     - indicators: 可选, 为每根 K 线附加解密公式结果 (蛟龙出海/资金动能/
       主图定量结构/MACD 定量结构), 在实时蜡烛注入之后计算, 保证与图上最后一根
       K 线一致
+    - market: 三市日K落在不同目录, 必须显式透传给仓库层, 否则港美股恒读不到.
     """
     import polars as pl
 
     repo = request.app.state.repo
+    market = _resolve_market(symbol, market)
     end = date.fromisoformat(end_date) if end_date else date.today()
     if start_date:
         start = date.fromisoformat(start_date)
@@ -455,7 +492,7 @@ def get_daily(
     stock_name = stock_info.get("name")
 
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
-    df = repo.get_daily_asset(asset_type, symbol, start, end)
+    df = repo.get_daily_asset(asset_type, symbol, start, end, market=market)
 
     if df.is_empty():
         try:
@@ -463,7 +500,13 @@ def get_daily(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
-            return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
+            return {
+                "symbol": symbol,
+                "name": stock_name,
+                "market": market,
+                "stock_info": stock_info,
+                "rows": [],
+            }
         # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
         factors = pl.DataFrame()
         capset = getattr(request.app.state, "capabilities", None)
@@ -481,11 +524,14 @@ def get_daily(
         resp = {
             "symbol": symbol,
             "name": stock_name,
+            "market": market,
             "stock_info": stock_info,
             "rows": rows,
             "source": "live",
         }
-        resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
+        resp = _attach_indicators(
+            request, repo, resp, symbol, indicators, start, end, asset_type, market=market
+        )
         return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
 
     # 复权要在周期聚合之前做: 聚合取 last/first/max/min, 若先聚合再复权,
@@ -494,7 +540,8 @@ def get_daily(
     if period in _VALID_PERIODS and period != "day":
         # 周/月线: 聚合后直接返回, 不注入当日实时蜡烛 —— 实时蜡烛是「日」粒度,
         # 直接追加会在周线上多出一根错误的短周期 K 线。
-        rows = _select_fields_df(_aggregate_period(df, period), fields).to_dicts()
+        agg = _aggregate_period_cached(df, period, symbol, adjust)
+        rows = _select_fields_df(agg, fields).to_dicts()
     else:
         rows = _select_fields_df(df, fields).to_dicts()
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
@@ -503,11 +550,14 @@ def get_daily(
     resp = {
         "symbol": symbol,
         "name": stock_name,
+        "market": market,
         "stock_info": stock_info,
         "rows": rows,
         "source": "enriched",
     }
-    resp = _attach_indicators(request, repo, resp, symbol, indicators, start, end, asset_type)
+    resp = _attach_indicators(
+        request, repo, resp, symbol, indicators, start, end, asset_type, market=market
+    )
     return _apply_fields(_attach_ext(resp, repo, symbol, ext_columns), fields)
 
 
@@ -601,6 +651,57 @@ def _aggregate_period(df, period: str):
     if extra:
         out = out.join(agg.select(["date", *extra]), on="date", how="left")
     return out
+
+
+# 周/月K 聚合结果缓存. 切周期档 / 开关叠加层 / 刷新面板都会重新打一次 /daily,
+# 而聚合后还要把全套指标重算一遍 (compute_indicators 约等于一次全表扫描).
+# 结果只由 (标的, 周期, 复权, 数据边界) 决定, 所以按这个指纹缓存是安全的.
+_PERIOD_CACHE_MAX = 64
+_PERIOD_CACHE_TTL = 900.0  # 秒。日线一天一更, 15 分钟足够新鲜
+_period_cache: dict[tuple, tuple[float, object]] = {}
+_period_lock = threading.Lock()
+
+
+def _period_cache_key(symbol: str, period: str, adjust: str, df) -> tuple:
+    """聚合结果指纹: (标的, 周期, 复权, 末日, 行数, 末收).
+
+    不 hash 全表 (成本高). 日K只在「末尾新增一天」或「整体重写」时变化,
+    这两个动作都会至少改掉末日 / 行数 / 末收之一, 三者同时不变即可复用.
+    adjust 必须进 key: 复权在聚合之前做, 三种口径的 df 行数完全相同.
+    """
+    last_date = df["date"].max() if "date" in df.columns and df.height else None
+    last_close = None
+    if "close" in df.columns and df.height:
+        try:
+            last_close = round(float(df["close"][-1] or 0.0), 6)
+        except (TypeError, ValueError):
+            last_close = None
+    return (symbol, period, adjust, str(last_date), df.height, last_close)
+
+
+def _aggregate_period_cached(df, period: str, symbol: str, adjust: str):
+    """``_aggregate_period`` 的缓存版 (未命中才真的算)。"""
+    key = _period_cache_key(symbol, period, adjust, df)
+    now = time.monotonic()
+    with _period_lock:
+        hit = _period_cache.get(key)
+        if hit is not None and now - hit[0] < _PERIOD_CACHE_TTL:
+            return hit[1]
+
+    out = _aggregate_period(df, period)
+
+    with _period_lock:
+        _period_cache[key] = (time.monotonic(), out)
+        if len(_period_cache) > _PERIOD_CACHE_MAX:
+            oldest = min(_period_cache.items(), key=lambda kv: kv[1][0])[0]
+            _period_cache.pop(oldest, None)
+    return out
+
+
+def clear_period_cache() -> None:
+    """清空周/月K聚合缓存 (数据同步后手动调用, 或测试用)。"""
+    with _period_lock:
+        _period_cache.clear()
 
 
 _ADJUST_PRICE_COLS = (
@@ -846,8 +947,13 @@ def _attach_indicators(
     start: date,
     end: date,
     asset_type: str = "stock",
+    market: str = "cn",
 ) -> dict:
     """为 rows 逐根附加解密公式结果 (原地写入并返回 resp)。
+
+    market 用于个股历史取数 (hk/us 日K在独立目录); 资金动能的对比指数恒为
+    A 股指数 (见 _BENCHMARK_INDEX_BY_EXCHANGE), 那一路显式传 cn.
+
 
     - trend_dragon: ``td_signal`` (bool) / ``td_a3`` (int|null)
     - capital_momentum: ``cm_value`` (float|null, 与源脚本同口径, 已乘 10)
@@ -888,7 +994,12 @@ def _attach_indicators(
     history: dict[str, dict] = {}
     try:
         hist_df = repo.get_daily_asset(
-            asset_type, symbol, warmup_start, end, columns=["date", "open", "high", "low", "close"]
+            asset_type,
+            symbol,
+            warmup_start,
+            end,
+            columns=["date", "open", "high", "low", "close"],
+            market=market,
         )
         for record in hist_df.iter_rows(named=True):
             history[_date_key(record.get("date"))] = record
@@ -954,8 +1065,9 @@ def _attach_indicators(
         index_symbol = _benchmark_index_symbol(symbol)
         index_map: dict[str, float] = {}
         try:
+            # 基准恒为 A 股指数, 故显式 cn -- 不跟随个股市场
             index_df = repo.get_daily_asset(
-                "index", index_symbol, warmup_start, end, columns=["date", "close"]
+                "index", index_symbol, warmup_start, end, columns=["date", "close"], market="cn"
             )
             if not index_df.is_empty():
                 index_map = {
@@ -1362,7 +1474,9 @@ def get_minute_range(
         pl.col("datetime").dt.date().alias("_trade_date"),
     )
     trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
-    previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    previous_closes = _get_previous_closes(
+        repo, symbol, trade_dates, asset_type, market=market_of(symbol)
+    )
     row_columns = [
         column
         for column in ("datetime", "open", "high", "low", "close", "volume", "amount")
@@ -1578,6 +1692,7 @@ def get_minute(
     """
     repo = request.app.state.repo
     asset_type = repo.resolve_asset_type(symbol)
+    market = market_of(symbol)
     stock_info = (
         _get_stock_info(repo, symbol)
         if asset_type == "stock"
@@ -1620,6 +1735,7 @@ def get_minute(
             symbol,
             [trade_date],
             asset_type,
+            market=market,
         )
         prev_close = _pc_map.get(trade_date)
         return {
@@ -1640,6 +1756,7 @@ def get_minute(
         symbol,
         [trade_date],
         asset_type,
+        market=market,
     )
     prev_close = _pc_map.get(trade_date)
     price_limit = _get_price_limit_info(

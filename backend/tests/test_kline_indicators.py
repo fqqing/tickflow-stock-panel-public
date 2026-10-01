@@ -32,7 +32,7 @@ class _FakeRepo:
         self._stock = pl.DataFrame(stock_rows) if stock_rows else pl.DataFrame()
         self._index_frames = index_frames or {}
 
-    def get_daily_asset(self, asset_type, symbol, start, end, columns=None):
+    def get_daily_asset(self, asset_type, symbol, start, end, columns=None, market="cn"):
         if asset_type == "index":
             df = self._index_frames.get(symbol, pl.DataFrame())
             if df.is_empty():

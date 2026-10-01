@@ -49,8 +49,10 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import Any
 
 from app.plugins.eltdx.provider import _snap_fetch, app_to_eltdx, market_meta
@@ -61,23 +63,29 @@ logger = logging.getLogger(__name__)
 #: 扫描并发数。实测 8 并发稳定; 再高上游开始 sporadic ProtocolError。
 _SCAN_WORKERS = 8
 
-#: 涨停判定阈值(涨幅小数)。按板块区分, 留 0.2% 浮点余量(实际涨停是 10/20/30,
-#: 但快照 change_pct 有精度损失, 用 9.8/19.8/29.8 更稳)。
-_LIMIT_UP_BY_PREFIX: tuple[tuple[tuple[str, ...], float], ...] = (
-    (("688", "689"), 0.198),   # 科创板
-    (("300", "301"), 0.198),   # 创业板
-    (("43", "83", "87", "88", "920"), 0.298),  # 北交所
-)
-_DEFAULT_LIMIT_UP = 0.098      # 主板
+#: 涨停判定余量(涨幅小数)。快照 change_pct 有精度损失, 实际涨停是 10/20/30,
+#: 判定时留 0.2% 余量更稳 (9.8% / 19.8% / 29.8%)。
+_LIMIT_UP_TOLERANCE = 0.002
 
 
+@lru_cache(maxsize=8192)
 def _limit_up_threshold(symbol: str) -> float:
-    """按代码前缀给出涨停涨幅阈值(小数)。"""
-    code = symbol.partition(".")[0]
-    for prefixes, thr in _LIMIT_UP_BY_PREFIX:
-        if code.startswith(prefixes):
-            return thr
-    return _DEFAULT_LIMIT_UP
+    """涨停判定阈值(涨幅小数)。
+
+    板块口径**不在这里维护** —— 走 ``app.markets.market_limit_pct``, 它是全仓库
+    涨跌停规则的单一事实源 (指标流水线 / 回测 / API 同源)。此前这里的平行实现
+    用 ("688","689","300","301","43","83","87","88","920") 前缀硬匹配, 与
+    price_limits 的 (300,301,688,689) 前缀 + .BJ 后缀口径不同源, 改规则时容易漏改。
+
+    港美股无涨跌停 (market_limit_pct 返回 None) → 返回 +inf, 判定恒 False,
+    而不是退回 A 股主板的 10%。
+    """
+    from app.markets import market_limit_pct
+
+    pct = market_limit_pct(symbol)
+    if pct is None:
+        return math.inf
+    return round(pct / 100.0 - _LIMIT_UP_TOLERANCE, 4)
 
 
 def _f(raw: object) -> float | None:

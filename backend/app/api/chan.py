@@ -214,6 +214,55 @@ def _analyze_arrays(high, low, close, *, strict: bool):
     return analyze(high, low, close, strict=strict)
 
 
+# ===== 单票结构缓存 =====
+
+# K 线面板每次打开 / 切周期 / 开关叠加层都会重打 /api/chan/analysis, 而 analyze
+# 是纯函数: 结果只由 (标的, 根数, 笔口径, 数据) 决定, 数据边界不变即可复用。
+_ANALYSIS_CACHE_MAX = 128
+_analysis_cache: dict[tuple, tuple[float, Any]] = {}
+_analysis_lock = threading.Lock()
+
+
+def _analysis_cache_key(symbol: str, lookback: int, strict: bool, df: pl.DataFrame) -> tuple:
+    """结构结果指纹: (标的, 根数, 笔口径, 末日, 行数)。
+
+    不 hash 整表 (成本高)。日K只在末尾新增或整体重写时变化, 两者都会改掉
+    末日 / 行数之一; 再叠加 _MARKET_CACHE_TTL 兜底, 陈旧窗口最多 15 分钟。
+    """
+    last = df["date"].max() if df.height and "date" in df.columns else None
+    return (symbol, lookback, bool(strict), str(last), df.height)
+
+
+def _analyze_cached(symbol: str, lookback: int, strict: bool, df: pl.DataFrame):
+    """``analyze`` 的缓存版: 未命中才真的算, 返回 ChanAnalysis 对象。
+
+    缓存的是**结构对象**而不是序列化结果 —— 它内部只存索引, 与日期列表无关,
+    而 name 每次现取, 这样缓存不会让名称 / 日期变陈旧。
+    """
+    key = _analysis_cache_key(symbol, lookback, strict, df)
+    now = time.monotonic()
+    with _analysis_lock:
+        hit = _analysis_cache.get(key)
+        if hit is not None and now - hit[0] < _MARKET_CACHE_TTL:
+            return hit[1]
+
+    analysis = analyze(
+        df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy(), strict=strict
+    )
+    with _analysis_lock:
+        _analysis_cache[key] = (time.monotonic(), analysis)
+        if len(_analysis_cache) > _ANALYSIS_CACHE_MAX:
+            oldest = min(_analysis_cache.items(), key=lambda kv: kv[1][0])[0]
+            _analysis_cache.pop(oldest, None)
+    return analysis
+
+
+def clear_analysis_cache() -> None:
+    """清空单票缠论缓存 (数据同步后手动调用, 或测试用)。"""
+    with _analysis_lock:
+        _analysis_cache.clear()
+
+
 # ===== 端点 =====
 
 
@@ -230,9 +279,7 @@ def chan_analysis(
     if df.is_empty() or df.height < _MIN_BARS_FOR_SCAN:
         raise HTTPException(status_code=404, detail=f"标的 {symbol} 日线数据不足, 无法做缠论分析")
     dates = [_iso(d) for d in df["date"].to_list()]
-    analysis = analyze(
-        df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy(), strict=strict
-    )
+    analysis = _analyze_cached(symbol, lookback, strict, df)
     names = _instrument_names(repo)
     return _serialize(analysis, dates, symbol, names.get(symbol))
 

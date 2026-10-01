@@ -493,6 +493,32 @@ def _make_job_key(
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
+# ===== SSE 帧工具 (断点续传) =====
+
+
+def _sse_start_cursor(request: Request) -> int:
+    """SSE 重连起点: 浏览器 EventSource 断线重连时会自动带上 Last-Event-ID。
+
+    每条事件都带递增 id (= progress 下标 + 1), 重连时从该 id 之后继续推,
+    避免把上百条历史进度整段重放 —— 切页回来 / 刷新重连时尤其明显。
+    首次连接没有该头 -> 从 0 开始, 与以前行为一致。
+    """
+    raw = request.headers.get("last-event-id")
+    if not raw:
+        return 0
+    try:
+        return max(int(str(raw).strip()), 0)
+    except ValueError:
+        return 0
+
+
+def _sse_frame(event: str, data, event_id: int | None = None) -> str:
+    """拼一条 SSE 帧。带 id 浏览器才会在重连时回传 Last-Event-ID。"""
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    head = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{head}event: {event}\ndata: {payload}\n\n"
+
+
 @router.get("/strategy/stream")
 async def strategy_stream(
     request: Request,
@@ -654,7 +680,7 @@ async def strategy_stream(
             threading.Thread(target=_run_backtest, daemon=True).start()
 
         # 订阅进度: 用读指针读 job.progress 列表 (多连接互不干扰)
-        cursor = 0
+        cursor = _sse_start_cursor(request)
         tick = 0
 
         try:
@@ -662,17 +688,17 @@ async def strategy_stream(
                 # 已完成: 推送最终结果/错误并退出
                 if job.done:
                     if job.error:
-                        yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                        yield _sse_frame("error", {"message": job.error}, cursor + 1)
                     elif job.result is not None:
                         r = job.result
                         error = r.get("error") if isinstance(r, dict) else getattr(r, "error", None)
                         if error == "cancelled":
-                            yield f"event: error\ndata: {json.dumps({'message': '回测已取消'}, ensure_ascii=False)}\n\n"
+                            yield _sse_frame("error", {"message": "回测已取消"}, cursor + 1)
                         elif error:
-                            yield f"event: error\ndata: {json.dumps({'message': error}, ensure_ascii=False)}\n\n"
+                            yield _sse_frame("error", {"message": error}, cursor + 1)
                         else:
                             payload = r if isinstance(r, dict) else asdict(r)
-                            yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                            yield _sse_frame("done", payload, cursor + 1)
                     return
 
                 # 断开检测: 每 4 轮检查一次 (降低 GIL 抢占频率)
@@ -685,7 +711,8 @@ async def strategy_stream(
                 while cursor < len(prog_list):
                     msg = prog_list[cursor]
                     cursor += 1
-                    yield f"event: progress\ndata: {json.dumps(msg, ensure_ascii=False, default=str)}\n\n"
+                    # id 用 1-based (0 留给"无 id"的终态帧), 下次重连从 cursor 续
+                    yield _sse_frame("progress", msg, cursor)
 
                 await asyncio.sleep(0.5)
 
@@ -956,18 +983,18 @@ async def optimize_stream(
 
                 threading.Thread(target=_run_opt, daemon=True).start()
 
-        cursor = 0
+        cursor = _sse_start_cursor(request)
         tick = 0
         try:
             while True:
                 if job.done:
                     if job.error:
-                        yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                        yield _sse_frame("error", {"message": job.error}, cursor + 1)
                     elif job.cancel_event.is_set():
                         # 取消时优化器把每组记为 cancelled 并正常返回, 需在此分流为取消提示而非"完成"。
-                        yield f"event: error\ndata: {json.dumps({'message': '优化已取消'}, ensure_ascii=False)}\n\n"
+                        yield _sse_frame("error", {"message": "优化已取消"}, cursor + 1)
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield _sse_frame("done", _json_safe(job.result), cursor + 1)
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():
@@ -975,7 +1002,7 @@ async def optimize_stream(
                 while cursor < len(job.progress):
                     msg = job.progress[cursor]
                     cursor += 1
-                    yield f"event: progress\ndata: {json.dumps(msg, ensure_ascii=False, default=str)}\n\n"
+                    yield _sse_frame("progress", msg, cursor)
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
@@ -1182,17 +1209,17 @@ async def walkforward_stream(
 
                 threading.Thread(target=_run_wf, daemon=True).start()
 
-        cursor = 0
+        cursor = _sse_start_cursor(request)
         tick = 0
         try:
             while True:
                 if job.done:
                     if job.error:
-                        yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                        yield _sse_frame("error", {"message": job.error}, cursor + 1)
                     elif job.cancel_event.is_set():
-                        yield f"event: error\ndata: {json.dumps({'message': 'walk-forward 已取消'}, ensure_ascii=False)}\n\n"
+                        yield _sse_frame("error", {"message": "walk-forward 已取消"}, cursor + 1)
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield _sse_frame("done", _json_safe(job.result), cursor + 1)
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():
@@ -1200,7 +1227,7 @@ async def walkforward_stream(
                 while cursor < len(job.progress):
                     msg = job.progress[cursor]
                     cursor += 1
-                    yield f"event: progress\ndata: {json.dumps(msg, ensure_ascii=False, default=str)}\n\n"
+                    yield _sse_frame("progress", msg, cursor)
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
