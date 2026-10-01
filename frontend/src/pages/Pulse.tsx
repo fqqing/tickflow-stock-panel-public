@@ -19,7 +19,9 @@
  */
 import { useMemo, useRef, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Loader2, RefreshCw, Flame, Layers, Gavel, Grid3x3, Waves } from 'lucide-react'
+import {
+  Activity, Loader2, RefreshCw, Flame, Layers, Gavel, Grid3x3, Waves, BarChart3,
+} from 'lucide-react'
 import {
   api,
   type PulseAuction,
@@ -31,7 +33,7 @@ import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 
-type TabKey = 'moneyflow' | 'auction' | 'strength' | 'topics' | 'ladder' | 'flow'
+type TabKey = 'moneyflow' | 'auction' | 'strength' | 'topics' | 'ladder' | 'flow' | 'pricedist'
 
 const TABS: { key: TabKey; label: string; icon: typeof Activity }[] = [
   { key: 'moneyflow', label: '资金流', icon: Waves },
@@ -40,6 +42,7 @@ const TABS: { key: TabKey; label: string; icon: typeof Activity }[] = [
   { key: 'topics', label: '题材热度', icon: Flame },
   { key: 'ladder', label: '涨停梯队', icon: Layers },
   { key: 'flow', label: '逐笔/足迹', icon: Grid3x3 },
+  { key: 'pricedist', label: '分价表', icon: BarChart3 },
 ]
 
 /** 金额：元 -> 亿/万，保留符号。 */
@@ -119,6 +122,7 @@ export function Pulse() {
         {tab === 'topics' && <TopicsPanel symbol={symbol} />}
         {tab === 'ladder' && <LadderPanel />}
         {tab === 'flow' && <FlowPanel symbol={symbol} />}
+        {tab === 'pricedist' && <PriceDistPanel symbol={symbol} />}
       </div>
     </div>
   )
@@ -653,6 +657,144 @@ function FlowPanel({ symbol }: { symbol: string }) {
           <OrderflowChart pts={of.points} />
         </div>
       )}
+    </section>
+  )
+}
+
+/* ---------------------------------------------------------------- S4 分价表 */
+
+function PriceDistPanel({ symbol }: { symbol: string }) {
+  const [rowsN, setRowsN] = useState(60)
+  const { data, isFetching } = useQuery({
+    queryKey: [...QK.pulse, 'pricedist', symbol, rowsN],
+    queryFn: () => api.pulsePriceDist(symbol, { rows: rowsN }),
+    enabled: !!symbol,
+  })
+
+  const maxVol = useMemo(
+    () => Math.max(1, ...(data?.rows ?? []).map((r) => r.volume)),
+    [data?.rows],
+  )
+  // 当前价落在哪一档: 用档区间判断(当前价未必正好等于档中值)
+  const currentLevel = useMemo(() => {
+    const cur = data?.current
+    if (!data || cur == null) return null
+    return data.rows.findIndex((r) => cur >= r.low && cur < r.high)
+  }, [data])
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap text-[11px] text-muted">
+        <span>交易日 {data?.day ?? '--'}</span>
+        {data?.updated && <span>· 快照 {data.updated.slice(11, 19)}</span>}
+        <label className="flex items-center gap-1.5">
+          价格档
+          <select
+            value={rowsN}
+            onChange={(e) => setRowsN(Number(e.target.value))}
+            className="h-7 px-2 text-xs rounded-btn border border-border bg-surface text-foreground"
+          >
+            {[20, 40, 60, 100].map((n) => <option key={n} value={n}>{n} 档</option>)}
+          </select>
+        </label>
+        {data && data.rows.length > 0 && (
+          <span>· 档宽 {numText(data.step)} 元（步长取 tick 整数倍，低价股自动退化成逐价位）</span>
+        )}
+      </div>
+
+      {isFetching && !data ? (
+        <div className="flex items-center gap-2 text-xs text-muted py-6">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" /> 抓取逐笔中（首抓约 1~3 秒，之后走本地缓存）
+        </div>
+      ) : null}
+
+      {data && data.rows.length > 0 ? (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+            <Metric label="成交量" value={`${numText(data.total_volume, 0)} 手`} />
+            <Metric label="成交额" value={amountText(data.total_amount)} />
+            <Metric label="VWAP" value={numText(data.vwap)} />
+            <Metric label="POC（最密集价）" value={numText(data.poc)} cls="text-accent" />
+            <Metric label="最新价" value={numText(data.current)} />
+            <Metric
+              label="主买/主卖"
+              value={`${numText(data.buy_volume, 0)} / ${numText(data.sell_volume, 0)}`}
+              cls={data.buy_volume >= data.sell_volume ? 'text-bull' : 'text-bear'}
+            />
+          </div>
+
+          <div className="rounded-card border border-border overflow-hidden">
+            <table className="w-full text-xs border-collapse">
+              <thead className="bg-surface-2">
+                <tr className="text-muted">
+                  <th className="px-3 py-2 text-right font-medium">价格</th>
+                  <th className="px-3 py-2 text-left font-medium">成交量分布（红=主买 / 绿=主卖）</th>
+                  <th className="px-3 py-2 text-right font-medium">成交量(手)</th>
+                  <th className="px-3 py-2 text-right font-medium">占比</th>
+                  <th className="px-3 py-2 text-right font-medium">笔数</th>
+                  <th className="px-3 py-2 text-right font-medium">主买</th>
+                  <th className="px-3 py-2 text-right font-medium">主卖</th>
+                  <th className="px-3 py-2 text-right font-medium">累计</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* 价格从高到低：与盘口习惯一致，当前价上方=套牢盘 */}
+                {[...data.rows].map((r, i) => ({ r, i })).reverse().map(({ r, i: idx }) => {
+                  const isCur = currentLevel === idx
+                  const isPoc = data.poc != null && Math.abs(r.price - data.poc) < 1e-9
+                  return (
+                    <tr
+                      key={r.price}
+                      className={`border-t border-border ${isCur ? 'bg-accent/10' : ''}`}
+                    >
+                      <td className={`px-3 py-1 text-right font-mono ${isPoc ? 'text-accent font-medium' : ''}`}>
+                        {numText(r.price)}
+                        {isPoc && <span className="ml-1 text-[10px]">POC</span>}
+                        {isCur && <span className="ml-1 text-[10px] text-muted">现价</span>}
+                      </td>
+                      <td className="px-3 py-1">
+                        <div className="flex h-3 w-full overflow-hidden rounded-sm bg-surface-2">
+                          <div
+                            className="bg-bull"
+                            style={{ width: `${(r.buy / maxVol) * 100}%` }}
+                            title={`主买 ${numText(r.buy, 0)} 手`}
+                          />
+                          <div
+                            className="bg-bear"
+                            style={{ width: `${(r.sell / maxVol) * 100}%` }}
+                            title={`主卖 ${numText(r.sell, 0)} 手`}
+                          />
+                        </div>
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono">{numText(r.volume, 0)}</td>
+                      <td className="px-3 py-1 text-right font-mono text-muted">
+                        {(r.ratio * 100).toFixed(2)}%
+                      </td>
+                      <td className="px-3 py-1 text-right font-mono">{r.trades}</td>
+                      <td className="px-3 py-1 text-right font-mono text-bull">{numText(r.buy, 0)}</td>
+                      <td className="px-3 py-1 text-right font-mono text-bear">{numText(r.sell, 0)}</td>
+                      <td className="px-3 py-1 text-right font-mono text-muted">
+                        {(r.cum_ratio * 100).toFixed(1)}%
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="text-[11px] text-muted">
+            量纲：成交量=手，成交额=元。累计占比自最低价档向上累加；POC 为全日成交最密集价，
+            常被视为当日筹码重心。
+          </div>
+        </>
+      ) : !isFetching ? (
+        <EmptyState
+          icon={BarChart3}
+          title="暂无逐笔数据"
+          hint="分价表由逐笔成交聚合而来，逐笔只保留最近一个交易日。确认代码正确、或等到交易时段再看。"
+        />
+      ) : null}
     </section>
   )
 }

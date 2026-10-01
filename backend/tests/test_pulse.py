@@ -279,6 +279,86 @@ def test_footprint_empty():
     assert fp["cells"] == [] and fp["poc"] is None
 
 
+# ---------------------------------------------------------------- S4 分价表
+
+
+def test_price_dist_bins_and_units():
+    """档位按 tick 整数倍取步长; 成交量/笔数守恒, amount=元。"""
+    d = tick.price_distribution(_tick_df(), max_rows=5)
+    rows = d["rows"]
+    assert rows, "应有档位"
+    # span=0.30 / 5 档 -> 目标步长 0.06, 已是 tick(0.01) 整数倍
+    assert d["step"] == pytest.approx(0.06)
+    assert abs(d["step"] / 0.01 - round(d["step"] / 0.01)) < 1e-9, "步长必须是 tick 整数倍"
+    # 总量守恒
+    assert sum(r["volume"] for r in rows) == pytest.approx(173.0)
+    assert sum(r["trades"] for r in rows) == 6
+    # amount = price(元) x volume(手) x 100
+    expect = (10.0 * 100 + 10.1 * 10 + 10.2 * 20 + 10.3 * 30 + 10.15 * 5 + 10.0 * 8) * 100
+    assert d["total_amount"] == pytest.approx(expect)
+    assert sum(r["amount"] for r in rows) == pytest.approx(expect)
+    # 累计占比从最低档往上累加, 末档为 1
+    assert rows[-1]["cum_ratio"] == pytest.approx(1.0)
+    assert rows == sorted(rows, key=lambda r: r["price"])
+
+
+def test_price_dist_low_price_degrades_to_tick():
+    """低价股: 目标步长 < tick 时退化为逐价位(不硬分 60 档)。"""
+    df = pl.DataFrame({
+        "index": list(range(4)),
+        "time": ["09:31"] * 4,
+        "price": [3.00, 3.01, 3.02, 3.10],
+        "volume": [10.0, 20.0, 30.0, 40.0],
+        "order_count": [1, 2, 3, 4],
+        "side": ["buy", "sell", "buy", "sell"],
+        "kind": ["trade"] * 4,
+    })
+    d = tick.price_distribution(df, max_rows=60)
+    assert d["step"] == pytest.approx(0.01), "步长不得小于 tick"
+    # 3.00/3.01/3.02/3.10 各自独立成档(空档不占位, 故是 4 档而不是 11 档)
+    assert len(d["rows"]) == 4
+    assert [r["price"] for r in d["rows"]] == pytest.approx([3.005, 3.015, 3.025, 3.105])
+
+
+def test_price_dist_poc_and_current():
+    """POC = 成交量最大的档; 当前价取第一条(df 倒序, index 0 = 最新)。"""
+    d = tick.price_distribution(_tick_df(), max_rows=5)
+    # 10.00 档有 100(neutral) + 8(buy) = 108 手, 是最大档
+    poc_row = max(d["rows"], key=lambda r: r["volume"])
+    assert d["poc"] == pytest.approx(poc_row["price"])
+    assert poc_row["volume"] == pytest.approx(108.0)
+    assert d["current"] == pytest.approx(10.0), "df 倒序, 第一行就是最新价"
+    assert d["vwap"] == pytest.approx(
+        (10.0 * 100 + 10.1 * 10 + 10.2 * 20 + 10.3 * 30 + 10.15 * 5 + 10.0 * 8) / 173.0
+    )
+
+
+def test_price_dist_buy_sell_conservation():
+    """主买/主卖与 orderflow 口径一致(neutral 单列, 不计入买卖)。"""
+    d = tick.price_distribution(_tick_df(), max_rows=5)
+    assert d["buy_volume"] == pytest.approx(48.0)
+    assert d["sell_volume"] == pytest.approx(25.0)
+    assert d["neutral_volume"] == pytest.approx(100.0)
+    assert d["buy_volume"] + d["sell_volume"] + d["neutral_volume"] == pytest.approx(173.0)
+
+
+def test_price_dist_single_price_no_division_by_zero():
+    df = pl.DataFrame({
+        "index": [0, 1], "time": ["09:31", "09:31"], "price": [10.0, 10.0],
+        "volume": [5.0, 7.0], "order_count": [1, 1],
+        "side": ["buy", "sell"], "kind": ["trade", "trade"],
+    })
+    d = tick.price_distribution(df, max_rows=60)
+    assert d["step"] == pytest.approx(0.01)
+    assert len(d["rows"]) == 1
+    assert d["rows"][0]["volume"] == pytest.approx(12.0)
+
+
+def test_price_dist_empty():
+    d = tick.price_distribution(pl.DataFrame(), max_rows=60)
+    assert d["rows"] == [] and d["poc"] is None and d["current"] is None
+
+
 def test_resolve_day_prefers_preferred():
     assert str(tick.resolve_day("2026-01-01")) == "2026-01-01"
 

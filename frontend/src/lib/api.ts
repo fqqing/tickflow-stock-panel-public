@@ -3673,6 +3673,15 @@ export const api = {
     return request<PulseFootprint>(`/api/pulse/footprint?${q.toString()}`)
   },
 
+  pulsePriceDist: (symbol: string, params: { day?: string; rows?: number; force?: boolean } = {}) => {
+    const q = new URLSearchParams({ symbol })
+    for (const [k, v] of Object.entries(params)) {
+      if (v == null) continue
+      q.set(k, String(v))
+    }
+    return request<PulsePriceDist>(`/api/pulse/price-dist?${q.toString()}`)
+  },
+
   pulseTickDays: () => request<{ days: string[] }>('/api/pulse/tick-days'),
 }
 
@@ -4093,4 +4102,44 @@ export interface PulseFootprint {
   high: number
   step: number
   bucket_minutes: number
+}
+
+export interface PulsePriceDistRow {
+  /** 档中值 */
+  price: number
+  /** 档区间 [low, high) */
+  low: number
+  high: number
+  /** 手 */
+  volume: number
+  /** 元 */
+  amount: number
+  trades: number
+  /** 主动买 / 主动卖 / 竞价撮合, 手 */
+  buy: number
+  sell: number
+  neutral: number
+  /** 占全日成交量比例(小数), cum_ratio 从最低价档往上累加 */
+  ratio: number
+  cum_ratio: number
+}
+
+export interface PulsePriceDist {
+  symbol: string
+  day: string
+  updated: string | null
+  rows: PulsePriceDistRow[]
+  /** 成交最密集价(POC) */
+  poc: number | null
+  vwap: number | null
+  /** 最新一笔成交价 */
+  current: number | null
+  low: number
+  high: number
+  step: number
+  total_volume: number
+  total_amount: number
+  buy_volume: number
+  sell_volume: number
+  neutral_volume: number
 }

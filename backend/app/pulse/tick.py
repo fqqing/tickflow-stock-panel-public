@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -312,6 +313,109 @@ def footprint(df: pl.DataFrame, rows: int = 40, bucket_minutes: int = 5) -> dict
         "high": high,
         "step": step,
         "bucket_minutes": bucket_minutes,
+    }
+
+
+def price_distribution(df: pl.DataFrame, max_rows: int = 60, tick_size: float = 0.01) -> dict:
+    """分价表: 按价格档聚合成交量 / 成交额 / 笔数 / 主动买卖 + 占比。
+
+    档位自适应(这是关键): A 股一天的成交价位可以有 1000+ 个(茅台 2026-09-30 实测
+    1349 个), 逐价位全给前端既没意义也渲染不动; 但低价股(3.00~3.10)只有十几个
+    价位, 硬分成 60 档反而看不出真实成交价。
+
+    ⇒ 步长取 **tick 的整数倍**、且尽量贴近 ``(high-low)/max_rows``:
+      - 茅台: 31.55/60 = 0.526 -> step 0.53 -> 约 60 档
+      - 低价股: 0.10/60 = 0.0017 -> step 0.01 -> 10 档(自然退化成逐价位)
+
+    量纲: volume=手 / amount=元(price x volume x 100)。
+    ⚠️ df 是**倒序**(index 0 = 最新一笔, 见 _fetch_pages), 当前价取第一行。
+    """
+    empty = {
+        "rows": [], "poc": None, "vwap": None, "current": None,
+        "low": None, "high": None, "step": None,
+        "total_volume": 0.0, "total_amount": 0.0,
+        "buy_volume": 0.0, "sell_volume": 0.0, "neutral_volume": 0.0,
+    }
+    if df.is_empty():
+        return empty
+
+    work = df.filter(pl.col("price") > 0)
+    if work.is_empty():
+        return empty
+
+    low = float(work["price"].min())
+    high = float(work["price"].max())
+    # ⚠️ 全程用 **tick 的整数倍** 做整数运算。直接拿浮点算档位有两个坑(都实测踩过):
+    #   1. ceil(0.3/5/0.01) = ceil(6.000000000000001) = 7, 步长凭空多一档;
+    #   2. (3.01-3.00)/0.01 = 0.9999999999999563, floor 后把 3.01 并进 3.00 档。
+    span_ticks = int(round((high - low) / tick_size))
+    step_ticks = max(1, math.ceil(span_ticks / max(1, max_rows)))
+    step = step_ticks * tick_size
+    levels = span_ticks // step_ticks + 1 if span_ticks > 0 else 1
+
+    binned = work.with_columns(
+        (((pl.col("price") - low) / tick_size).round(0).cast(pl.Int64) // step_ticks)
+        .clip(0, levels - 1)
+        .alias("lv")
+    )
+    grouped = (
+        binned.group_by("lv")
+        .agg([
+            pl.col("volume").sum().alias("volume"),
+            pl.len().alias("trades"),
+            pl.col("volume").filter(pl.col("side") == "buy").sum().fill_null(0).alias("buy"),
+            pl.col("volume").filter(pl.col("side") == "sell").sum().fill_null(0).alias("sell"),
+            pl.col("volume").filter(pl.col("side") == "neutral").sum().fill_null(0).alias("neutral"),
+            (pl.col("price") * pl.col("volume")).sum().alias("notional"),
+        ])
+        .sort("lv")
+    )
+
+    total_volume = float(work["volume"].sum() or 0.0)
+    rows: list[dict] = []
+    cum = 0.0
+    for row in grouped.to_dicts():
+        lv = int(row["lv"])
+        vol = float(row["volume"] or 0.0)
+        ratio = vol / total_volume if total_volume else 0.0
+        cum += ratio
+        mid = low + (lv + 0.5) * step
+        rows.append({
+            # 档中值(前端主列) + 档区间(悬停/分组用)
+            "price": round(mid, 4),
+            "low": round(low + lv * step, 4),
+            "high": round(low + (lv + 1) * step, 4),
+            "volume": vol,
+            # notional 是 price(元) x volume(手), 乘 100 才是元
+            "amount": float(row["notional"] or 0.0) * 100.0,
+            "trades": int(row["trades"] or 0),
+            "buy": float(row["buy"] or 0.0),
+            "sell": float(row["sell"] or 0.0),
+            "neutral": float(row["neutral"] or 0.0),
+            "ratio": round(ratio, 6),
+            "cum_ratio": round(cum, 6),
+        })
+
+    poc_row = max(rows, key=lambda r: r["volume"]) if rows else None
+    notional_total = float((work["price"] * work["volume"]).sum() or 0.0)
+    buy_total = sum(r["buy"] for r in rows)
+    sell_total = sum(r["sell"] for r in rows)
+    neutral_total = sum(r["neutral"] for r in rows)
+
+    return {
+        "rows": rows,
+        "poc": poc_row["price"] if poc_row else None,
+        "vwap": (notional_total / total_volume) if total_volume else None,
+        # df 倒序: 第一行就是最新一笔
+        "current": float(work["price"][0]) if work.height else None,
+        "low": low,
+        "high": high,
+        "step": step,
+        "total_volume": total_volume,
+        "total_amount": notional_total * 100.0,
+        "buy_volume": buy_total,
+        "sell_volume": sell_total,
+        "neutral_volume": neutral_total,
     }
 
 

@@ -185,6 +185,23 @@ def get_footprint(
     return data
 
 
+@router.get("/price-dist")
+def get_price_dist(
+    symbol: str = Query(...),
+    day: Annotated[str | None, Query(description="YYYY-MM-DD, 默认今天")] = None,
+    rows: int = Query(60, ge=5, le=200, description="最多多少个价格档(步长取 tick 整数倍)"),
+    force: bool = Query(False),
+):
+    """分价表: 按价格档聚合成交量 / 成交额 / 笔数 / 主动买卖 + 占比与 POC。"""
+    sym = _require(symbol)
+    df, day_key = tick.fetch_ticks_meta(sym, day=day, force=force)
+    data = tick.price_distribution(df, max_rows=rows)
+    data["symbol"] = sym
+    data["day"] = str(day_key)
+    data["updated"] = tick.last_updated(sym, day_key)
+    return data
+
+
 @router.get("/tick-days")
 def get_tick_days():
     """已落盘逐笔的交易日列表(最新在前)。"""
