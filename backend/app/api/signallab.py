@@ -36,6 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from app.plugins.eltdx.provider import market_meta
 from app.signallab.insight import analyze_attribution_stream
 from app.signallab.lab import (
     CONTEXT_FEATURES,
@@ -156,6 +157,31 @@ def _clean_scalar(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
+
+
+def _attach_names(frame: pl.DataFrame) -> pl.DataFrame:
+    """给台账补 ``name`` 列(代码 -> 中文名称)。
+
+    台账是策略跑出来的, 上游只回代码。前端要显示名称就必须在这里补 —— 本地标的
+    维表带 mtime 缓存, 在请求路径上调用是安全的。已有 name 列(上游带出来了)则不动。
+    """
+    if frame.is_empty() or "symbol" not in frame.columns or "name" in frame.columns:
+        return frame
+    meta = market_meta()
+    names = [(meta.get(str(s)) or {}).get("name") for s in frame["symbol"].to_list()]
+    return frame.with_columns(pl.Series("name", names, dtype=pl.Utf8))
+
+
+def _fill_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """dict 列表版的名称兜底: 只在缺 name / name 为空时补, 不覆盖上游已有值。"""
+    need = [str(r["symbol"]) for r in rows if r.get("symbol") and not r.get("name")]
+    if not need:
+        return rows
+    meta = market_meta()
+    for row in rows:
+        if row.get("symbol") and not row.get("name"):
+            row["name"] = (meta.get(str(row["symbol"])) or {}).get("name")
+    return rows
 
 
 def _data_dir(request: Request):
@@ -421,6 +447,7 @@ def get_outcomes(
     if total and sort in frame.columns:
         frame = frame.sort(sort, descending=descending)
     page = frame.slice(offset, limit)
+    page = _attach_names(page)
     return {
         "dataset": meta,
         "total": total,
@@ -595,6 +622,7 @@ def get_score_today(
         raise HTTPException(status_code=400, detail=str(e)) from e
     result["dataset"] = meta
     result["requested_horizon"] = horizon
+    result["rows"] = _fill_names(list(result.get("rows") or []))
     return result
 
 

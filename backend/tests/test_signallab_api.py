@@ -306,3 +306,44 @@ def test_attribution_falls_back_to_longest_horizon(client) -> None:
         "strategy_id": STRATEGY_ID, "features": "not_a_column",
     })
     assert bad.status_code == 400
+
+
+def test_outcomes_rows_carry_name_column(client) -> None:
+    """台账行必须带 name: 前端要显示中文名称, 而策略输出只有代码。"""
+    client.post("/api/signallab/runs", json={
+        "strategy_id": STRATEGY_ID, "start": START.isoformat(), "end": END.isoformat(),
+    })
+    payload = client.get("/api/signallab/outcomes", params={
+        "strategy_id": STRATEGY_ID, "limit": 5, "filled_only": False,
+    }).json()
+    assert "name" in payload["columns"]
+    assert all("name" in row for row in payload["rows"])
+
+
+def test_attach_names_is_idempotent_and_skips_existing(monkeypatch) -> None:
+    """已有 name 列不能被覆盖(上游带出来的名称优先); 无 symbol 列则原样返回。"""
+    monkeypatch.setattr(api, "market_meta", lambda: {"600000.SH": {"name": "浦发银行"}})
+
+    tagged = api._attach_names(pl.DataFrame({"symbol": ["600000.SH"], "name": ["自定义名称"]}))
+    assert tagged["name"][0] == "自定义名称", "已有 name 列必须原样保留"
+
+    filled = api._attach_names(pl.DataFrame({"symbol": ["600000.SH", "999999.XX"]}))
+    assert filled["name"].to_list() == ["浦发银行", None]
+
+    empty = api._attach_names(pl.DataFrame({"symbol": []}))
+    assert empty.height == 0 and "name" not in empty.columns
+
+    no_symbol = api._attach_names(pl.DataFrame({"x": [1]}))
+    assert no_symbol.columns == ["x"]
+
+
+def test_fill_names_only_patches_missing(monkeypatch) -> None:
+    monkeypatch.setattr(api, "market_meta", lambda: {"600000.SH": {"name": "浦发银行"}})
+    rows = api._fill_names([
+        {"symbol": "600000.SH"},
+        {"symbol": "600000.SH", "name": "上游名称"},
+        {"symbol": "000001.SZ"},
+    ])
+    assert rows[0]["name"] == "浦发银行"
+    assert rows[1]["name"] == "上游名称", "上游已有名称不能被维表覆盖"
+    assert rows[2]["name"] is None

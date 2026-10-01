@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { FlaskConical, Play, RefreshCw, Loader2, Info, Sparkles, Target, SlidersHorizontal } from 'lucide-react'
 import {
   api,
@@ -548,7 +548,11 @@ export function SignalLab() {
                       {scoreToday.rows.map((r: SignalLabScoreRow, i: number) => (
                         <tr key={r.symbol} className="border-t border-border/60 hover:bg-elevated/30">
                           <td className="px-3 py-1.5 text-muted">{i + 1}</td>
-                          <td className="px-3 py-1.5 font-mono text-secondary">{r.symbol}</td>
+                          <td className="px-3 py-1.5 font-mono">
+                            <Link to={`/stock/${encodeURIComponent(r.symbol)}`} className="text-accent hover:underline">
+                              {r.symbol}
+                            </Link>
+                          </td>
                           <td className="px-3 py-1.5">{r.name ?? '--'}</td>
                           <td className="px-3 py-1.5 text-right num tabular-nums">{numText(r.close)}</td>
                           <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.change_pct)}`}>
@@ -622,6 +626,7 @@ export function SignalLab() {
                 <thead>
                   <tr className="bg-elevated/40 text-muted">
                     <th className="px-3 py-2 text-left font-medium">代码</th>
+                    <th className="px-3 py-2 text-left font-medium">名称</th>
                     <th className="px-3 py-2 text-left font-medium">信号日</th>
                     <th className="px-3 py-2 text-left font-medium">成交日</th>
                     <th className="px-3 py-2 text-right font-medium">成交价</th>
@@ -636,7 +641,12 @@ export function SignalLab() {
                 <tbody>
                   {outcomes.rows.map((r: Record<string, unknown>, i: number) => (
                     <tr key={`${String(r.symbol)}-${String(r.signal_date)}-${i}`} className="border-t border-border/60 hover:bg-elevated/30">
-                      <td className="px-3 py-1.5 font-mono text-secondary">{String(r.symbol)}</td>
+                      <td className="px-3 py-1.5 font-mono">
+                        <Link to={`/stock/${encodeURIComponent(String(r.symbol))}`} className="text-accent hover:underline">
+                          {String(r.symbol)}
+                        </Link>
+                      </td>
+                      <td className="px-3 py-1.5">{String(r.name ?? '--')}</td>
                       <td className="px-3 py-1.5 text-muted">{String(r.signal_date)}</td>
                       <td className="px-3 py-1.5 text-muted">{String(r.fill_date ?? '--')}</td>
                       <td className="px-3 py-1.5 text-right num tabular-nums">{numText(r.entry_price)}</td>
