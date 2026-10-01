@@ -39,6 +39,16 @@ SCRIPTS_DIR = BACKEND_DIR / "scripts"
 sys.path.insert(0, str(BACKEND_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+# 加载根 .env, 让定时任务启动时也能读到 DAILY_LARK_PUSH_ENABLED 开关
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(BACKEND_DIR.parent / ".env")
+
+_ENABLED_FLAG = str(os.environ.get("DAILY_LARK_PUSH_ENABLED", "true")).strip().lower()
+if _ENABLED_FLAG in ("0", "false", "no", "disabled"):
+    print("[daily_lark_push] 已禁用: DAILY_LARK_PUSH_ENABLED=" + _ENABLED_FLAG)
+    sys.exit(0)
+
 import push_screener_to_lark as push  # noqa: E402
 
 logger = logging.getLogger("daily_lark_push")
