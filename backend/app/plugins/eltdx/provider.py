@@ -55,6 +55,23 @@ eltdx(PyPI 包, 通达信 7709 协议)同场景实测(2026-09-30):
   要长期历史仍需每日定时落盘累积, 与分钟同步链路同理。
 - 非交易日(周末/节假日)用 anchor_date 会返回前一个交易日的尾部数据, 被日期
   过滤掉后为空, 属预期行为(浪费一次空请求, 无害)。
+
+日线(daily)补充(2026-10-01 实测)
+================================
+``cli.bars.get(codes, period="day", count=800, anchor_date=...)``
+
+- **count 上限 800**(硬限制, 传 1000 直接 ``ValueError(page size must be
+  between 1 and 800)``) => 长历史必须分段, 用 anchor_date 逐段前移。
+  实测 4 段即回到 2013-08-08, 每段仅 0.03~0.05s。
+- **性能**: 100 只 x 800 根 = 71385 根只要 0.65s, 全市场 5400 只 8 并发约 5s。
+- **量纲**: ``volume_lots``=手 / ``amount``=元, 与内部口径一致。分板块对拍
+  (主板沪/深/创业板/科创板 688/北交所 920) 与存量 tushare 日K 偏差均 <= 0.002%,
+  **没有腾讯系那种"科创板 vol 单位是股"的板块差异**。
+- ⚠️ **指数 volume 是"手", 而存量 tushare 指数日K 是"股"**(上证指数对拍
+  4523506.88 手 vs 本地 452350675 股)。8 只指数实测比值精确 1.000000 =>
+  指数必须 x100 才能与存量数据同口径。ETF 与股票一致, 不换算。
+- ⚠️ **codes 传 str 时上游返回 KlineSeries 而非 dict**(只有传 list 才是
+  ``{code: KlineSeries}``)。统一传 list 避免分支。
 """
 
 from __future__ import annotations
@@ -72,11 +89,12 @@ from typing import Any
 import polars as pl
 
 from app.data_providers.base import AssetType
+from app.data_providers.normalizer import normalize_daily
 from app.market_time import CN_TZ, cn_today
 
 logger = logging.getLogger(__name__)
 
-_DATASETS = ("minute", "realtime")
+_DATASETS = ("minute", "realtime", "daily")
 
 #: realtime 行契约, 与 quote_service._build_daily 消费的列一致。
 #: 量纲: volume=手 / amount=元 / change_pct,amplitude,turnover_rate 均为**小数**。
@@ -128,6 +146,20 @@ _MAX_WORKERS = 8
 _MAX_DAYS = 100
 
 _MINUTE_CANONICAL = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+
+_DAILY_CANONICAL = [
+    "symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts",
+]
+
+#: 日线单次请求的 bar 上限。**800 是硬上限**: 实测 count=1000 直接
+#: ValueError(page size must be between 1 and 800)。长历史只能分段回补。
+_DAY_PAGE_MAX = 800
+
+#: 日线分段上限。8 段 x 800 = 6400 根 ≈ 26 年, 足够覆盖面板最长预热窗口(261 根)。
+_DAY_MAX_SEGMENTS = 8
+
+#: 日线批量代码数。实测 100 只 x 800 根只要 0.65s, 与分钟同值即可。
+_DAY_BATCH = 100
 
 #: 面板后缀 -> eltdx 市场前缀。
 _SUFFIX_TO_PREFIX: dict[str, str] = {"SH": "sh", "SZ": "sz", "BJ": "bj"}
@@ -277,6 +309,99 @@ def _fetch_one(task: tuple[date, list[tuple[str, str]], str, int]) -> list[dict]
                 }
             )
     return out
+
+
+def _is_index_symbol(sym: str) -> bool:
+    """指数判定: 上证 000xxx / 深证 399xxx(其余指数族也落在这两个号段)。
+
+    ETF 是 51/56/58/15 开头, 股票是 60/00/30/68/8/92 开头, 都不冲突。
+    """
+    code, _, suffix = str(sym or "").partition(".")
+    suffix = suffix.upper()
+    if suffix == "SH" and code.startswith("000"):
+        return True
+    return suffix == "SZ" and code.startswith("399")
+
+
+def _estimate_day_bars(start: date | None, end: date) -> int:
+    """估算窗口内需要的日K根数(用于决定分段数)。
+
+    A股每年约 243 个交易日(占日历日 0.666), 按 0.70 估并多留 10 根余量 ——
+    估多了无害(末尾按日期过滤掉), 估少了会漏历史。
+    """
+    if start is None:
+        return _DAY_PAGE_MAX  # 未知起点: 只取最近一页(约 3.3 年)
+    span = (end - start).days + 1
+    if span <= 0:
+        return 1
+    return int(min(span * 0.70 + 10, _DAY_PAGE_MAX * _DAY_MAX_SEGMENTS))
+
+
+def _fetch_day_batch(
+    task: tuple[list[tuple[str, str]], date, int, bool],
+) -> tuple[list[dict], date | None]:
+    """拉一批代码的一段日K。
+
+    返回 ``(rows, 本批最早日期)`` —— 最早日期用于把下一段的 anchor 往前推。
+    整批失败返回 ``([], None)``, 调用方据此判定"更早也没有了"。
+    """
+    batch, anchor, count, index_volume = task
+    codes = [code for _, code in batch]
+    try:
+        res = _client().bars.get(  # type: ignore[attr-defined]
+            codes, period="day", count=count, anchor_date=anchor,
+        )
+    except Exception as e:
+        logger.debug("eltdx 日K拉取失败 (anchor=%s, %d 只): %s", anchor, len(codes), e)
+        return [], None
+    if not isinstance(res, dict):
+        # codes 传 str 时上游返回 KlineSeries 而非 dict; 这里始终传 list, 仅作保底。
+        res = {codes[0]: res} if len(codes) == 1 else {}
+
+    sym_of = {code: sym for sym, code in batch}
+    rows: list[dict] = []
+    earliest: date | None = None
+    for full_code, series in res.items():
+        sym = sym_of.get(full_code)
+        if sym is None:
+            continue
+        bars = getattr(series, "bars", None)
+        if not bars:
+            continue
+        for b in bars:
+            t = getattr(b, "time", None)
+            if t is None:
+                continue
+            day = t.date()
+            # anchor 是窗口末尾; 上游偶尔给 anchor 之后的 bar, 丢弃以免引入未来数据。
+            if day > anchor:
+                continue
+            close = _f(b.close)
+            volume = _f(b.volume_lots)
+            if close is None or volume is None:
+                continue
+            if earliest is None or day < earliest:
+                earliest = day
+            open_ = _f(b.open)
+            high = _f(b.high)
+            low = _f(b.low)
+            amount = _f(b.amount)
+            rows.append(
+                {
+                    "symbol": sym,
+                    "date": day,
+                    "open": close if open_ is None else open_,
+                    "high": close if high is None else high,
+                    "low": close if low is None else low,
+                    "close": close,
+                    # 指数: 上游是"手", 存量 tushare 是"股" => x100 对齐(8 只指数实测比值 1.000000)
+                    "volume": volume * 100.0 if index_volume else volume,
+                    "amount": volume * 100.0 * close if amount is None else amount,
+                    # 日K收盘定版: 15:00 的行情时间戳让完整性判定直接认作"收盘后写入"。
+                    "quote_ts": int(t.timestamp() * 1000),
+                }
+            )
+    return rows, earliest
 
 
 #: eltdx 市场前缀 -> 面板后缀(快照回包用 exchange + code 表达代码)。
@@ -516,6 +641,16 @@ class EltdxMinuteProvider:
 
     # ---- 测试(设置页试拉) ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
+        if dataset == "daily":
+            syms = symbols or ["600519.SH", "000001.SZ", "688981.SH", "920002.BJ"]
+            df = self.get_daily(syms, None, None, "stock")
+            return {
+                "provider": self.name,
+                "dataset": "daily",
+                "rows": df.height,
+                "columns": df.columns,
+                "preview": df.head(5).to_dicts() if not df.is_empty() else [],
+            }
         if dataset == "minute":
             df = self.get_minute(symbols or ["600519.SH"], None, None)
             return {
@@ -601,6 +736,88 @@ class EltdxMinuteProvider:
         df = df.with_columns(pl.col("datetime").cast(pl.Datetime("us"), strict=False))
         keep = [c for c in _MINUTE_CANONICAL if c in df.columns]
         return df.select(keep).sort(["symbol", "datetime"])
+
+    def get_daily(
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: AssetType = "stock",
+        on_chunk_done: Callable[[int, int], None] | None = None,
+    ) -> pl.DataFrame:
+        """日线(不复权) —— 分段回补 + 批量并发。
+
+        与 tushare daily 的差异: 这里**一次请求就能拿 800 根**(约 3.3 年), 且
+        100 只并发只要 0.65s, 适合做全市场日K的主源或灾备。
+
+        ⚠️ 上游 count 上限 800, 超出必须分段(anchor 逐段前移), 否则直接
+        ValueError。分段之间串行依赖, 段内批量并发。
+        """
+        if not symbols:
+            if on_chunk_done:
+                on_chunk_done(1, 1)
+            return pl.DataFrame()
+
+        pairs = [(s, app_to_eltdx(s)) for s in symbols]
+        pairs = [(s, c) for s, c in pairs if c]
+        if not pairs:
+            # 全部被过滤掉(港美股等)时仍回调一次, 否则前端进度条卡在 0。
+            if on_chunk_done:
+                on_chunk_done(1, 1)
+            return pl.DataFrame()
+
+        end = end_time.date() if isinstance(end_time, datetime) else (end_time or date.today())
+        start = start_time.date() if isinstance(start_time, datetime) else start_time
+        # 指数 volume 口径与股票不同(手 vs 股), 由 asset_type 与代码段双判定。
+        index_volume = asset_type == "index"
+
+        need = _estimate_day_bars(start, end)
+        total_segments = max(1, -(-need // _DAY_PAGE_MAX))  # ceil
+        batches = [pairs[i : i + _DAY_BATCH] for i in range(0, len(pairs), _DAY_BATCH)]
+
+        rows: list[dict] = []
+        anchor = end
+        done = 0
+        for seg in range(_DAY_MAX_SEGMENTS):
+            remaining = need - seg * _DAY_PAGE_MAX
+            if remaining <= 0 or seg >= total_segments:
+                break
+            count = int(min(_DAY_PAGE_MAX, remaining))
+            tasks = [(b, anchor, count, index_volume) for b in batches]
+            seg_rows: list[dict] = []
+            earliest: date | None = None
+            workers = min(_MAX_WORKERS, max(1, len(tasks)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for part, e in pool.map(_fetch_day_batch, tasks):
+                    seg_rows.extend(part)
+                    if e is not None and (earliest is None or e < earliest):
+                        earliest = e
+            rows.extend(seg_rows)
+            done = seg + 1
+            if on_chunk_done:
+                on_chunk_done(done, total_segments)
+            if earliest is None:
+                break  # 本段空 => 更早也没有
+            if start is not None and earliest <= start:
+                break  # 已覆盖到窗口起点
+            if earliest >= anchor:
+                break  # 上游不再往前给(已到历史尽头)
+            anchor = earliest - timedelta(days=1)
+
+        # 提前结束时补一次进度, 否则前端进度条停在中间。
+        if on_chunk_done and done < total_segments:
+            on_chunk_done(total_segments, total_segments)
+
+        if not rows:
+            return pl.DataFrame()
+        df = pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date, strict=False))
+        if start is not None:
+            df = df.filter(pl.col("date") >= start)
+        df = df.filter(pl.col("date") <= end)
+        # 段之间理论上不重叠, 但同一批可能被重复请求, 去重兜底。
+        df = df.unique(subset=["symbol", "date"], keep="first").sort(["symbol", "date"])
+        # 走统一 normalizer: 列名/类型归一 + 过滤停牌日(open=high=0)。
+        return normalize_daily(df, source=self.name)
 
 
 def availability() -> tuple[bool, str]:

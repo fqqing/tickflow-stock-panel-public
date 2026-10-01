@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -260,8 +261,9 @@ def test_test_dataset_minute(provider, monkeypatch):
 
 
 def test_test_dataset_rejects_unknown(provider):
+    """daily 已支持(见下节), 未声明的才应报错。"""
     with pytest.raises(ValueError):
-        provider.test_dataset("daily")
+        provider.test_dataset("financial")
 
 
 def test_bars_per_day_matches_a_share_session():
@@ -415,3 +417,239 @@ def test_test_dataset_realtime(monkeypatch):
     assert info["dataset"] == "realtime"
     assert info["rows"] == 2
     assert info["columns"] == eltdx_mod._RT_COLUMNS
+
+
+# ---- daily (bars.get period="day") ----
+
+def test_datasets_declare_daily():
+    assert "daily" in eltdx_mod._DATASETS
+    assert "daily" in EltdxMinuteProvider().config.datasets
+
+
+def test_is_index_symbol():
+    """上证 000xxx / 深证 399xxx 是指数; 股票与 ETF 不得误判。"""
+    assert eltdx_mod._is_index_symbol("000001.SH") is True
+    assert eltdx_mod._is_index_symbol("399001.SZ") is True
+    assert eltdx_mod._is_index_symbol("600519.SH") is False
+    assert eltdx_mod._is_index_symbol("000001.SZ") is False  # 平安银行
+    assert eltdx_mod._is_index_symbol("510300.SH") is False  # ETF
+
+
+def test_estimate_day_bars():
+    end = date(2026, 9, 30)
+    # 无起点: 只取一页
+    assert eltdx_mod._estimate_day_bars(None, end) == eltdx_mod._DAY_PAGE_MAX
+    # 一年约 243 个交易日, 按 0.70 估 => 约 256, 留足余量
+    est = eltdx_mod._estimate_day_bars(date(2025, 9, 30), end)
+    assert 243 <= est <= 300
+    # 超长窗口被段数上限封顶
+    assert eltdx_mod._estimate_day_bars(date(1990, 1, 1), end) == (
+        eltdx_mod._DAY_PAGE_MAX * eltdx_mod._DAY_MAX_SEGMENTS
+    )
+
+
+def test_page_size_cap_is_800():
+    """上游硬限制: count > 800 直接 ValueError, 长历史只能分段。"""
+    assert eltdx_mod._DAY_PAGE_MAX == 800
+
+
+class _FakeDayBars:
+    """按 mapping 返回**固定**日K(不管 anchor), 记录调用参数。
+
+    故意不做 anchor 过滤, 以便验证 provider 自己会丢弃 anchor 之后的 bar。
+    """
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls: list[dict] = []
+
+    def get(self, codes, *, period, count, anchor_date):
+        self.calls.append(
+            {"codes": list(codes), "period": period, "count": count, "anchor_date": anchor_date}
+        )
+        return {c: self.mapping[c] for c in codes if c in self.mapping}
+
+
+class _FakeDayBarsStream:
+    """按 anchor **动态生成**一段日K(模拟上游有连续历史), 用于验证分段。
+
+    per_code=1 时 earliest == anchor, 用来模拟"上游已到历史尽头"。
+    """
+
+    def __init__(self, codes, per_code: int = 3, price: float = 10.0):
+        self.codes = set(codes)
+        self.per_code = per_code
+        self.price = price
+        self.calls: list[dict] = []
+
+    def get(self, codes, *, period, count, anchor_date):
+        self.calls.append(
+            {"codes": list(codes), "period": period, "count": count, "anchor_date": anchor_date}
+        )
+        out = {}
+        n = min(self.per_code, count)
+        for c in codes:
+            if c not in self.codes:
+                continue
+            bars = []
+            for i in reversed(range(n)):
+                d = anchor_date - timedelta(days=i)
+                bars.append(
+                    _FakeBar(
+                        datetime(d.year, d.month, d.day, 15, 0),
+                        self.price, self.price + 0.5, self.price - 0.5, self.price,
+                        100.0, 100.0 * 100 * self.price,
+                    )
+                )
+            out[c] = _FakeSeries(bars)
+        return out
+
+
+class _FakeDayClient:
+    def __init__(self, bars):
+        self.bars = bars
+
+
+def _day_series(code: str, days: list[date], base_price: float = 10.0):
+    """构造日K series; volume 用 100 手, amount = 100*100*price。"""
+    bars = [
+        _FakeBar(
+            datetime(d.year, d.month, d.day, 15, 0),
+            base_price, base_price + 0.5, base_price - 0.5, base_price,
+            100.0, 100.0 * 100 * base_price,
+        )
+        for d in days
+    ]
+    return {code: _FakeSeries(bars)}
+
+
+def test_get_daily_schema_and_units(monkeypatch):
+    """日K schema = DAILY_COLS, date 是 Date, volume=手 / amount=元。"""
+    day = date(2026, 9, 30)
+    fake = _FakeDayBars(_day_series("sh600519", [day]))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    df = EltdxMinuteProvider().get_daily(
+        ["600519.SH"], datetime(2026, 9, 29), datetime(2026, 9, 30), "stock"
+    )
+    assert not df.is_empty()
+    for col in ("symbol", "date", "open", "high", "low", "close", "volume", "amount"):
+        assert col in df.columns
+    row = df.row(0, named=True)
+    assert row["date"] == day
+    assert row["volume"] == 100.0
+    assert row["amount"] == pytest.approx(100.0 * 100 * 10.0)
+    assert df.schema["date"] == pl.Date
+
+
+def test_get_daily_index_volume_scaled_by_100(monkeypatch):
+    """指数: 上游是「手」, 存量口径是「股」 => 必须 x100。"""
+    day = date(2026, 9, 30)
+    fake = _FakeDayBars(_day_series("sh000001", [day]))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    df = EltdxMinuteProvider().get_daily(
+        ["000001.SH"], datetime(2026, 9, 29), datetime(2026, 9, 30), "index"
+    )
+    assert df["volume"][0] == pytest.approx(100.0 * 100)
+    # amount 不换算
+    assert df["amount"][0] == pytest.approx(100.0 * 100 * 10.0)
+
+
+def test_get_daily_etf_not_scaled(monkeypatch):
+    """ETF 与股票同口径(手), 不得误用指数的 x100。"""
+    day = date(2026, 9, 30)
+    fake = _FakeDayBars(_day_series("sh510300", [day]))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    df = EltdxMinuteProvider().get_daily(
+        ["510300.SH"], datetime(2026, 9, 29), datetime(2026, 9, 30), "etf"
+    )
+    assert df["volume"][0] == pytest.approx(100.0)
+
+
+def test_get_daily_filters_out_of_window(monkeypatch):
+    """窗口外的 bar 必须被过滤(上游按 count 返回, 不认 start/end)。"""
+    days = [date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 28), date(2026, 9, 29)]
+    fake = _FakeDayBars(_day_series("sh600519", days))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    df = EltdxMinuteProvider().get_daily(
+        ["600519.SH"], datetime(2026, 9, 28), datetime(2026, 9, 29), "stock"
+    )
+    got = sorted(df["date"].to_list())
+    assert got == [date(2026, 9, 28), date(2026, 9, 29)]
+
+
+def test_get_daily_segments_long_history(monkeypatch):
+    """count 上限 800 => 长历史必须分段, anchor 逐段前移。"""
+    fake = _FakeDayBarsStream(["sh600519"], per_code=3)
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    EltdxMinuteProvider().get_daily(["600519.SH"], datetime(2020, 1, 1), datetime(2026, 9, 30), "stock")
+    assert len(fake.calls) >= 2, "长窗口应触发多段请求"
+    anchors = [c["anchor_date"] for c in fake.calls]
+    assert anchors == sorted(anchors, reverse=True), "anchor 必须逐段前移"
+    assert len(set(anchors)) == len(anchors), "anchor 不得重复(否则死循环)"
+    assert all(c["count"] <= eltdx_mod._DAY_PAGE_MAX for c in fake.calls)
+    assert all(c["period"] == "day" for c in fake.calls)
+
+
+def test_get_daily_stops_when_upstream_exhausted(monkeypatch):
+    """上游不再往前给数据(earliest == anchor)时必须停止, 不能空转到段数上限。"""
+    fake = _FakeDayBarsStream(["sh600519"], per_code=1)
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    EltdxMinuteProvider().get_daily(["600519.SH"], datetime(1990, 1, 1), datetime(2026, 9, 30), "stock")
+    assert len(fake.calls) == 1
+
+
+def test_get_daily_progress_callback_completes(monkeypatch):
+    """提前结束时必须补一次进度到 total, 否则前端进度条卡住。"""
+    fake = _FakeDayBarsStream(["sh600519"], per_code=1)
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    seen: list[tuple[int, int]] = []
+    EltdxMinuteProvider().get_daily(
+        ["600519.SH"], datetime(1990, 1, 1), datetime(2026, 9, 30), "stock",
+        on_chunk_done=lambda c, t: seen.append((c, t)),
+    )
+    assert seen
+    assert seen[-1][0] == seen[-1][1], "最后一个进度必须是 100%"
+
+
+def test_get_daily_filters_foreign_and_empty(monkeypatch):
+    provider = EltdxMinuteProvider()
+    assert provider.get_daily([], None, None).is_empty()
+    fake = _FakeDayBars({})
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    assert provider.get_daily(["AAPL.US", "00700.HK"], None, None).is_empty()
+    assert not fake.calls, "全部被过滤时不应发起任何请求"
+
+
+def test_get_daily_survives_upstream_error(monkeypatch):
+    class _Boom:
+        def get(self, *a, **k):
+            raise RuntimeError("boom")
+
+    class _Cli:
+        bars = _Boom()
+
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _Cli())
+    df = EltdxMinuteProvider().get_daily(["600519.SH"], datetime(2026, 9, 1), datetime(2026, 9, 30))
+    assert df.is_empty()
+
+
+def test_get_daily_drops_future_bars(monkeypatch):
+    """anchor 之后的 bar 必须丢弃, 否则会引入未来数据。"""
+    future = date(2026, 10, 5)
+    day = date(2026, 9, 30)
+    fake = _FakeDayBars(_day_series("sh600519", [day, future]))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    df = EltdxMinuteProvider().get_daily(
+        ["600519.SH"], datetime(2026, 9, 29), datetime(2026, 9, 30), "stock"
+    )
+    assert date(2026, 10, 5) not in df["date"].to_list()
+
+
+def test_test_dataset_daily(monkeypatch):
+    day = date(2026, 9, 30)
+    fake = _FakeDayBars(_day_series("sh600519", [day]))
+    monkeypatch.setattr(eltdx_mod, "_client", lambda: _FakeDayClient(fake))
+    info = EltdxMinuteProvider().test_dataset("daily", ["600519.SH"])
+    assert info["dataset"] == "daily"
+    assert info["rows"] == 1
+    assert "close" in info["columns"]
