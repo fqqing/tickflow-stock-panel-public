@@ -1,26 +1,18 @@
-"""B2: 每日选股结果推送飞书多维表格。
+"""B2 命令行版: 选股结果推送飞书多维表格。
 
-从**运行中的后端** HTTP API 取矩阵原生策略的最新结果
-(底部结构 / 向上趋势并突破 / 趋势擒龙 / 启动策略), 按各表字段映射后经
-lark_bitable 通道推送, 按 (代码, 日期) 去重, 同一天重复运行安全。
+面板上线后**常用路径是前端**: 策略页「推飞书」按钮选策略 + 选日期即时推
+(走 /api/lark/push)。本脚本保留给命令行 / 计划任务 / 调试。
 
-为什么走 HTTP 而不是离线自举 repo+engine:
-  后端进程里 enriched 缓存 / 策略引擎都已预热, 离线脚本重走一遍既慢又容易口径漂移;
-  与面板看到的结果严格一致。
+记录映射与推送实现统一在 ``app.services.lark_screener`` —— 本文件只是薄壳:
+  - 取数走 HTTP (脚本是独立进程, 拿不到后端内存里的 repo / strategy_engine);
+  - 拿到 rows 之后全部复用 service, 口径与面板严格一致。
 
 用法(盘后跑, 后端需在运行)::
 
-    python backend/scripts/push_screener_to_lark.py                 # 三策略全推
+    python backend/scripts/push_screener_to_lark.py                 # 全部已配置的表
     python backend/scripts/push_screener_to_lark.py --dry-run       # 只看记录不推送
     python backend/scripts/push_screener_to_lark.py --only trend_dragon,bottom_structure
     python backend/scripts/push_screener_to_lark.py --as-of 2026-09-30 --force
-
-字段口径备忘(与 qushiqinlong 源脚本推送的表结构对齐):
-  - 涨跌幅%: screener 返回小数, 推送时 x100 (表内是百分数数值)。
-  - 趋势擒龙表 MA13: enriched 无 ma13 (只有 ma5/10/20/30/60), 置空。
-  - 趋势擒龙表 资金动能: 逐只调 /api/kline/daily?indicators=capital_momentum 取 cm_value
-    (选中股票通常只有几十只, 代价可接受; --no-enrich 可关)。
-  - 底部结构表 信号状态/钝化类型: 策略矩阵内部值, 输出行不携带, 置空。
 """
 from __future__ import annotations
 
@@ -35,46 +27,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import lark_bitable as lb
+from app.services.lark_screener import (  # noqa: F401  (re-export, 单测按名字取)
+    _LIMIT_UP_BY_BOARD,
+    STRATEGY_TABLES,
+    _abnormal_records,
+    build_records,
+    push_records_for,
+)
+
+__all__ = ["STRATEGY_TABLES", "_abnormal_records", "build_records", "main", "run"]
 
 logger = logging.getLogger("push_screener_to_lark")
-
-# ---------------------------------------------------------------------------
-# 数据源 -> 目标表 映射
-#   前三个沿用 qushiqinlong 三表 (走 /api/screener/run_preset);
-#   abnormal 走 /api/abnormal/overview (交易所异动规则口径), 表字段各不相同,
-#   故 key_fields / date_fields 按表配置而非常量。
-# ---------------------------------------------------------------------------
-STRATEGY_TABLES: dict[str, dict] = {
-    "bottom_structure": {
-        "label": "底部结构",
-        "base_token": "EEYSbsdLpa9QkZsmGyVc7vCCnbb",
-        "table_id": "tbl8TfrGiJYfzDd7",
-    },
-    "upward_trend_breakout": {
-        "label": "向上趋势并突破",
-        "base_token": "E1yLbkvgQaO28rssEbAca1twnxc",
-        "table_id": "tbl9qX3qJx0Wr5vf",
-    },
-    "trend_dragon": {
-        "label": "趋势擒龙",
-        "base_token": "S4lKbOf6TaQ7A2sFw4hcDbyanFE",
-        "table_id": "tbl8ZWQKMgGqyawK",
-    },
-    "abnormal": {
-        "label": "异动预警",
-        "base_token": "G5pgbvQSIaJHu6sJibNcK43Inkb",
-        "table_id": "tbllEDcfkJ6JR06M",
-        "key_fields": ("代码", "日期"),
-        "date_fields": ("日期",),
-    },
-    # 启动策略在面板策略池里有, 但飞书侧还没有对应表 —— base_token/table_id
-    # 待补。留 None 时 run() 会跳过并告警, 不会误推进异动预警表。
-    "startup_surge": {
-        "label": "启动策略",
-        "base_token": None,
-        "table_id": None,
-    },
-}
 
 _KEY_FIELDS = ("代码", "信号日期")
 _DATE_FIELDS = ("信号日期",)
@@ -116,80 +79,13 @@ def _fetch_abnormal_rows(backend: str, min_closeness: float = 0.7) -> tuple[str,
     / max_closeness / status。value 是「N日累计涨跌幅偏离值」(小数)。
 
     min_closeness 是「接近度」下限 (|偏离|/阈值): 0.5 观察 / 0.7 边缘 / 1.0 已触发。
-    默认 0.7 —— 0.5 会把「才刚过半程」的一起拉进来, 实测全市场 187 行(过滤后仍有
-    106 条), 与该表历史每天几条的量级不符; 0.7 时约 59 条。
+    默认 0.7 —— 0.5 会把「才刚过半程」的一起拉进来, 与该表历史每天几条的量级不符。
     """
     resp = _http_json(
         f"{backend}/api/abnormal/overview?min_closeness={min_closeness}&limit=500", timeout=120
     )
     as_of = str(resp.get("cache_date") or "")[:10]
     return as_of, resp.get("rows") or []
-
-
-# 板块 -> 单日涨跌幅上限 (判断「下一日是否可能触发」时用它封顶)
-_LIMIT_UP_BY_BOARD = {"主板": 0.10, "创业板/科创板": 0.20, "北交所": 0.30}
-
-
-def _abnormal_records(rows: list[dict], as_of: str, only_actionable: bool = True) -> list[dict]:
-    """异动边缘行 -> 异动预警表记录。
-
-    口径(与表内历史数据对齐, 由表内既有记录反推):
-      - 所需最小涨幅 = 目标窗口阈值 - 当前偏离值 (线性近似, 非复利)。
-      - 目标等级 = 未触发窗口里「所需涨幅最小」的那个; 全触发则取偏离最大的窗口。
-      - 下一日可能触发 = 所需涨幅 <= 该板块单日涨跌幅上限。
-      - 是否异动类型 = 已触发窗口的列举, 形如 "10日涨跌幅异常(53.49%)"。
-
-    only_actionable=True (默认) 时只留「明日可能触发」或「已触发」的行 ——
-    否则会把「还需涨 133% 才够」这类无行动价值的噪音一起推 (实测默认口径下有
-    近 200 条, 有效 actionable 只有几十条)。
-    """
-    records: list[dict] = []
-    for r in rows:
-        symbol = str(r.get("symbol") or "")
-        code, _, market = symbol.partition(".")
-        prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(market, market.lower())
-        windows = r.get("windows") or {}
-
-        triggered: list[tuple[int, float]] = []
-        pending: dict[int, float] = {}
-        for key, w in windows.items():
-            try:
-                n = int(str(key).rstrip("d"))
-            except ValueError:
-                continue
-            val = lb.to_num(w.get("value")) or 0.0
-            thr = lb.to_num(w.get("threshold")) or 0.0
-            if (lb.to_num(w.get("closeness")) or 0.0) >= 1.0:
-                triggered.append((n, val))
-            else:
-                pending[n] = thr - val
-
-        if pending:
-            target_n = min(pending, key=lambda k: pending[k])
-            need = pending[target_n]
-        elif triggered:
-            target_n = max(triggered, key=lambda t: t[1])[0]
-            need = 0.0
-        else:
-            continue
-
-        limit_up = _LIMIT_UP_BY_BOARD.get(str(r.get("board") or ""), 0.10)
-        if only_actionable and need > limit_up and not triggered:
-            continue
-        desc = ", ".join(f"{n}日涨跌幅异常({v * 100:.2f}%)" for n, v in sorted(triggered))
-        records.append({
-            "代码": f"{prefix}{code}",
-            "名称": str(r.get("name") or ""),
-            "日期": as_of,
-            "收盘价": lb.to_num(r.get("close")),
-            "触发信号次数": len(triggered),
-            "所需最小涨幅": round(need, 6),
-            "是否异动类型": desc or None,
-            "预警信息": f"明日若涨 {need * 100:.2f}% 将触发{target_n}日异动" if need > 0 else None,
-            "目标等级": f"{target_n}日异动",
-            "下一日可能触发": "True" if need <= limit_up else "False",
-        })
-    return records
 
 
 def _fetch_capital_momentum(backend: str, symbol: str) -> float | None:
@@ -211,61 +107,6 @@ def _fetch_capital_momentum(backend: str, symbol: str) -> float | None:
     return None
 
 
-def _pct(x: float | None) -> float | None:
-    """小数涨跌幅 -> 百分数数值。"""
-    v = lb.to_num(x)
-    return round(v * 100, 4) if v is not None else None
-
-
-def _bias_ma20(close: float | None, ma20: float | None) -> float | None:
-    """乖离MA20% = (close / ma20 - 1) * 100。"""
-    c, m = lb.to_num(close), lb.to_num(ma20)
-    if c is None or m in (None, 0):
-        return None
-    return round((c / m - 1) * 100, 4)
-
-
-def build_records(
-    strategy_id: str,
-    rows: list[dict],
-    as_of: str,
-    momentum_map: dict[str, float | None] | None = None,
-) -> list[dict]:
-    """把 screener 行映射成目标表记录 (各表字段对齐 qushiqinlong 源脚本)。"""
-    if strategy_id == "abnormal":
-        return _abnormal_records(rows, as_of)
-    records: list[dict] = []
-    for r in rows:
-        symbol = str(r.get("symbol") or "")
-        code, _, market = symbol.partition(".")
-        base = {
-            "代码": code,
-            "名称": str(r.get("name") or ""),
-            "市场": market,
-            "信号日期": as_of,
-            "收盘价": lb.to_num(r.get("close")),
-            "涨跌幅%": _pct(r.get("change_pct")),
-        }
-        if strategy_id == "trend_dragon":
-            base.update({
-                "MA5": lb.to_num(r.get("ma5")),
-                "MA13": None,  # enriched 无 ma13
-                "乖离MA20%": _bias_ma20(r.get("close"), r.get("ma20")),
-                "资金动能": (momentum_map or {}).get(symbol),
-            })
-        elif strategy_id in ("bottom_structure", "startup_surge"):
-            base.update({
-                "信号状态": "",   # 策略矩阵内部值, 输出行不携带
-                "DIF": lb.to_num(r.get("macd_dif")),
-                "DEA": lb.to_num(r.get("macd_dea")),
-                "钝化类型": "",
-                "MA5": lb.to_num(r.get("ma5")),
-                "MA20": lb.to_num(r.get("ma20")),
-            })
-        records.append(base)
-    return records
-
-
 def run(args: argparse.Namespace) -> int:
     backend = args.backend.rstrip("/")
     only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else list(STRATEGY_TABLES)
@@ -282,7 +123,7 @@ def run(args: argparse.Namespace) -> int:
         if not cfg.get("base_token") or not cfg.get("table_id"):
             logger.warning(
                 "[%s] 飞书表未配置(base_token/table_id 为空), 跳过 —— "
-                "请在 STRATEGY_TABLES 补上该表的 base_token 与 table_id", label,
+                "请在 app/services/lark_screener.py 的 STRATEGY_TABLES 补上该表", label,
             )
             continue
         try:
@@ -312,12 +153,7 @@ def run(args: argparse.Namespace) -> int:
             logger.info("[%s] DRY RUN 记录样例: %s", label, json.dumps(records[:3], ensure_ascii=False))
             continue
 
-        result = lb.push_records(
-            cfg["base_token"], cfg["table_id"], records,
-            key_fields=cfg.get("key_fields", _KEY_FIELDS),
-            force=args.force,
-            date_fields=cfg.get("date_fields", _DATE_FIELDS),
-        )
+        result = push_records_for(sid, records, force=args.force)
         for d in result.details:
             logger.info("[%s] %s", label, d)
         if not result.ok:
@@ -332,7 +168,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="每日选股结果推送飞书多维表格")
+    p = argparse.ArgumentParser(description="选股结果推送飞书多维表格 (命令行版)")
     p.add_argument("--backend", default="http://127.0.0.1:3018", help="后端地址 (默认本机 3018)")
     p.add_argument("--only", default=None, help="只跑指定策略, 逗号分隔 (默认全部)")
     p.add_argument("--as-of", default=None, help="指定交易日 YYYY-MM-DD (默认最新)")

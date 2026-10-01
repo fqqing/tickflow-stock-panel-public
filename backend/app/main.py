@@ -27,6 +27,7 @@ from app.api import (
     indices_market,
     intraday,
     kline,
+    lark,
     market_recap,
     mining,
     monitor_rules,
@@ -471,6 +472,7 @@ app.include_router(alerts.router)
 app.include_router(rps.router)
 app.include_router(chan.router)
 app.include_router(signallab.router)
+app.include_router(lark.router)
 app.include_router(pulse.router)
 
 # 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。

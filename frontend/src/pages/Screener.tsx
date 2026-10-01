@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X } from 'lucide-react'
+import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, Send } from 'lucide-react'
 import { api, genRuleId, type ChanAnnotation, type ScreenerStrategy, type ScreenerResult, type MarketSnapshotRow } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
@@ -24,6 +24,7 @@ import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
 import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
+import { LarkPushDialog } from '@/components/screener/LarkPushDialog'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -61,6 +62,7 @@ export function Screener() {
   const closePreview = useCallback(() => { setPreviewSymbol(null); setPreviewName('') }, [])
   const [settingsStrategyId, setSettingsStrategyId] = useState<string | null>(null)
   const [showPoolDialog, setShowPoolDialog] = useState(false)
+  const [showLarkPush, setShowLarkPush] = useState(false)
   const [showBuilder, setShowBuilder] = useState(false)
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
@@ -743,6 +745,17 @@ export function Screener() {
               <RefreshCw className={`h-3.5 w-3.5 ${reloadStrategies.isPending ? 'animate-spin' : ''}`} />
               重载
             </button>
+            {/* 推送飞书: 选目标 + 选日期即时推 (取代原先计划任务定时跑脚本) */}
+            <button
+              onClick={() => setShowLarkPush(true)}
+              title="把选股结果推送到飞书多维表格"
+              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-btn
+                border border-border bg-surface text-xs font-medium text-muted
+                hover:text-accent hover:border-accent/50 transition-colors cursor-pointer"
+            >
+              <Send className="h-3.5 w-3.5" />
+              推飞书
+            </button>
             {asOf && (
               <DatePicker
                 value={asOf}
@@ -1167,6 +1180,17 @@ export function Screener() {
         open={showStore}
         onClose={() => setShowStore(false)}
       />
+
+      {showLarkPush && (
+        <LarkPushDialog
+          asOf={asOf}
+          minDate={minDate}
+          maxDate={maxDate}
+          market={market}
+          presetNames={strategyIdToName}
+          onClose={() => setShowLarkPush(false)}
+        />
+      )}
     </>
   )
 }

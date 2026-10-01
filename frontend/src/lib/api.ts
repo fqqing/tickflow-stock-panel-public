@@ -3683,6 +3683,25 @@ export const api = {
   },
 
   pulseTickDays: () => request<{ days: string[] }>('/api/pulse/tick-days'),
+
+  // ===== 飞书推送 =====
+  larkStatus: () => request<LarkStatus>('/api/lark/status'),
+
+  larkTables: () => request<{ tables: LarkTableOption[] }>('/api/lark/tables'),
+
+  larkPush: (params: {
+    strategy_id: string
+    as_of?: string
+    force?: boolean
+    dry_run?: boolean
+    min_closeness?: number
+    with_momentum?: boolean
+    market?: string
+  }) =>
+    request<LarkPushResult>('/api/lark/push', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
 }
 
 // ===== Pipeline =====
@@ -4087,6 +4106,33 @@ export interface PulseOrderflow {
     delta_ratio: number
     avg_price: number
   } | null
+}
+
+// ===== 飞书推送 =====
+/** 可推送的目标: 策略 id 或 abnormal(异动预警)。configured=false 表示飞书表还没建。 */
+export interface LarkTableOption {
+  id: string
+  label: string
+  configured: boolean
+}
+
+export interface LarkPushResult {
+  ok: boolean
+  strategy_id: string
+  label: string
+  as_of: string | null
+  selected: number       // 该日期选中的个股数
+  pushed: number         // 实际写入条数
+  skipped: number        // 去重跳过条数
+  details: string[]
+  error: string | null
+  dry_run: boolean
+  sample?: Record<string, unknown>[]   // 仅 dry_run
+}
+
+export interface LarkStatus {
+  cli: string
+  available: boolean
 }
 
 /** M6 足迹图: 价格(纵) x 时间(横) 的买卖量网格。 */
