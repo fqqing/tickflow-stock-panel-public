@@ -25,7 +25,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from app.plugins.eltdx.provider import app_to_eltdx, eltdx_to_app
+from app.plugins.eltdx.provider import app_to_eltdx, eltdx_to_app, market_meta
 from app.pulse.gateway import client
 
 logger = logging.getLogger(__name__)
@@ -158,6 +158,7 @@ def summarize(rows: list[dict]) -> dict:
     for r in rows:
         by_symbol.setdefault(r["symbol"], []).append(r)
 
+    meta = market_meta()
     out: list[dict] = []
     for symbol, items in by_symbol.items():
         items.sort(key=lambda r: str(r["date"]), reverse=True)
@@ -165,6 +166,7 @@ def summarize(rows: list[dict]) -> dict:
         nets = [r["main_net"] for r in items if r["main_net"] is not None]
         out.append({
             "symbol": symbol,
+            "name": meta.get(symbol, {}).get("name"),
             "date": latest["date"],
             "main_net": latest["main_net"],
             "main_ratio": latest["main_ratio"],

@@ -18,6 +18,7 @@
  *    标 stale=true，后台刷新。所以这里看到 stale 提示不用等，刷新会自动发生。
  */
 import { useMemo, useRef, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Activity, Loader2, RefreshCw, Flame, Layers, Gavel, Grid3x3, Waves, BarChart3,
@@ -103,15 +104,7 @@ export function Pulse() {
         })}
 
         {tab !== 'moneyflow' && tab !== 'topics' && tab !== 'ladder' && (
-          <label className="flex items-center gap-1.5 ml-auto text-[11px] text-muted">
-            代码
-            <input
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.trim().toUpperCase())}
-              placeholder="600519.SH"
-              className="h-7 px-2 text-xs rounded-btn border border-border bg-surface text-foreground w-[120px]"
-            />
-          </label>
+          <SymbolSearchInput value={symbol} onChange={setSymbol} />
         )}
       </div>
 
@@ -197,6 +190,7 @@ function MoneyflowPanel() {
             <thead className="bg-surface-2">
               <tr className="text-muted">
                 <th className="px-3 py-2 text-left font-medium">代码</th>
+                <th className="px-3 py-2 text-left font-medium">名称</th>
                 <th className="px-3 py-2 text-right font-medium">主力净额</th>
                 <th className="px-3 py-2 text-left font-medium">强度</th>
                 <th className="px-3 py-2 text-right font-medium">占成交额</th>
@@ -225,7 +219,16 @@ function MoneyflowRow({ r, maxAbs, days }: { r: PulseMoneyflowRankRow; maxAbs: n
   const w = Math.min(100, (Math.abs(net) / maxAbs) * 100)
   return (
     <tr className="border-t border-border hover:bg-surface-2">
-      <td className="px-3 py-1.5 font-medium">{r.symbol}</td>
+      <td className="px-3 py-1.5 font-medium">
+        <Link
+          to={`/stock/${encodeURIComponent(r.symbol)}`}
+          className="text-accent hover:underline"
+          title={`查看 ${r.symbol} K线`}
+        >
+          {r.symbol}
+        </Link>
+      </td>
+      <td className="px-3 py-1.5 text-muted">{r.name ?? '--'}</td>
       <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(net)}`}>{amountText(net)}</td>
       <td className="px-3 py-1.5 w-[120px]">
         <div className="h-1.5 bg-surface-2 rounded-full overflow-hidden">
@@ -950,6 +953,98 @@ function PartCell({ name, v, full, max }: { name: string; v: number | null; full
       <div className="h-1 mt-1 bg-surface-2 rounded-full overflow-hidden">
         <div className="h-full bg-accent" style={{ width: `${Math.min(100, (full / max) * 100)}%` }} />
       </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ 代码/名称搜索 */
+
+function SymbolSearchInput({ value, onChange }: { value: string; onChange: (symbol: string) => void }) {
+  const [query, setQuery] = useState(value)
+  const [open, setOpen] = useState(false)
+  const [debounced, setDebounced] = useState(value)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query.trim()), 300)
+    return () => clearTimeout(t)
+  }, [query])
+
+  useEffect(() => {
+    setQuery(value)
+    setDebounced(value)
+  }, [value])
+
+  const { data, isFetching } = useQuery({
+    queryKey: [...QK.pulse, 'instrument-search', debounced],
+    queryFn: () => api.instrumentSearch(debounced, 20, 'stock,etf'),
+    enabled: debounced.length >= 2 && !/^\d{6}\.([A-Z]{2,3})$/.test(debounced),
+    staleTime: 60_000,
+  })
+
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [])
+
+  const select = (symbol: string) => {
+    onChange(symbol)
+    setQuery(symbol)
+    setOpen(false)
+  }
+
+  const results = data?.results ?? []
+
+  return (
+    <div ref={ref} className="relative ml-auto">
+      <label className="flex items-center gap-1.5 text-[11px] text-muted">
+        代码 / 名称
+        <input
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setOpen(true)
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const raw = query.trim().toUpperCase()
+              if (/^\d{6}\.([A-Z]{2,3})$/.test(raw)) {
+                select(raw)
+              } else if (results.length > 0) {
+                select(results[0].symbol)
+              }
+            }
+          }}
+          placeholder="600519.SH 或 茅台"
+          className="h-7 px-2 text-xs rounded-btn border border-border bg-surface text-foreground w-[150px]"
+        />
+      </label>
+      {open && debounced.length >= 2 && (
+        <div className="absolute right-0 top-full z-50 mt-1 w-[220px] max-h-[260px] overflow-y-auto rounded-card border border-border bg-surface shadow-lg">
+          {isFetching && results.length === 0 ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted">
+              <Loader2 className="h-3 w-3 animate-spin" /> 搜索中
+            </div>
+          ) : results.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-muted">无结果</div>
+          ) : (
+            results.map((r) => (
+              <button
+                key={r.symbol}
+                onClick={() => select(r.symbol)}
+                className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 border-b border-border last:border-0"
+              >
+                <span className="font-medium text-foreground">{r.name}</span>
+                <span className="ml-2 text-muted">{r.symbol}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -4114,6 +4114,7 @@ export interface PulseMoneyflowResp {
 /** M1 排行行: 多日压缩后的一行。 */
 export interface PulseMoneyflowRankRow {
   symbol: string
+  name?: string
   date: string
   main_net: number | null
   main_ratio: number | null
