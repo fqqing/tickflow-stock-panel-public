@@ -108,7 +108,10 @@ ok('T8a_noHScroll_1440', dom.scrollW <= dom.clientW + 1, `scrollW=${dom.scrollW}
 await snap('terminal-1-echarts.png')
 
 // 锁定从 ECharts 开始，避免 localStorage 记住上一次 KLinePro
-await evaluate("localStorage.setItem('tickflow-kline-pro','false')")
+// ★ 键名必须是 tickflow.useKLinePro（见 useKLineProFlag.ts）。
+//   这里曾经写成 'tickflow-kline-pro' —— 那个键没有任何代码读，于是"锁定内核"
+//   从未生效，测试实际跑在哪个内核上完全取决于上一次留下的状态（假绿）。
+await evaluate("localStorage.setItem('tickflow.useKLinePro','false')")
 await send('Page.reload')
 await sleep(4000)
 for (let i = 0; i < 20; i++) {
