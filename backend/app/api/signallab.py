@@ -14,6 +14,8 @@
 - ``GET  /api/signallab/outcomes``    台账明细(分页)
 - ``GET  /api/signallab/summary``     战绩汇总(可分组)
 - ``GET  /api/signallab/attribution`` 形态归因(按特征分桶)
+- ``GET  /api/signallab/score-today`` 当日候选打分(把归因学到的档位搬到今天)
+- ``POST /api/signallab/attribution-insight`` AI 解读归因(流式 NDJSON)
 
 口径见 ``app/signallab/outcome.py`` 顶部: 收益小数制、T+1 开盘成交、停牌/涨停封死顺延、
 前瞻不足记 null 且不进分母。
@@ -30,8 +32,10 @@ from typing import Annotated, Any
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from app.signallab.insight import analyze_attribution_stream
 from app.signallab.lab import (
     CONTEXT_FEATURES,
     DEFAULT_ATTRIBUTION_FEATURES,
@@ -43,6 +47,10 @@ from app.signallab.lab import (
 )
 from app.signallab.outcome import DEFAULT_HORIZONS, ret_column
 from app.signallab.runs import run_store
+from app.signallab.scoring import (
+    CONTEXT_FEATURES as SCORING_FEATURES,
+)
+from app.signallab.scoring import score_today
 from app.signallab.summary import attribute_outcomes, summarize_outcomes
 
 logger = logging.getLogger(__name__)
@@ -524,3 +532,125 @@ def get_attribution(
         "skipped_features": [f for f in wanted if f not in frame.columns],
         "rows": _json_ready(result, round_to=6),
     }
+
+
+@router.get("/score-today")
+def get_score_today(
+    request: Request,
+    strategy_id: str = Query(...),
+    as_of: Annotated[date | None, Query()] = None,
+    start: Annotated[date | None, Query()] = None,
+    end: Annotated[date | None, Query()] = None,
+    horizon: int | None = Query(None, description="按哪个持有期的历史表现打分, 默认台账最长"),
+    features: str | None = Query(None, description="逗号分隔; 默认 CONTEXT_FEATURES"),
+    buckets: int = Query(4, ge=2, le=10),
+    min_samples: int = Query(20, ge=1, le=10000),
+    limit: int = Query(50, ge=1, le=500),
+) -> dict[str, Any]:
+    """当日候选打分: 用台账归因学到的「形态档位 -> 历史收益」给今天选出的票排序。
+
+    与 :func:`get_attribution` 是同一个模型的两面 —— 归因给出「哪个档位好」,
+    这里把今天选出的票投到档位上, 谁落在历史赚钱的档位谁排前面。
+
+    ⚠️ 打分只改排序, **不改选股结果**: 候选池仍是策略自己选出的那批票。
+    """
+    repo = request.app.state.repo
+    engine = request.app.state.strategy_engine
+    data_dir = _data_dir(request)
+    frame, meta = _require_ledger(data_dir, strategy_id, start, end)
+
+    available = _horizons_of(frame)
+    if not available:
+        raise HTTPException(status_code=400, detail="台账里没有收益列, 无法打分")
+    target_horizon = horizon if horizon in available else max(available)
+
+    _, latest = repo.get_enriched_latest()
+    day = as_of or latest
+    if day is None:
+        raise HTTPException(status_code=503, detail="enriched 数据不可用, 请先完成数据同步")
+
+    wanted = (
+        [f.strip() for f in features.split(",") if f.strip()]
+        if features
+        else list(SCORING_FEATURES)
+    )
+    try:
+        result = score_today(
+            repo,
+            engine,
+            data_dir,
+            frame,
+            strategy_id,
+            day,
+            horizon=target_horizon,
+            features=wanted,
+            buckets=buckets,
+            min_samples=min_samples,
+            limit=limit,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    result["dataset"] = meta
+    result["requested_horizon"] = horizon
+    return result
+
+
+class InsightRequest(BaseModel):
+    """AI 形态归因解读请求。"""
+
+    strategy_id: str
+    start: date | None = None
+    end: date | None = None
+    horizon: int | None = None
+    features: list[str] | None = None
+    buckets: int = Field(4, ge=2, le=10)
+    min_samples: int = Field(20, ge=1, le=10000)
+    focus: str = ""
+
+
+@router.post("/attribution-insight")
+async def analyze_attribution(request: Request, payload: InsightRequest):
+    """AI 形态归因解读 — NDJSON 流式返回。
+
+    事实(分桶统计)由后端算好塞进提示词, LLM 只做解读与参数建议, 不负责算数。
+    协议同 ``/api/rps/rotation-analyze``: meta / delta / error / done。
+    """
+    data_dir = _data_dir(request)
+    frame, meta = _require_ledger(data_dir, payload.strategy_id, payload.start, payload.end)
+    available = _horizons_of(frame)
+    if not available:
+        raise HTTPException(status_code=400, detail="台账里没有收益列, 无法归因")
+    horizon = payload.horizon if payload.horizon in available else max(available)
+
+    engine = request.app.state.strategy_engine
+    params: list[dict] = []
+    name = payload.strategy_id
+    desc = ""
+    if engine is not None and engine.has(payload.strategy_id):
+        strategy_meta = getattr(engine.get(payload.strategy_id), "meta", {}) or {}
+        params = list(strategy_meta.get("params") or [])
+        name = strategy_meta.get("name") or payload.strategy_id
+        desc = str(strategy_meta.get("description") or "")
+
+    async def stream_gen():
+        async for chunk in analyze_attribution_stream(
+            frame,
+            meta,
+            strategy_name=name,
+            strategy_desc=desc,
+            params=params,
+            horizon=horizon,
+            features=payload.features,
+            buckets=payload.buckets,
+            min_samples=payload.min_samples,
+            focus=payload.focus,
+        ):
+            yield chunk + "\n"
+
+    return StreamingResponse(
+        stream_gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

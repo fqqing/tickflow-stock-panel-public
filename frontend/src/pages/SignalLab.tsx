@@ -14,13 +14,14 @@
  * ⚠️ 归因只暴露 ctx_*（信号当时已知的形态）与 entry_signal_name（信号分支）。
  *    mfe/mae/ret_* 都含未来信息，拿它们当特征会得到必然赚钱的假结论。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FlaskConical, Play, RefreshCw, Loader2, Info } from 'lucide-react'
+import { FlaskConical, Play, RefreshCw, Loader2, Info, Sparkles, Target } from 'lucide-react'
 import {
   api,
   type SignalLabAttributionRow,
   type SignalLabDataset,
+  type SignalLabScoreRow,
   type SignalLabStrategy,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -69,6 +70,16 @@ export function SignalLab() {
   const [runId, setRunId] = useState<string | null>(null)
   const [selected, setSelected] = useState<{ start?: string; end?: string }>({})
   const [page, setPage] = useState(0)
+
+  // AI 形态归因解读(流式)
+  const [insight, setInsight] = useState('')
+  const [insightError, setInsightError] = useState('')
+  const [insightOn, setInsightOn] = useState(false)
+  const [focus, setFocus] = useState('')
+  const insightAbort = useRef<AbortController | null>(null)
+
+  // 当日候选打分(选股 + 分档打分, 较重, 显式触发)
+  const [scoreOn, setScoreOn] = useState(false)
 
   /** 分支对比的分组列：只暴露信号分支（信号当时已知），不开放 mfe/mae 等未来量。 */
   const groupBy = 'entry_signal_name'
@@ -167,6 +178,38 @@ export function SignalLab() {
       api.signalLabOutcomes({ strategy_id: strategyId, ...range, limit: 100, offset: page * 100 }),
     enabled: !!strategyId && !!dataset,
   })
+
+  const { data: scoreToday, isFetching: scoreLoading } = useQuery({
+    queryKey: [QK.signalLab, 'score-today', strategyId, dataset?.start, dataset?.end] as const,
+    queryFn: () => api.signalLabScoreToday({ strategy_id: strategyId, ...range, limit: 30, min_samples: 10 }),
+    enabled: !!strategyId && !!dataset && scoreOn,
+    staleTime: 5 * 60_000,
+  })
+
+  const runInsight = useCallback(async () => {
+    if (!strategyId) return
+    insightAbort.current?.abort()
+    const controller = new AbortController()
+    insightAbort.current = controller
+    setInsightOn(true)
+    setInsight('')
+    setInsightError('')
+    const horizon = summary?.horizons?.length ? summary.horizons[summary.horizons.length - 1] : undefined
+    try {
+      await api.signalLabInsight(
+        { strategy_id: strategyId, ...range, horizon, min_samples: 10, focus: focus || undefined },
+        (ev) => {
+          if (ev.type === 'delta') setInsight((prev) => prev + (ev.content ?? ''))
+          else if (ev.type === 'error') setInsightError(String(ev.message ?? 'AI 解读失败'))
+        },
+        controller.signal,
+      )
+    } catch (e) {
+      if (!controller.signal.aborted) setInsightError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setInsightOn(false)
+    }
+  }, [strategyId, range, summary?.horizons, focus])
 
   const keys = horizonKeys(summary?.horizons ?? [])
   const overall = summary?.overall ?? {}
@@ -317,13 +360,46 @@ export function SignalLab() {
         {/* 2. 形态归因 */}
         {attribution && attribution.rows.length > 0 && (
           <section>
-            <h2 className="text-sm font-semibold mb-2">
-              形态归因
-              <span className="ml-2 text-[11px] font-normal text-muted">
-                按 {attribution.horizon} 日收益排序 · 特征只取信号当时已知的量
-                {contextFeatures.length > 0 ? `（${contextFeatures.join(' / ')}）` : ''}
-              </span>
-            </h2>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <h2 className="text-sm font-semibold">
+                形态归因
+                <span className="ml-2 text-[11px] font-normal text-muted">
+                  按 {attribution.horizon} 日收益排序 · 特征只取信号当时已知的量
+                  {contextFeatures.length > 0 ? `（${contextFeatures.join(' / ')}）` : ''}
+                </span>
+              </h2>
+              <div className="ml-auto flex items-center gap-2">
+                <input
+                  value={focus}
+                  onChange={(e) => setFocus(e.target.value)}
+                  placeholder="追加关注点(可选)"
+                  className="h-7 px-2 text-xs rounded-btn border border-border bg-surface text-foreground w-[160px]"
+                />
+                <button
+                  onClick={() => void runInsight()}
+                  disabled={insightOn}
+                  className="flex items-center gap-1 px-2 py-1 text-xs rounded-btn border border-border text-secondary hover:text-foreground hover:bg-elevated disabled:opacity-50 cursor-pointer"
+                >
+                  {insightOn ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+                  {insightOn ? '解读中' : 'AI 解读'}
+                </button>
+              </div>
+            </div>
+            {(insight || insightError) && (
+              <div className="mb-3 rounded-btn border border-border bg-elevated/20 p-3">
+                <div className="text-[11px] text-muted mb-1 flex items-center gap-1">
+                  <Sparkles className="h-3 w-3" /> AI 归因解读（事实由后端统计, 模型只做解读）
+                </div>
+                {insightError ? (
+                  <p className="text-xs text-danger whitespace-pre-wrap">{insightError}</p>
+                ) : (
+                  <p className="text-xs text-secondary whitespace-pre-wrap leading-relaxed">
+                    {insight}
+                    {insightOn ? <span className="ml-0.5 animate-pulse">▍</span> : null}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="overflow-x-auto rounded-btn border border-border">
               <table className="w-full text-xs border-collapse">
                 <thead>
@@ -357,6 +433,72 @@ export function SignalLab() {
             )}
           </section>
         )}
+
+        {/* 2.5 当日候选打分 */}
+        <section>
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <h2 className="text-sm font-semibold">
+              当日候选打分
+              <span className="ml-2 text-[11px] font-normal text-muted">
+                把归因学到的档位搬到今天 · 只改排序, 不改选股结果
+              </span>
+            </h2>
+            <button
+              onClick={() => setScoreOn(true)}
+              disabled={!strategyId || !dataset || scoreOn}
+              className="ml-auto flex items-center gap-1 px-2 py-1 text-xs rounded-btn border border-border text-secondary hover:text-foreground hover:bg-elevated disabled:opacity-50 cursor-pointer"
+            >
+              {scoreLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Target className="h-3 w-3" />}
+              {scoreOn ? '重新打分' : '算今日候选'}
+            </button>
+          </div>
+          {scoreToday && (
+            <>
+              <p className="mb-2 text-[11px] text-muted flex items-center gap-1">
+                <Info className="h-3 w-3" />
+                {scoreToday.as_of} 选出 {scoreToday.n_candidates} 只 · 打分 {scoreToday.n_scored} 只 ·
+                按 {scoreToday.horizon} 日历史表现加权（样本量加权平均）
+                {scoreToday.notes.length > 0 ? ` · ${scoreToday.notes.join('；')}` : ''}
+              </p>
+              {scoreToday.rows.length > 0 && (
+                <div className="overflow-x-auto rounded-btn border border-border">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-elevated/40 text-muted">
+                        <th className="px-3 py-2 text-left font-medium">#</th>
+                        <th className="px-3 py-2 text-left font-medium">代码</th>
+                        <th className="px-3 py-2 text-left font-medium">名称</th>
+                        <th className="px-3 py-2 text-right font-medium">现价</th>
+                        <th className="px-3 py-2 text-right font-medium">涨跌</th>
+                        <th className="px-3 py-2 text-right font-medium">形态分</th>
+                        <th className="px-3 py-2 text-left font-medium">命中档位(历史表现)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scoreToday.rows.map((r: SignalLabScoreRow, i: number) => (
+                        <tr key={r.symbol} className="border-t border-border/60 hover:bg-elevated/30">
+                          <td className="px-3 py-1.5 text-muted">{i + 1}</td>
+                          <td className="px-3 py-1.5 font-mono text-secondary">{r.symbol}</td>
+                          <td className="px-3 py-1.5">{r.name ?? '--'}</td>
+                          <td className="px-3 py-1.5 text-right num tabular-nums">{numText(r.close)}</td>
+                          <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.change_pct)}`}>
+                            {pctText(r.change_pct)}
+                          </td>
+                          <td className={`px-3 py-1.5 text-right num tabular-nums ${pctClass(r.score)}`}>
+                            {pctText(r.score)}
+                          </td>
+                          <td className="px-3 py-1.5 text-[11px] text-muted">
+                            {r.reasons.map((x) => `${x.label}=${x.bucket}(${pctText(x.mean)}, n=${x.n})`).join(' · ') || '--'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </section>
 
         {/* 3. 分组汇总（按信号分支） */}
         {summary && summary.groups.length > 0 && (

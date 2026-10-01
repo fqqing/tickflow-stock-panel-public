@@ -1897,6 +1897,55 @@ export interface SignalLabAttribution {
   rows: SignalLabAttributionRow[]
 }
 
+/** 当日候选打分: 台账学到的「档位 -> 历史表现」 */
+export interface SignalLabBucketStat {
+  bucket: string
+  n: number
+  win_rate: number | null
+  mean: number | null
+  profit_factor: number | null
+}
+
+export interface SignalLabBucketModel {
+  label: string
+  edges: number[]
+  buckets: SignalLabBucketStat[]
+}
+
+export interface SignalLabScoreReason {
+  feature: string
+  label: string
+  bucket: string
+  mean: number | null
+  win_rate: number | null
+  n: number
+}
+
+export interface SignalLabScoreRow {
+  symbol: string
+  name: string | null
+  close: number | null
+  change_pct: number | null
+  /** 各特征所在档位历史平均收益的样本量加权平均 */
+  score: number
+  n_features: number
+  buckets: Record<string, string>
+  reasons: SignalLabScoreReason[]
+}
+
+export interface SignalLabScoreToday {
+  dataset: SignalLabDataset
+  as_of: string
+  horizon: number
+  requested_horizon: number | null
+  features: string[]
+  model: Record<string, SignalLabBucketModel>
+  rows: SignalLabScoreRow[]
+  n_candidates: number
+  n_scored: number
+  notes: string[]
+}
+
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
@@ -3629,6 +3678,69 @@ export const api = {
       q.set(k, String(v))
     }
     return request<SignalLabAttribution>(`/api/signallab/attribution?${q.toString()}`)
+  },
+
+  /** 当日候选打分: 把归因学到的档位搬到今天, 只改排序不改选股结果 */
+  signalLabScoreToday: (params: {
+    strategy_id: string
+    as_of?: string
+    start?: string
+    end?: string
+    horizon?: number
+    min_samples?: number
+    buckets?: number
+    limit?: number
+  }) => {
+    const q = new URLSearchParams({ strategy_id: params.strategy_id })
+    for (const [k, v] of Object.entries(params)) {
+      if (k === 'strategy_id' || v == null) continue
+      q.set(k, String(v))
+    }
+    return request<SignalLabScoreToday>(`/api/signallab/score-today?${q.toString()}`)
+  },
+
+  /**
+   * AI 形态归因解读 (NDJSON 流)。
+   * 每帧: {type:'meta'|'delta'|'error'|'done', ...}
+   */
+  signalLabInsight: async (
+    payload: {
+      strategy_id: string
+      start?: string
+      end?: string
+      horizon?: number
+      min_samples?: number
+      buckets?: number
+      focus?: string
+    },
+    onEvent: (event: { type: string; content?: string; message?: string; [k: string]: unknown }) => void,
+    signal?: AbortSignal,
+  ) => {
+    const resp = await fetch('/api/signallab/attribution-insight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal,
+    })
+    if (!resp.ok || !resp.body) throw new Error(`AI 解读请求失败 (${resp.status})`)
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          onEvent(JSON.parse(line))
+        } catch {
+          // 半包/脏行直接跳过, 不打断整条流
+        }
+      }
+    }
   },
 
   // ===== Pulse (盘中脉搏: 资金流/竞价/力道/题材/梯队/逐笔) =====
