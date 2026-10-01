@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.market_time import CN_TZ
 from app.services import alert_store
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+#: 严重程度排序, 同一天多次触发时取最高的那个作为该点的等级
+_SEVERITY_RANK = {"info": 0, "warn": 1, "critical": 2}
 
 
 def _data_dir(request: Request) -> Path:
@@ -51,6 +56,53 @@ def clear_alerts(request: Request):
     """清空全部触发记录。"""
     n = alert_store.clear(_data_dir(request))
     return {"ok": True, "cleared": n}
+
+
+@router.get("/by-symbol")
+def alerts_by_symbol(
+    request: Request,
+    symbol: str = Query(..., description="标的代码, 如 600519.SH"),
+    days: int = Query(7, ge=1, le=30, description="回溯天数 (受 alert_store 保留期约束)"),
+    limit: int = Query(200, ge=1, le=2000, description="最多返回多少个日期点"),
+):
+    """按标的聚合触发记录, 供 K 线图叠加「监控触发」标记.
+
+    alerts.jsonl 的 ts 是 UTC epoch 毫秒, 而 K 线的 date 是北京时间交易日.
+    直接按 UTC 取日期会在北京时间 08:00 之前错位一整天 (盘前/夜间触发尤其
+    明显), 所以这里统一按北京时间归日.
+
+    同一天的多次触发合并成一个点 (count + 去重后的标签), 否则密集触发会在
+    一根 K 线上叠出一堆重复标记. 返回按日期升序, 前端直接按 date 匹配 K 线.
+    """
+    events = alert_store.list_recent(_data_dir(request), days=days)
+    buckets: dict[str, dict] = {}
+    for ev in events:
+        if ev.get("symbol") != symbol:
+            continue
+        ts = int(ev.get("ts") or 0)
+        if ts <= 0:
+            continue
+        day = datetime.fromtimestamp(ts / 1000, CN_TZ).date().isoformat()
+        b = buckets.get(day)
+        if b is None:
+            b = buckets[day] = {
+                "date": day, "ts": ts, "count": 0,
+                "severity": "info", "labels": [], "signals": [],
+            }
+        b["count"] += 1
+        b["ts"] = max(b["ts"], ts)
+        sev = ev.get("severity") or "info"
+        if _SEVERITY_RANK.get(sev, 0) > _SEVERITY_RANK.get(b["severity"], 0):
+            b["severity"] = sev
+        label = ev.get("rule_name") or ev.get("message") or ""
+        if label and label not in b["labels"] and len(b["labels"]) < 6:
+            b["labels"].append(label)
+        for s in ev.get("signals") or []:
+            if s not in b["signals"]:
+                b["signals"].append(s)
+
+    points = sorted(buckets.values(), key=lambda x: x["date"])[-limit:]
+    return {"symbol": symbol, "days": days, "points": points}
 
 
 @router.delete("/{ts}")

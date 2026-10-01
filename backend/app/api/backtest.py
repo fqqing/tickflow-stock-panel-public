@@ -4,16 +4,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.market_time import CN_TZ
 from app.markets import MARKET_CN, stamp_tax_double_sided, stamp_tax_for
 from app.services.backtest import (
     BacktestConfig,
@@ -76,6 +78,40 @@ def _guard_server_backtest_range(start: date, end: date):
 def status():
     """前端可用此接口判断回测页是否要灰显。"""
     return {"available": True}
+
+
+@router.get("/trades/by-symbol")
+def last_trades_by_symbol(
+    symbol: str = Query(..., description="标的代码, 如 600519.SH"),
+    limit: int = Query(200, ge=1, le=2000, description="最多返回多少笔"),
+):
+    """最近一次策略回测中该标的的买卖点, 供 K 线图叠加。
+
+    数据来源是 _finish_job 落盘的 user_data/last_backtest_trades.json
+    (覆盖写, 只保留最近一次)。文件不存在 = 还没跑过回测, 返回空列表而不是
+    报错 —— 对 K 线图来说「没有买卖点」是正常状态, 不是错误。
+
+    一笔交易拆成两个点(买入 entry_date / 卖出 exit_date), 拆的动作放在前端
+    归约层, 这里保持 trades 原样, 便于日后复用做交易明细。
+    """
+    path = settings.data_dir / "user_data" / _LAST_TRADES_FILE
+    if not path.exists():
+        return {"symbol": symbol, "strategy_id": None, "finished_at": None, "trades": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("读取最近回测交易记录失败: %s", e)
+        return {"symbol": symbol, "strategy_id": None, "finished_at": None, "trades": []}
+    trades = payload.get("trades")
+    if not isinstance(trades, list):
+        trades = []
+    mine = [t for t in trades if isinstance(t, dict) and t.get("symbol") == symbol]
+    return {
+        "symbol": symbol,
+        "strategy_id": payload.get("strategy_id"),
+        "finished_at": payload.get("finished_at"),
+        "trades": mine[:limit],
+    }
 
 
 # ================================================================
@@ -456,7 +492,65 @@ def _cleanup_stale_jobs():
             _running_jobs.pop(k, None)
 
 
-def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> None:
+_LAST_TRADES_FILE = "last_backtest_trades.json"
+#: 上限保护: 全市场回测可能有上万笔交易, 只存叠加层需要的字段, 但量太大仍会拖慢读
+_LAST_TRADES_MAX = 20000
+
+
+def _persist_last_trades(result: object, strategy_id: str | None = None) -> None:
+    """把本次回测的交易记录落盘, 供 K 线图叠加「回测买卖点」。
+
+    覆盖写而不是追加: 回测是探索性的(换个参数就重跑), 保留多份会让「图上这些
+    点来自哪次回测」无法回答, 而那正是这个叠加层唯一需要回答的问题。
+
+    三类流(strategy/optimize/walkforward)的结果结构不同, 这里只认 dict 且带
+    trades 列表的那种, 其余静默跳过 —— 落盘是附加能力, 失败不该影响回测本身。
+    """
+    if not isinstance(result, dict):
+        return
+    trades = result.get("trades")
+    if not isinstance(trades, list) or not trades:
+        return
+    slim: list[dict] = []
+    for t in trades[:_LAST_TRADES_MAX]:
+        if not isinstance(t, dict):
+            continue
+        sym = t.get("symbol")
+        entry_date, exit_date = t.get("entry_date"), t.get("exit_date")
+        if not sym or not entry_date or not exit_date:
+            continue
+        slim.append({
+            "symbol": sym,
+            "entry_date": str(entry_date)[:10],
+            "exit_date": str(exit_date)[:10],
+            "entry_price": t.get("entry_price"),
+            "exit_price": t.get("exit_price"),
+            "pnl_pct": t.get("pnl_pct"),
+            "exit_reason": t.get("exit_reason") or "",
+        })
+    if not slim:
+        return
+    payload = {
+        "finished_at": datetime.now(CN_TZ).isoformat(),
+        "strategy_id": strategy_id,
+        "n_trades": len(slim),
+        "trades": slim,
+    }
+    try:
+        out_dir = settings.data_dir / "user_data"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / _LAST_TRADES_FILE
+        tmp = out_dir / (_LAST_TRADES_FILE + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception as e:
+        logger.warning("回测交易记录落盘失败(不影响回测结果): %s", e)
+
+
+def _finish_job(
+    job: _BacktestJob, *, result=None, error: str | None = None,
+    strategy_id: str | None = None,
+) -> None:
     """Publish the terminal state and proactively drop the reconnect entry after TTL."""
     finished_at = time.time()
     with _jobs_lock:
@@ -464,6 +558,8 @@ def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> 
         job.error = error
         job.done = True
         job.finish_ts = finished_at
+    if error is None:
+        _persist_last_trades(result, strategy_id)
 
     def _expire() -> None:
         with _jobs_lock:
@@ -670,7 +766,7 @@ async def strategy_stream(
                             lambda d: job.progress.append(d),
                             job.cancel_event,
                         )
-                    _finish_job(job, result=result)
+                    _finish_job(job, result=result, strategy_id=strategy_id)
                 except HeavyJobCancelledError:
                     _finish_job(job, error="回测已取消")
                 except Exception as e:
