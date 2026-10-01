@@ -59,6 +59,20 @@ export function periodTabsFor(kernel: keyof typeof PERIOD_CAPABILITY): PeriodTab
   return KLINE_PERIOD_TABS.filter(t => (t.key === '1m' ? cap.minute1 : true))
 }
 
+/**
+ * 周期按钮的 tooltip: 说明这一档的聚合口径。
+ *
+ * ★ 原先这段文案在 StockDailyKChart 里写成「day / week / 其它」的三元表达式,
+ *   于是 6 个分钟档的 tooltip 全部显示「月K(按月聚合并重算指标)」。档位既然
+ *   已经统一到这里, 文案也一并收口 —— 新增档位不会再漏掉 tooltip。
+ */
+export function periodTabTitle(t: PeriodTab): string {
+  if (t.key === 'day') return '日K'
+  if (t.key === 'week') return '周K(按周聚合并重算指标)'
+  if (t.key === 'month') return '月K(按月聚合并重算指标)'
+  return `${t.label}K(按${t.label}聚合并重算指标)`
+}
+
 /** 分钟周期 -> klinecharts span */
 export const MINUTE_SPAN: Record<string, number> = {
   '1m': 1, '5m': 5, '15m': 15, '30m': 30, '60m': 60, '90m': 90, '120m': 120,

@@ -7,6 +7,7 @@ import { storage } from '@/lib/storage'
 import {
   ADJUST_OPTIONS,
   isMinutePeriod,
+  periodTabTitle,
   periodTabsFor,
   type KLineAdjust,
   type KLinePeriod,
@@ -158,10 +159,28 @@ function barLabel(d: unknown): string {
   return s.length > 10 ? s.slice(0, 16).replace('T', ' ') : s
 }
 
+/**
+ * 只透出 signal_* 布尔列。
+ *
+ * ★ 事件时间轴(lib/chart-timeline.ts 的 signalRowsToTimeline)靠 `signal_` 前缀
+ *   识别信号, 而 toOHLC 此前只挑固定字段 —— 于是 ECharts 内核下时间轴的「信号」
+ *   恒为 0 条(KLinePro 直接用原始行, 不受影响)。带上信号列后, 两个内核的时间轴
+ *   才是真的同源。
+ *   只带 signal_* 而不整行展开, 是为了不让 ext / symbol 等列污染下游遍历。
+ */
+function pickSignalColumns(r: KlineRow): Record<string, boolean> {
+  const out: Record<string, boolean> = {}
+  for (const [k, v] of Object.entries(r)) {
+    if (k.startsWith('signal_')) out[k] = v === true
+  }
+  return out
+}
+
 export function toOHLC(rows: KlineRow[]): OHLC[] {
   return rows
     .filter(isValidRow)
     .map(r => ({
+      ...pickSignalColumns(r),
       date: barLabel(r.date),
       open: Number(r.open),
       high: Number(r.high),
@@ -500,7 +519,7 @@ export function StockDailyKChart({
               <button
                 key={opt.key}
                 onClick={() => applyPeriod(opt.key)}
-                title={opt.key === 'day' ? '日K' : opt.key === 'week' ? '周K(按周聚合并重算指标)' : '月K(按月聚合并重算指标)'}
+                title={periodTabTitle(opt)}
                 className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
                   period === opt.key
                     ? 'bg-accent text-white'
